@@ -1,0 +1,181 @@
+# Service Examples
+
+These examples show typical service usage. They assume `identity` is an initialized `authkit.AuthKit` value and `ctx` is a request context.
+
+## Tenants
+
+```go
+tenantService := identity.TenantService()
+
+tenant, err := tenantService.CreateTenant(ctx, model.CreateTenantRequest{
+	TenantID:       "acme.com",
+	Name:           "Acme",
+	AllowedDomains: []string{"acme.com"},
+})
+if err != nil {
+	return err
+}
+
+if err := tenantService.ValidateDomainAccess(ctx, "admin@acme.com", tenant.TenantID); err != nil {
+	return err
+}
+```
+
+## Users And Passwords
+
+```go
+passwordService := identity.PasswordService()
+userService := identity.UserService()
+
+hash, err := passwordService.HashPassword("ValidPass1!")
+if err != nil {
+	return err
+}
+
+userID, err := userService.Create(ctx, model.CreateUserRequest{
+	Email:        "admin@acme.com",
+	PasswordHash: hash,
+	TenantID:     "acme.com",
+	DisplayName:  "Admin",
+	Roles:        []string{"Admin"},
+})
+if err != nil {
+	return err
+}
+
+_ = userID
+```
+
+## Login And JWT Validation
+
+```go
+authService := identity.AuthService()
+
+login, err := authService.Login(ctx, model.LoginRequest{
+	Email:    "admin@acme.com",
+	Password: "ValidPass1!",
+	TenantID: "acme.com",
+	SessionInfo: &model.SessionInfo{
+		IPAddress:  "203.0.113.10",
+		UserAgent:  "example-client",
+		DeviceName: "laptop",
+	},
+})
+if err != nil {
+	return err
+}
+
+claims, err := authService.ValidateJWT(ctx, login.AccessToken)
+if err != nil {
+	return err
+}
+
+_ = claims
+```
+
+## Refresh And Logout
+
+```go
+refreshed, err := authService.RefreshToken(ctx, model.RefreshRequest{
+	RefreshToken: login.RefreshToken,
+})
+if err != nil {
+	return err
+}
+
+if err := authService.Logout(ctx, refreshed.RefreshToken); err != nil {
+	return err
+}
+```
+
+## API Keys
+
+```go
+apiKeyService := identity.APIKeyService()
+expiresIn := "90d"
+
+created, err := apiKeyService.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
+	TenantID:  "acme.com",
+	CreatedBy: userID.String(),
+	Name:      "Production",
+	ExpiresIn: &expiresIn,
+})
+if err != nil {
+	return err
+}
+
+// Store or display created.APIKey once. It is never stored in plaintext.
+keyContext, err := apiKeyService.ValidateAPIKey(ctx, created.APIKey)
+if err != nil {
+	return err
+}
+
+_ = keyContext
+```
+
+## Invitations
+
+```go
+invitationService := identity.InvitationService()
+
+invitation, err := invitationService.CreateInvitation(
+	ctx,
+	"acme.com",
+	userID.String(),
+	[]string{"Member"},
+	"invitee@acme.com",
+	nil,
+	nil,
+)
+if err != nil {
+	return err
+}
+
+valid, err := invitationService.ValidateInvitation(ctx, invitation.Code)
+if err != nil || !valid {
+	return err
+}
+
+if err := invitationService.IncrementUseCount(ctx, invitation.Code); err != nil {
+	return err
+}
+```
+
+## OTP
+
+```go
+otpService := identity.OTPService()
+
+generated, err := otpService.Generate(ctx, "acme.com", "user@acme.com", "signup", time.Hour)
+if err != nil {
+	return err
+}
+
+// Send generated.Code through your email/SMS provider.
+if err := otpService.Validate(ctx, "acme.com", "user@acme.com", generated.Code, "signup"); err != nil {
+	return err
+}
+```
+
+## Secrets
+
+```go
+secretService := identity.SecretService()
+
+saved, err := secretService.SaveSecret(ctx, model.SaveSecretRequest{
+	TenantID:   "acme.com",
+	Key:        "openai",
+	PlainValue: "sk-live-secret",
+	CreatedBy:  userID.String(),
+})
+if err != nil {
+	return err
+}
+
+plain, err := secretService.GetSecret(ctx, saved.TenantID, saved.Key)
+if err != nil {
+	return err
+}
+
+_ = plain
+```

@@ -1,0 +1,23 @@
+name: authkit-go
+
+services:
+  postgres:
+    # postgres:16-alpine, resolved 2026-06-10
+    image: postgres@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    container_name: authkit-go-postgres
+    environment:
+      POSTGRES_DB: authkit_test
+      POSTGRES_USER: authkit_test
+      POSTGRES_PASSWORD: authkit_test
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authkit_test -d authkit_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - authkit_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  authkit_postgres_data:

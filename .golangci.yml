@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - nolintlint
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unconvert
+    - unused
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt

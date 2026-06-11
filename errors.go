@@ -1,0 +1,25 @@
+// Copyright 2026 Modgud, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+package authkit
+
+import "github.com/modgudinc/authkit-go/model"
+
+// Sentinel errors re-exported from the model package for convenience, so callers
+// can write errors.Is(err, authkit.ErrInvalidCredentials). These are the same
+// values the services return (model.Err*), so matching against either works.
+var (
+	ErrNotFound            = model.ErrNotFound
+	ErrInvalidCredentials  = model.ErrInvalidCredentials
+	ErrAccountDisabled     = model.ErrAccountDisabled
+	ErrAccountLocked       = model.ErrAccountLocked
+	ErrInvalidToken        = model.ErrInvalidToken
+	ErrTokenRevoked        = model.ErrTokenRevoked
+	ErrInvalidRefreshToken = model.ErrInvalidRefreshToken
+	ErrRefreshTokenReuse   = model.ErrRefreshTokenReuse
+	ErrInvalidOTP          = model.ErrInvalidOTP
+	ErrOTPLockedOut        = model.ErrOTPLockedOut
+	ErrInvalidAPIKey       = model.ErrInvalidAPIKey
+	ErrIncorrectPassword   = model.ErrIncorrectPassword
+	ErrInvitationInvalid   = model.ErrInvitationInvalid
+)

@@ -1,0 +1,47 @@
+// Copyright 2026 Modgud, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+package model
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type User struct {
+	ID           uuid.UUID `json:"id" db:"id"`
+	Email        string    `json:"email" db:"email"`
+	PasswordHash string    `json:"-" db:"password_hash"`
+	TenantID     string    `json:"tenant_id" db:"tenant_id"`
+	DisplayName  string    `json:"display_name" db:"display_name"`
+	Roles        []string  `json:"roles" db:"roles"`
+	TokenVersion int       `json:"-" db:"token_version"`
+
+	// Account status (enable/disable - admin control)
+	IsEnabled  bool       `json:"is_enabled" db:"is_enabled"`
+	DisabledAt *time.Time `json:"disabled_at,omitempty" db:"disabled_at"`
+
+	// Account status (lock/unlock - security control)
+	IsLocked          bool       `json:"is_locked" db:"is_locked"`
+	LockedUntil       *time.Time `json:"locked_until,omitempty" db:"locked_until"`
+	FailedLoginCount  int        `json:"failed_login_count" db:"failed_login_count"`
+	LastFailedLoginAt *time.Time `json:"last_failed_login_at,omitempty" db:"last_failed_login"`
+	LastLoginAt       *time.Time `json:"last_login_at,omitempty" db:"last_login"`
+
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+}
+
+type CreateUserRequest struct {
+	Email        string
+	PasswordHash string
+	TenantID     string
+	DisplayName  string
+	Roles        []string
+}
+
+type UpdateUserRequest struct {
+	DisplayName string
+	Roles       []string
+}

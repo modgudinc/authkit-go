@@ -1,0 +1,285 @@
+// Copyright 2026 Modgud, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+package service
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"math/big"
+	"time"
+
+	"github.com/modgudinc/authkit-go/logger"
+	"github.com/modgudinc/authkit-go/model"
+	"github.com/modgudinc/authkit-go/repository"
+)
+
+// MaxOTPValidationAttempts is the number of failed validation attempts allowed
+// per issued OTP before it is invalidated. Because OTPs are short numeric codes,
+// this lockout is what prevents online brute force; once exceeded the caller must
+// request a new code.
+const MaxOTPValidationAttempts = 5
+
+// OTPService handles OTP generation, validation, and lifecycle management
+// with rate limiting and single-use enforcement
+type OTPService struct {
+	repo              otpRepository
+	rateLimitDuration time.Duration // Minimum time between OTP generation attempts
+	logger            logger.Logger
+}
+
+type otpRepository interface {
+	GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*model.VerificationCode, error)
+	UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest) error
+	ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (model.OTPConsumeResult, error)
+	DeleteVerificationCode(ctx context.Context, tenantID, email, purpose string) error
+	DeleteExpiredVerificationCodes(ctx context.Context) (int64, error)
+}
+
+// NewOTPService creates a new OTP service instance
+func NewOTPService(repo *repository.Repository, rateLimitDuration time.Duration, logger logger.Logger) *OTPService {
+	return &OTPService{
+		repo:              repo,
+		rateLimitDuration: rateLimitDuration,
+		logger:            logger,
+	}
+}
+
+// Generate creates a new OTP or replaces an existing one (upsert behavior)
+// with rate limiting to prevent spam/abuse
+//
+// Rate Limiting:
+//   - Checks if an OTP was created within the rate limit window
+//   - Returns error if rate limit is violated
+//   - Configurable rate limit duration (default: 1 minute)
+//
+// Note: One OTP per (tenant, email, purpose) at any time; generating a new one
+// for the same key replaces it and resets its failed-attempt counter.
+//
+// Returns:
+//   - Generated 6-digit OTP code (plaintext, for email sending)
+//   - Expiration timestamp
+//   - Error if rate limit violated or database error
+func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose string, expirationDuration time.Duration) (*model.GenerateResponse, error) {
+	email = normalizeEmail(email)
+
+	// Check rate limiting: Get existing OTP to check created_at timestamp
+	// GetVerificationCode returns error if not found, which is fine for rate limiting.
+	// We only care if we successfully found an OTP that was created recently.
+	existingOTP, _ := s.repo.GetVerificationCode(ctx, tenantID, email, purpose)
+
+	// Enforce rate limiting if OTP exists and was created recently
+	if existingOTP != nil {
+		timeSinceCreation := time.Since(existingOTP.CreatedAt)
+		if timeSinceCreation < s.rateLimitDuration {
+			remainingTime := s.rateLimitDuration - timeSinceCreation
+			if s.logger != nil {
+				s.logger.Warn("OTP generation rate limit exceeded",
+					"email", email,
+					"purpose", purpose,
+					"time_since_creation", timeSinceCreation,
+					"rate_limit", s.rateLimitDuration,
+					"remaining_time", remainingTime,
+				)
+			}
+			return nil, fmt.Errorf("rate limit exceeded: please wait %v before requesting a new OTP", remainingTime.Round(time.Second))
+		}
+	}
+
+	// Generate 6-digit OTP code using crypto/rand for security
+	code, err := generateSecureOTP(6)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("failed to generate secure OTP code",
+				"email", email,
+				"purpose", purpose,
+				"error", err,
+			)
+		}
+		return nil, fmt.Errorf("failed to generate OTP: %w", err)
+	}
+
+	// Calculate expiration timestamp
+	expiresAt := time.Now().Add(expirationDuration)
+
+	// Upsert OTP to database (create or replace)
+	req := model.CreateVerificationCodeRequest{
+		TenantID:  tenantID,
+		Email:     email,
+		Code:      code,
+		Purpose:   purpose,
+		ExpiresAt: expiresAt,
+	}
+
+	err = s.repo.UpsertVerificationCode(ctx, req)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("failed to store OTP in database",
+				"email", email,
+				"purpose", purpose,
+				"error", err,
+			)
+		}
+		return nil, fmt.Errorf("failed to store OTP: %w", err)
+	}
+
+	if s.logger != nil {
+		s.logger.Info("OTP generated successfully",
+			"email", email,
+			"purpose", purpose,
+			"expires_at", expiresAt,
+			"expiration_duration", expirationDuration,
+		)
+	}
+
+	return &model.GenerateResponse{
+		Code:      code,
+		ExpiresAt: expiresAt,
+	}, nil
+}
+
+// Validate verifies an OTP code and deletes it on success (single-use enforcement)
+//
+// Validation Checks:
+//   - OTP exists for the given email
+//   - OTP has not expired
+//   - Provided code matches stored code
+//   - Purpose matches
+//
+// Single-Use Enforcement:
+//   - OTP is deleted atomically while validating it
+//   - Subsequent validation attempts with the same code will fail
+//
+// Brute-force Protection:
+//   - Each failed attempt against an issued code is counted; after
+//     MaxOTPValidationAttempts failures the code is invalidated and the caller
+//     must request a new one. This bounds online guessing of the short code.
+//
+// Note: Codes are scoped to (tenant, email, purpose).
+//
+// Returns:
+//   - nil if OTP is valid (and deletes it)
+//   - error if OTP is invalid, expired, not found, or locked out after too many attempts
+func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpose string) error {
+	email = normalizeEmail(email)
+	result, err := s.repo.ConsumeVerificationCode(ctx, tenantID, email, code, purpose, MaxOTPValidationAttempts)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("OTP validation failed",
+				"tenant_id", tenantID,
+				"email", email,
+				"purpose", purpose,
+				"error", err,
+			)
+		}
+		return fmt.Errorf("failed to validate OTP: %w", err)
+	}
+
+	switch result {
+	case model.OTPConsumeValid:
+		if s.logger != nil {
+			s.logger.Info("OTP validated successfully",
+				"tenant_id", tenantID,
+				"email", email,
+				"purpose", purpose,
+			)
+		}
+		return nil
+	case model.OTPConsumeLockedOut:
+		if s.logger != nil {
+			s.logger.Warn("OTP locked out after too many failed attempts",
+				"tenant_id", tenantID,
+				"email", email,
+				"purpose", purpose,
+			)
+		}
+		return fmt.Errorf("too many invalid attempts; request a new OTP: %w", model.ErrOTPLockedOut)
+	default: // model.OTPConsumeInvalid
+		if s.logger != nil {
+			s.logger.Warn("OTP validation failed",
+				"tenant_id", tenantID,
+				"email", email,
+				"purpose", purpose,
+			)
+		}
+		return fmt.Errorf("invalid or expired OTP: %w", model.ErrInvalidOTP)
+	}
+}
+
+// Delete explicitly revokes an OTP before it's used
+// Use cases: User cancels operation, admin revokes pending OTP
+//
+// Note: Deletes the OTP for the specific (tenant, email, purpose)
+func (s *OTPService) Delete(ctx context.Context, tenantID, email, purpose string) error {
+	email = normalizeEmail(email)
+	err := s.repo.DeleteVerificationCode(ctx, tenantID, email, purpose)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("failed to delete OTP",
+				"email", email,
+				"purpose", purpose,
+				"error", err,
+			)
+		}
+		return fmt.Errorf("failed to delete OTP: %w", err)
+	}
+
+	if s.logger != nil {
+		s.logger.Info("OTP deleted successfully",
+			"email", email,
+			"purpose", purpose,
+		)
+	}
+
+	return nil
+}
+
+// CleanupExpired removes all expired OTP codes from the database
+// Should be called periodically as a maintenance job (e.g., hourly cron)
+//
+// Returns:
+//   - Number of expired OTPs deleted
+//   - Error if database operation fails
+func (s *OTPService) CleanupExpired(ctx context.Context) (int64, error) {
+	deletedCount, err := s.repo.DeleteExpiredVerificationCodes(ctx)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("failed to cleanup expired OTPs",
+				"error", err,
+			)
+		}
+		return 0, fmt.Errorf("failed to cleanup expired OTPs: %w", err)
+	}
+
+	if s.logger != nil {
+		s.logger.Info("expired OTPs cleaned up successfully",
+			"deleted_count", deletedCount,
+		)
+	}
+
+	return deletedCount, nil
+}
+
+// generateSecureOTP generates a cryptographically secure random numeric OTP
+// Uses crypto/rand for security (not math/rand which is predictable)
+func generateSecureOTP(length int) (string, error) {
+	if length <= 0 {
+		return "", errors.New("OTP length must be positive")
+	}
+
+	// Generate random digits using crypto/rand
+	const digits = "0123456789"
+	result := make([]byte, length)
+
+	for i := range result {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(digits))))
+		if err != nil {
+			return "", fmt.Errorf("failed to generate random number: %w", err)
+		}
+		result[i] = digits[num.Int64()]
+	}
+
+	return string(result), nil
+}
