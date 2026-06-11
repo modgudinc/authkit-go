@@ -166,15 +166,21 @@ func (s *APIKeyService) ValidateAPIKey(ctx context.Context, apiKey string) (*mod
 		return nil, fmt.Errorf("API key is expired: %w", model.ErrInvalidAPIKey)
 	}
 
-	// Update last_used_at asynchronously (don't block on this). Recover from any
-	// panic so a background failure can never crash the host process.
+	// Update last_used_at asynchronously (don't block on this). The update must
+	// outlive the request, so we detach the request's cancellation with
+	// WithoutCancel (preserving its values) rather than tying it to ctx, and bound
+	// it with a timeout so it can't hang. Recover from any panic so a background
+	// failure can never crash the host process.
+	bgCtx := context.WithoutCancel(ctx)
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil && s.logger != nil {
 				s.logger.Error("panic updating API key last_used_at", "panic", rec)
 			}
 		}()
-		if err := s.repo.UpdateAPIKeyLastUsed(context.Background(), key.KeyID, key.TenantID); err != nil {
+		uctx, cancel := context.WithTimeout(bgCtx, lastUsedUpdateTimeout)
+		defer cancel()
+		if err := s.repo.UpdateAPIKeyLastUsed(uctx, key.KeyID, key.TenantID); err != nil {
 			if s.logger != nil {
 				s.logger.Error("Failed to update last_used_at",
 					"key_id", key.KeyID,

@@ -16,6 +16,10 @@ import (
 	"github.com/modgudinc/authkit-go/repository"
 )
 
+// lastUsedUpdateTimeout bounds the best-effort, fire-and-forget "last used"
+// timestamp updates so a detached goroutine can never hang on a stuck connection.
+const lastUsedUpdateTimeout = 5 * time.Second
+
 // TokenService handles both JWT and refresh token management
 // Combines JWT generation/validation with refresh token storage and rotation
 type TokenService struct {
@@ -204,15 +208,21 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 		return nil, fmt.Errorf("failed to fetch user: %w", err)
 	}
 
-	// 4. Update last_used_at asynchronously (non-blocking). Recover from any panic
-	// so a background failure can never crash the host process.
+	// 4. Update last_used_at asynchronously (non-blocking). The update must outlive
+	// the request, so we detach the request's cancellation with WithoutCancel
+	// (preserving its values, e.g. trace IDs) rather than tying it to ctx, and bound
+	// it with a timeout so it can't hang. Recover from any panic so a background
+	// failure can never crash the host process.
+	bgCtx := context.WithoutCancel(ctx)
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil && s.logger != nil {
 				s.logger.Error("panic updating refresh token last_used_at", "panic", rec)
 			}
 		}()
-		if err := s.repo.UpdateLastUsed(context.Background(), storedToken.ID); err != nil {
+		uctx, cancel := context.WithTimeout(bgCtx, lastUsedUpdateTimeout)
+		defer cancel()
+		if err := s.repo.UpdateLastUsed(uctx, storedToken.ID); err != nil {
 			if s.logger != nil {
 				s.logger.Warn("Failed to update refresh token last_used_at",
 					"token_id", storedToken.ID.String(),
