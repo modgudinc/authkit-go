@@ -795,7 +795,11 @@ func (r *Repository) CountUsersByTenant(ctx context.Context, tenantID string) (i
 
 // ============================================================================
 // UpdateRolesByTenant - Updates user roles with tenant isolation
-// Validates that the user belongs to the specified tenant before updating
+// Validates that the user belongs to the specified tenant before updating.
+// Bumps token_version so any already-issued access tokens (which embed roles in
+// their claims) are rejected by ValidateJWT; the next refresh re-reads the new
+// roles. This prevents a downgraded user from retaining elevated roles in a live
+// access token until it expires.
 // ============================================================================
 func (r *Repository) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, tenantID string, roles []string) error {
 	rolesJSON, err := json.Marshal(roles)
@@ -807,6 +811,7 @@ func (r *Repository) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, 
 		UPDATE authkit.users
 		SET
 			roles = $1,
+			token_version = token_version + 1,
 			updated_at = $2
 		WHERE id = $3 AND tenant_id = $4
 	`
@@ -865,7 +870,10 @@ func (r *Repository) EnableByTenant(ctx context.Context, userID uuid.UUID, tenan
 }
 
 // ============================================================================
-// UpdateByTenant - Updates a user's display_name and roles with tenant isolation
+// UpdateByTenant - Updates a user's display_name and roles with tenant isolation.
+// Bumps token_version so already-issued access tokens (which embed roles) are
+// rejected by ValidateJWT; the next refresh re-reads the updated roles. This
+// keeps a role change from leaving stale roles in a live access token.
 // ============================================================================
 func (r *Repository) UpdateByTenant(ctx context.Context, userID uuid.UUID, tenantID string, req model.UpdateUserRequest) error {
 	rolesJSON, err := json.Marshal(req.Roles)
@@ -875,7 +883,7 @@ func (r *Repository) UpdateByTenant(ctx context.Context, userID uuid.UUID, tenan
 
 	query := `
 		UPDATE authkit.users
-		SET display_name = $1, roles = $2, updated_at = $3
+		SET display_name = $1, roles = $2, token_version = token_version + 1, updated_at = $3
 		WHERE id = $4 AND tenant_id = $5
 	`
 	result, err := r.rw.ExecContext(ctx, r.q(query), req.DisplayName, rolesJSON, time.Now(), userID, tenantID)

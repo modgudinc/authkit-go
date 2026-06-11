@@ -98,33 +98,6 @@ func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, p
 }
 
 // ============================================================================
-// Verify - Verifies an OTP code for (tenant, email)
-// Checks that a non-expired code exists for the tenant/email and matches.
-// Note: this is a read-only existence check; it does NOT consume the code or
-// count attempts. Use ConsumeVerificationCode for the authentication path.
-// ============================================================================
-func (r *Repository) VerifyCode(ctx context.Context, tenantID, email, code string) (bool, error) {
-	query := `
-		SELECT EXISTS(
-			SELECT 1
-			FROM authkit.verification_codes
-			WHERE tenant_id = $1
-			  AND email = $2
-			  AND code = $3
-			  AND expires_at > $4
-		)
-	`
-
-	var valid bool
-	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID, email, code, time.Now()).Scan(&valid)
-	if err != nil {
-		return false, fmt.Errorf("failed to verify code: %w", err)
-	}
-
-	return valid, nil
-}
-
-// ============================================================================
 // Consume - Atomically validates and consumes a verification code.
 //
 // Within a single transaction (row locked FOR UPDATE) it:

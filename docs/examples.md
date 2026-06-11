@@ -131,14 +131,18 @@ if err != nil {
 	return err
 }
 
-valid, err := invitationService.ValidateInvitation(ctx, invitation.Code)
-if err != nil || !valid {
+// Redeem the invitation and create the user atomically (validate + consume +
+// create in one transaction). Prefer this over ValidateInvitation + IncrementUseCount,
+// which is non-atomic and can over-redeem a single-use invitation.
+passwordHash, err := identity.PasswordService().HashPassword("SecurePass1!")
+if err != nil {
 	return err
 }
-
-if err := invitationService.IncrementUseCount(ctx, invitation.Code); err != nil {
+newUserID, err := invitationService.AcceptInvitation(ctx, invitation.Code, "invitee@acme.com", "Invited User", passwordHash)
+if err != nil {
 	return err
 }
+_ = newUserID
 ```
 
 ## OTP

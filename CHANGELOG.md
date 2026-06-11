@@ -8,6 +8,36 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-11
+
+Security-hardening follow-up to 0.1.0. Includes one breaking change (removal of
+`Repository.VerifyCode`).
+
+### Removed (breaking)
+
+- `Repository.VerifyCode` — a read-only OTP check that did not consume the code,
+  count attempts, or scope by purpose, and was an auth footgun if called directly.
+  Use `ConsumeVerificationCode` (via `OTPService.Validate`) for the auth path.
+
+### Security
+
+- Role/user updates (`UpdateByTenant`, `UpdateRolesByTenant`) now bump
+  `token_version`, so a role downgrade immediately invalidates outstanding access
+  tokens (which embed roles); the next refresh re-issues correctly-scoped tokens.
+- `TokenService.ValidateRefreshToken` now rejects disabled/locked accounts,
+  matching the rotation path, so it is safe even if a consumer uses it directly.
+
+### Documentation
+
+- `AcceptInvitation` is now the documented signup path in the README and
+  `docs/examples.md`; the manual `ValidateInvitation` + `IncrementUseCount`
+  sequence is marked as a lower-level building block with a TOCTOU warning.
+
+### Tests
+
+- Integration tests for the role-update `token_version` bump and for
+  `ValidateRefreshToken` rejecting an inactive account.
+
 ## [0.1.0] - 2026-06-10
 
 First tagged release. Establishes the multi-tenant identity/auth surface
@@ -69,6 +99,9 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
   OTP operations, so casing/whitespace can't fork or hide accounts.
 - Token/API-key validation failures (untrusted input) are logged at Warn instead
   of Error to prevent log floods.
+- Fire-and-forget "last used" timestamp updates run on a cancellation-detached
+  context (`context.WithoutCancel`) with a timeout, so they survive request
+  completion without ignoring cancellation or hanging (gosec G118).
 
 ### Fixed
 
@@ -82,5 +115,6 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/modgudinc/authkit-go/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/modgudinc/authkit-go/releases/tag/v0.1.0

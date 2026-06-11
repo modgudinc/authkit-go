@@ -42,6 +42,10 @@ func (s *UserService) Create(ctx context.Context, req model.CreateUserRequest) (
 //
 // The tenantID is required and the update is scoped to it, so an admin in one
 // tenant cannot modify a user in another tenant by supplying its id (IDOR).
+// It bumps the user's token_version, so any outstanding access tokens (which
+// carry roles) are invalidated and the client must refresh to obtain tokens with
+// the updated roles. The refresh token itself remains valid (the user is not
+// logged out), so the next refresh seamlessly issues correctly-scoped tokens.
 func (s *UserService) Update(ctx context.Context, userID uuid.UUID, tenantID string, req model.UpdateUserRequest) error {
 	return s.repo.UpdateByTenant(ctx, userID, tenantID, req)
 }
@@ -227,8 +231,10 @@ func (s *UserService) CountByTenant(ctx context.Context, tenantID string) (int, 
 	return s.repo.CountUsersByTenant(ctx, tenantID)
 }
 
-// UpdateRolesByTenant updates user roles with tenant isolation
-// Used by admin APIs to ensure tenant ownership before modification
+// UpdateRolesByTenant updates user roles with tenant isolation.
+// Used by admin APIs to ensure tenant ownership before modification. It bumps the
+// user's token_version so outstanding access tokens (which carry roles) are
+// invalidated; the next refresh issues tokens with the updated roles.
 func (s *UserService) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, tenantID string, roles []string) error {
 	return s.repo.UpdateRolesByTenant(ctx, userID, tenantID, roles)
 }

@@ -778,10 +778,41 @@ fmt.Printf("Uses: %d/%d\n", invitation.CurrentUses, invitation.MaxUses)
 fmt.Printf("Expires: %s\n", invitation.ExpiresAt)
 ```
 
-### Validate Invitation
+### Accept Invitation (recommended for signup)
+
+Use `AcceptInvitation` to onboard an invited user. It validates the invitation,
+consumes one use, and creates the user **in a single transaction**, so a
+single-use invitation can never onboard more than one account (no
+validate→create→increment race or over-redemption). The new user's tenant and
+roles come from the invitation, and the supplied email must match the
+invitation's target.
 
 ```go
-// Validate invitation before signup
+passwordHash, err := identity.PasswordService().HashPassword(password)
+if err != nil {
+    return err
+}
+
+userID, err := invitationService.AcceptInvitation(ctx, invitationCode, email, displayName, passwordHash)
+if err != nil {
+    // errors.Is(err, authkit.ErrInvitationInvalid) => unknown, expired, fully used, or email mismatch
+    return fmt.Errorf("invitation signup failed: %w", err)
+}
+// userID is the new user — issue tokens, send a welcome email, etc.
+```
+
+Prefer this over composing `ValidateInvitation` + `GetInvitation` + your own user
+creation + `IncrementUseCount`: those are lower-level building blocks (below) and
+composing them yourself reintroduces a TOCTOU / over-redemption window.
+
+### Validate Invitation
+
+> **Low-level / read-only.** This only *checks* an invitation; it does not consume
+> it. For signup, use `AcceptInvitation` (above) so validation and consumption are
+> atomic. Use `ValidateInvitation` for display or pre-flight checks only.
+
+```go
+// Read-only check (e.g. to show "invitation valid" in a UI before signup)
 valid, err := invitationService.ValidateInvitation(ctx, invitationCode)
 if err != nil {
     // Invalid invitation (not found, expired, or fully used)
@@ -791,8 +822,6 @@ if err != nil {
 if !valid {
     return fmt.Errorf("invitation cannot be used")
 }
-
-// Invitation is valid - proceed with signup
 ```
 
 **Validation Checks:**
@@ -862,23 +891,27 @@ if err != nil {
 
 ### Increment Use Count
 
+> **Low-level building block.** The single UPDATE is atomic, but composing
+> `ValidateInvitation` → create user → `IncrementUseCount` yourself is **not**
+> atomic and can over-redeem a single-use invitation under concurrency. Use
+> `AcceptInvitation` for signup; reach for `IncrementUseCount` only for custom
+> redemption flows where you manage the surrounding transaction.
+
 ```go
-// After successful signup with invitation
 err := invitationService.IncrementUseCount(ctx, invitationCode)
 if err != nil {
     // Max uses exceeded or invitation not found
     log.Fatal(err)
 }
 
-// Atomic increment with database-level constraint
-// Ensures current_uses < max_uses
+// Atomic increment with database-level constraint (current_uses < max_uses)
 ```
 
 **Usage Tracking:**
-- Atomic increment (no race conditions)
-- Database constraint enforcement
+- The increment statement itself is atomic (database constraint enforced)
 - Automatic invalidation when max uses reached
-- Called after successful user signup
+- For onboarding, prefer `AcceptInvitation`, which performs validate + increment +
+  user creation in one transaction
 
 ### Cleanup Expired Invitations
 
@@ -913,51 +946,28 @@ func AdminCreateInvitation(ctx context.Context, tenantID, adminUserID, inviteeEm
     return invitation.Code, nil
 }
 
-// Step 2: User signs up with invitation
-func UserSignupWithInvitation(ctx context.Context, email, password, invitationCode string) error {
+// Step 2: User signs up with invitation (atomic — recommended)
+func UserSignupWithInvitation(ctx context.Context, email, displayName, password, invitationCode string) error {
     invitationService := identity.InvitationService()
-    authService := identity.AuthService()
     passwordService := identity.PasswordService()
 
-    // Validate invitation
-    valid, err := invitationService.ValidateInvitation(ctx, invitationCode)
-    if err != nil || !valid {
-        return fmt.Errorf("invalid invitation: %w", err)
-    }
-
-    // Get invitation details
-    invitation, err := invitationService.GetInvitation(ctx, invitationCode)
-    if err != nil {
-        return fmt.Errorf("failed to get invitation: %w", err)
-    }
-
-    // Validate email domain matches tenant
-    tenantService := identity.TenantService()
-    err = tenantService.ValidateDomainAccess(ctx, email, invitation.TenantID)
-    if err != nil {
-        return fmt.Errorf("email domain not allowed: %w", err)
-    }
-
-    // Hash password
+    // Hash the password before creating the user.
     passwordHash, err := passwordService.HashPassword(password)
     if err != nil {
         return fmt.Errorf("password hashing failed: %w", err)
     }
 
-    // Create user with roles from invitation
-    user := createUser(email, passwordHash, invitation.TenantID, invitation.Roles)
-    err = userRepo.CreateUser(ctx, user)
+    // AcceptInvitation validates the invitation, consumes one use, and creates the
+    // user in a SINGLE transaction. Tenant and roles are taken from the invitation,
+    // and the email must match the invitation's target — so a single-use invitation
+    // can never onboard more than one account and roles can't be tampered with.
+    userID, err := invitationService.AcceptInvitation(ctx, invitationCode, email, displayName, passwordHash)
     if err != nil {
-        return fmt.Errorf("user creation failed: %w", err)
+        // errors.Is(err, authkit.ErrInvitationInvalid) => unknown/expired/used/email-mismatch
+        return fmt.Errorf("invitation signup failed: %w", err)
     }
 
-    // Increment invitation use count
-    err = invitationService.IncrementUseCount(ctx, invitationCode)
-    if err != nil {
-        // Log error but don't fail signup (user already created)
-        log.Error("Failed to increment invitation use count", "error", err)
-    }
-
+    _ = userID // issue tokens, send a welcome email, etc.
     return nil
 }
 
@@ -993,7 +1003,7 @@ func AdminRevokeInvitation(ctx context.Context, invitationCode string) error {
 - **Multi-role support** (array of roles, validated by application layer)
 - **Configurable expiration** (default 7 days)
 - **Multi-use support** (default single-use, configurable)
-- **Atomic usage tracking** (database-level constraint enforcement)
+- **Atomic redemption** (`AcceptInvitation` validates, consumes, and creates the user in one transaction)
 - **Soft delete option** (revoke vs delete for audit trail)
 - **Automatic cleanup** (periodic maintenance job)
 - **Comprehensive logging** (all operations logged with masked codes)
@@ -1003,7 +1013,8 @@ func AdminRevokeInvitation(ctx context.Context, invitationCode string) error {
 - Role validation is handled by the application layer (library is app-agnostic)
 - Expiration enforcement prevents stale invitations
 - Usage limits prevent invitation sharing
-- Database constraints enforce max_uses atomically
+- `AcceptInvitation` redeems and creates the user in one transaction, preventing
+  over-redemption of single-use invitations
 - Soft delete preserves audit trail for compliance
 
 ## OTP Service (One-Time Password Verification)

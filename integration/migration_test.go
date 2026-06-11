@@ -43,6 +43,7 @@ func TestMigrationsAlignWithRepository(t *testing.T) {
 	testOTPPersistence(t, ctx, &repo, tenantID)
 	testInvitationPersistence(t, ctx, &repo, tenantID, userID)
 	testInvitationAccept(t, ctx, &repo, tenantID, userID)
+	testRoleUpdateBumpsTokenVersion(t, ctx, &repo, tenantID)
 	testSecretPersistence(t, ctx, &repo, tenantID, userID)
 }
 
@@ -469,14 +470,6 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 		t.Fatalf("upsert verification code: %v", err)
 	}
 
-	valid, err := repo.VerifyCode(ctx, tenantID, email, "123456")
-	if err != nil {
-		t.Fatalf("verify code: %v", err)
-	}
-	if !valid {
-		t.Fatal("expected verification code to be valid")
-	}
-
 	// A wrong code counts as a failed attempt but does not consume the code.
 	result, err := repo.ConsumeVerificationCode(ctx, tenantID, email, "000000", "signup", 5)
 	if err != nil {
@@ -600,6 +593,81 @@ func testInvitationAccept(t *testing.T, ctx context.Context, repo *repository.Re
 	// The single-use invitation cannot be redeemed again (no over-redemption).
 	if _, err := repo.AcceptInvitation(ctx, code, email, "Second User", "hashed-password"); err == nil {
 		t.Fatal("expected second acceptance of single-use invitation to fail")
+	}
+}
+
+func testRoleUpdateBumpsTokenVersion(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string) {
+	t.Helper()
+
+	pw := service.NewPasswordService(4, nil)
+	uid := createUserWithPassword(t, ctx, repo, tenantID, "rolecheck@"+tenantID, "ValidPass1!", pw)
+
+	before, err := repo.GetByID(ctx, uid, tenantID)
+	if err != nil {
+		t.Fatalf("get user before role update: %v", err)
+	}
+
+	if err := repo.UpdateRolesByTenant(ctx, uid, tenantID, []string{"Viewer"}); err != nil {
+		t.Fatalf("update roles: %v", err)
+	}
+
+	after, err := repo.GetByID(ctx, uid, tenantID)
+	if err != nil {
+		t.Fatalf("get user after role update: %v", err)
+	}
+	// Role updates must bump token_version so outstanding access tokens are rejected.
+	if after.TokenVersion != before.TokenVersion+1 {
+		t.Fatalf("token_version = %d, want %d (role update should bump it)", after.TokenVersion, before.TokenVersion+1)
+	}
+	if len(after.Roles) != 1 || after.Roles[0] != "Viewer" {
+		t.Fatalf("roles = %v, want [Viewer]", after.Roles)
+	}
+}
+
+func TestValidateRefreshTokenRejectsInactiveAccount(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		_ = db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	pw := service.NewPasswordService(4, nil)
+	tenantID := "refresh.test"
+	userID := createTenantAndUserWithPassword(t, ctx, &repo, tenantID, "refresh@refresh.test", "ValidPass1!", pw)
+
+	authKit := newIntegrationAuthKit(t, db)
+	login, err := authKit.AuthService().Login(ctx, model.LoginRequest{
+		Email:    "refresh@refresh.test",
+		Password: "ValidPass1!",
+		TenantID: tenantID,
+	})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	tokenService := authKit.TokenService()
+	// While active, the refresh token validates.
+	if _, err := tokenService.ValidateRefreshToken(ctx, login.RefreshToken); err != nil {
+		t.Fatalf("expected active account refresh token to validate: %v", err)
+	}
+
+	// Disable at the repository level so the refresh-token row is NOT revoked
+	// (UserService.Disable would delete it); this isolates the status gate.
+	if err := repo.Disable(ctx, userID); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+
+	_, err = tokenService.ValidateRefreshToken(ctx, login.RefreshToken)
+	if err == nil {
+		t.Fatal("expected disabled account's refresh token to be rejected")
+	}
+	if !errors.Is(err, model.ErrInvalidRefreshToken) {
+		t.Fatalf("expected ErrInvalidRefreshToken, got %v", err)
 	}
 }
 

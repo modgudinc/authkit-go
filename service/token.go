@@ -168,11 +168,16 @@ func (s *TokenService) GenerateTokenPair(
 //   - User associated with the refresh token
 //   - Error if token is invalid, expired, or not found
 //
+// It enforces the same account-status gate as the rotation path: a disabled or
+// locked account's refresh token is rejected. To rotate tokens, prefer
+// RefreshTokenPair (which also rotates and detects reuse) rather than calling
+// this and minting tokens yourself.
+//
 // Flow:
 //  1. Hash provided token with HMAC-SHA256
 //  2. Lookup token hash in database
-//  3. Check token is not expired
-//  4. Fetch user by user_id
+//  3. Fetch user by user_id
+//  4. Reject if the account is disabled or locked
 //  5. Update last_used_at asynchronously (non-blocking)
 //
 // Example:
@@ -181,7 +186,6 @@ func (s *TokenService) GenerateTokenPair(
 //	if err != nil {
 //	    return fmt.Errorf("invalid refresh token: %w", err)
 //	}
-//	// Use user for token rotation
 func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString string) (*model.User, error) {
 	if s.logger != nil {
 		s.logger.Info("Validating refresh token")
@@ -206,6 +210,19 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 			s.logger.Error("Failed to fetch user for refresh token", "error", err.Error())
 		}
 		return nil, fmt.Errorf("failed to fetch user: %w", err)
+	}
+
+	// 4. Reject disabled/locked accounts so a cut-off account cannot be treated
+	// as valid even if a consumer uses this method directly to build a session.
+	if !user.IsEnabled || isUserLocked(user) {
+		if s.logger != nil {
+			s.logger.Warn("Refresh token rejected: account is not active",
+				"user_id", user.ID.String(),
+				"is_enabled", user.IsEnabled,
+				"is_locked", user.IsLocked,
+			)
+		}
+		return nil, fmt.Errorf("account is not active: %w", model.ErrInvalidRefreshToken)
 	}
 
 	// 4. Update last_used_at asynchronously (non-blocking). The update must outlive
