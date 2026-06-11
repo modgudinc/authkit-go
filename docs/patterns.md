@@ -73,11 +73,22 @@ One common flow:
 
 1. Admin creates an invitation.
 2. User starts signup with the invited email.
-3. Application validates invitation and sends an OTP.
+3. Application validates the OTP it sent to the invited email.
 4. User submits OTP and password.
-5. Application validates OTP, hashes password, creates user, and increments invitation use count.
+5. Application validates the OTP, hashes the password, and calls
+   `InvitationService.AcceptInvitation`, which validates the invitation, consumes
+   one use, and creates the user in a single transaction.
 
-Keep user creation and invitation use count in your application transaction if you need strict all-or-nothing semantics around signup.
+Use `AcceptInvitation` for redemption — it provides atomic, all-or-nothing
+semantics, so a single-use invitation can't be over-redeemed. Composing
+`ValidateInvitation` + your own user creation + `IncrementUseCount` is non-atomic
+and can over-redeem under concurrency; those remain available only as lower-level
+building blocks.
+
+Note: `AcceptInvitation` checks the invitation's expiry, remaining uses, and that
+the email matches the invitation — it does **not** check the tenant's
+`allowed_domains`. If you require invited users to stay within the tenant's domain
+list, call `TenantService.ValidateDomainAccess` before creating the invitation.
 
 ## Cleanup Jobs
 

@@ -671,6 +671,55 @@ func TestValidateRefreshTokenRejectsInactiveAccount(t *testing.T) {
 	}
 }
 
+func TestDisableByTenantRevokesRefreshTokens(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		_ = db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	pw := service.NewPasswordService(4, nil)
+	tenantID := "disable.test"
+	userID := createTenantAndUserWithPassword(t, ctx, &repo, tenantID, "disable@disable.test", "ValidPass1!", pw)
+
+	authKit := newIntegrationAuthKit(t, db)
+	if _, err := authKit.AuthService().Login(ctx, model.LoginRequest{
+		Email:    "disable@disable.test",
+		Password: "ValidPass1!",
+		TenantID: tenantID,
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Sanity: login created an active refresh token.
+	toks, err := repo.GetByUserID(ctx, userID)
+	if err != nil {
+		t.Fatalf("get tokens: %v", err)
+	}
+	if len(toks) == 0 {
+		t.Fatal("expected an active refresh token after login")
+	}
+
+	// DisableByTenant must revoke the user's refresh tokens (parity with Disable),
+	// so a later re-enable cannot resurrect old sessions.
+	if err := authKit.UserService().DisableByTenant(ctx, userID, tenantID); err != nil {
+		t.Fatalf("disable by tenant: %v", err)
+	}
+
+	toks, err = repo.GetByUserID(ctx, userID)
+	if err != nil {
+		t.Fatalf("get tokens after disable: %v", err)
+	}
+	if len(toks) != 0 {
+		t.Fatalf("expected refresh tokens revoked after DisableByTenant, got %d", len(toks))
+	}
+}
+
 func testSecretPersistence(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID uuid.UUID) {
 	t.Helper()
 

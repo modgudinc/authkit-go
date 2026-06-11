@@ -121,16 +121,9 @@ func (s *UserService) Enable(ctx context.Context, userID uuid.UUID, tenantID str
 }
 
 // Disable disables a user account within a tenant and revokes its refresh tokens.
-//
-// Scoped by tenantID so one tenant cannot disable another tenant's user.
-// Refresh tokens are opaque random values not tied to token_version, so a status
-// change alone does not invalidate them; without revoking them here a disabled
-// account could keep minting new access tokens via the refresh flow.
+// It is an alias for DisableByTenant; both behave identically.
 func (s *UserService) Disable(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	if err := s.repo.DisableByTenant(ctx, userID, tenantID); err != nil {
-		return err
-	}
-	return s.revokeRefreshTokens(ctx, userID, "disable")
+	return s.DisableByTenant(ctx, userID, tenantID)
 }
 
 // ============================================================================
@@ -245,8 +238,16 @@ func (s *UserService) EnableByTenant(ctx context.Context, userID uuid.UUID, tena
 	return s.repo.EnableByTenant(ctx, userID, tenantID)
 }
 
-// DisableByTenant disables a user account with tenant isolation
-// Validates tenant ownership and increments token_version to invalidate all JWTs
+// DisableByTenant disables a user account with tenant isolation and revokes its
+// refresh tokens.
+//
+// repo.DisableByTenant also bumps token_version (invalidating outstanding access
+// tokens). Refresh tokens are opaque and not tied to token_version, so they are
+// deleted explicitly here — otherwise a disabled-then-re-enabled account could
+// resume old sessions from refresh tokens that were never replayed.
 func (s *UserService) DisableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	return s.repo.DisableByTenant(ctx, userID, tenantID)
+	if err := s.repo.DisableByTenant(ctx, userID, tenantID); err != nil {
+		return err
+	}
+	return s.revokeRefreshTokens(ctx, userID, "disable")
 }

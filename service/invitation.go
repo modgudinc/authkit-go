@@ -58,6 +58,10 @@ func NewInvitationService(repo *repository.Repository, logger logger.Logger) *In
 // Note: Role validation is handled at the application layer, not in this library.
 // The library is app-agnostic and accepts any role values.
 //
+// Note: This does NOT validate email against the tenant's allowed_domains; an
+// admin may invite an out-of-domain email on purpose. If you require domain
+// enforcement, call TenantService.ValidateDomainAccess before this.
+//
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
 //   - tenantID: Tenant identifier
@@ -247,6 +251,10 @@ func (s *InvitationService) ValidateInvitation(ctx context.Context, code string)
 // over-redemption). The new user's tenant and roles are taken from the
 // invitation, and the user is bound to the invitation's target email — only the
 // display name and (already-hashed) password come from the caller.
+//
+// Note: it validates expiry, remaining uses, and the email-matches-invitation,
+// but does NOT check the tenant's allowed_domains (enforce that at invitation
+// creation time if you need it).
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts

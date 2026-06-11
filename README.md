@@ -805,6 +805,13 @@ Prefer this over composing `ValidateInvitation` + `GetInvitation` + your own use
 creation + `IncrementUseCount`: those are lower-level building blocks (below) and
 composing them yourself reintroduces a TOCTOU / over-redemption window.
 
+> **Domain policy is not enforced here.** `CreateInvitation` and `AcceptInvitation`
+> do **not** check the tenant's `allowed_domains` — by design, since admins
+> legitimately invite out-of-domain users (contractors, partners). If you require
+> invited emails to stay within the tenant's domain list, call
+> `TenantService.ValidateDomainAccess(ctx, email, tenantID)` yourself before
+> `CreateInvitation` (see the flow example below).
+
 ### Validate Invitation
 
 > **Low-level / read-only.** This only *checks* an invitation; it does not consume
@@ -933,6 +940,13 @@ fmt.Printf("Deleted %d expired invitations\n", count)
 // Step 1: Admin creates invitation
 func AdminCreateInvitation(ctx context.Context, tenantID, adminUserID, inviteeEmail string) (string, error) {
     invitationService := identity.InvitationService()
+
+    // Optional: enforce the tenant's allowed_domains for invited users. The
+    // invitation methods do NOT check this themselves; omit this call if you want
+    // to allow out-of-domain invitees (contractors, partners).
+    if err := identity.TenantService().ValidateDomainAccess(ctx, inviteeEmail, tenantID); err != nil {
+        return "", fmt.Errorf("email domain not allowed for tenant: %w", err)
+    }
 
     // Create invitation with defaults (1 use, 7 days expiration)
     invitation, err := invitationService.CreateInvitation(ctx, tenantID, adminUserID, []string{"Member"}, inviteeEmail, nil, nil)

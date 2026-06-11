@@ -8,6 +8,22 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-11
+
+### Security
+
+- `UserService.DisableByTenant` now revokes the user's refresh tokens (parity with
+  `Disable`, which delegates to it), so disabling an account terminates its
+  sessions and a later re-enable cannot resurrect pre-disable refresh tokens.
+
+### Documentation
+
+- Documented that `CreateInvitation` / `AcceptInvitation` do **not** enforce the
+  tenant's `allowed_domains` (call `TenantService.ValidateDomainAccess` if you
+  need it); the README invitation flow example shows the optional domain check.
+- Updated `docs/patterns.md` to recommend the atomic `AcceptInvitation` for
+  invitation signup instead of the manual validate/create/increment sequence.
+
 ## [0.2.0] - 2026-06-11
 
 Security-hardening follow-up to 0.1.0. Includes one breaking change (removal of
@@ -115,6 +131,7 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/modgudinc/authkit-go/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/modgudinc/authkit-go/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/modgudinc/authkit-go/releases/tag/v0.1.0
