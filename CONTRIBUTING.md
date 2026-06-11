@@ -27,6 +27,11 @@ Use `make postgres-down` when you are done, or `make postgres-reset` if you need
 - Update `README.md`, `docs/`, or migration docs when configuration, schema, or setup changes.
 - Do not include secrets, private keys, or production credentials in examples or tests.
 
+## Releasing
+
+Maintainers: see [docs/RELEASING.md](docs/RELEASING.md) for the signed-release
+process (SSH tag signing, the per-release checklist, and SemVer guidance).
+
 ## Security
 
 Please do not report security vulnerabilities in public issues. Follow the process in [SECURITY.md](SECURITY.md).
