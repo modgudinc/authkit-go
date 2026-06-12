@@ -11,9 +11,9 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
-	"github.com/modgudinc/authkit-go/repository"
 )
 
 // MaxOTPValidationAttempts is the number of failed validation attempts allowed
@@ -65,10 +65,22 @@ func NewOTPService(repo *repository.Repository, rateLimitDuration time.Duration,
 func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose string, expirationDuration time.Duration) (*model.GenerateResponse, error) {
 	email = normalizeEmail(email)
 
-	// Check rate limiting: Get existing OTP to check created_at timestamp
-	// GetVerificationCode returns error if not found, which is fine for rate limiting.
-	// We only care if we successfully found an OTP that was created recently.
-	existingOTP, _ := s.repo.GetVerificationCode(ctx, tenantID, email, purpose)
+	// Check rate limiting: read the current OTP (from the primary, so replication
+	// lag cannot let a just-issued code slip past the limit) to inspect its
+	// created_at. A missing code (ErrNotFound) means none is active, which is
+	// fine; any other error is a hard failure — failing open here would silently
+	// disable the rate limit on a transient DB error.
+	existingOTP, err := s.repo.GetVerificationCode(ctx, tenantID, email, purpose)
+	if err != nil && !errors.Is(err, model.ErrNotFound) {
+		if s.logger != nil {
+			s.logger.Error("failed to read OTP for rate limiting",
+				"email", maskEmail(email),
+				"purpose", purpose,
+				"error", err,
+			)
+		}
+		return nil, fmt.Errorf("failed to check OTP rate limit: %w", err)
+	}
 
 	// Enforce rate limiting if OTP exists and was created recently
 	if existingOTP != nil {
@@ -77,14 +89,14 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 			remainingTime := s.rateLimitDuration - timeSinceCreation
 			if s.logger != nil {
 				s.logger.Warn("OTP generation rate limit exceeded",
-					"email", email,
+					"email", maskEmail(email),
 					"purpose", purpose,
 					"time_since_creation", timeSinceCreation,
 					"rate_limit", s.rateLimitDuration,
 					"remaining_time", remainingTime,
 				)
 			}
-			return nil, fmt.Errorf("rate limit exceeded: please wait %v before requesting a new OTP", remainingTime.Round(time.Second))
+			return nil, fmt.Errorf("please wait %v before requesting a new OTP: %w", remainingTime.Round(time.Second), model.ErrOTPRateLimited)
 		}
 	}
 
@@ -93,7 +105,7 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("failed to generate secure OTP code",
-				"email", email,
+				"email", maskEmail(email),
 				"purpose", purpose,
 				"error", err,
 			)
@@ -117,7 +129,7 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("failed to store OTP in database",
-				"email", email,
+				"email", maskEmail(email),
 				"purpose", purpose,
 				"error", err,
 			)
@@ -127,7 +139,7 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 
 	if s.logger != nil {
 		s.logger.Info("OTP generated successfully",
-			"email", email,
+			"email", maskEmail(email),
 			"purpose", purpose,
 			"expires_at", expiresAt,
 			"expiration_duration", expirationDuration,
@@ -169,7 +181,7 @@ func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpos
 		if s.logger != nil {
 			s.logger.Error("OTP validation failed",
 				"tenant_id", tenantID,
-				"email", email,
+				"email", maskEmail(email),
 				"purpose", purpose,
 				"error", err,
 			)
@@ -182,7 +194,7 @@ func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpos
 		if s.logger != nil {
 			s.logger.Info("OTP validated successfully",
 				"tenant_id", tenantID,
-				"email", email,
+				"email", maskEmail(email),
 				"purpose", purpose,
 			)
 		}
@@ -191,7 +203,7 @@ func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpos
 		if s.logger != nil {
 			s.logger.Warn("OTP locked out after too many failed attempts",
 				"tenant_id", tenantID,
-				"email", email,
+				"email", maskEmail(email),
 				"purpose", purpose,
 			)
 		}
@@ -200,7 +212,7 @@ func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpos
 		if s.logger != nil {
 			s.logger.Warn("OTP validation failed",
 				"tenant_id", tenantID,
-				"email", email,
+				"email", maskEmail(email),
 				"purpose", purpose,
 			)
 		}
@@ -218,7 +230,7 @@ func (s *OTPService) Delete(ctx context.Context, tenantID, email, purpose string
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("failed to delete OTP",
-				"email", email,
+				"email", maskEmail(email),
 				"purpose", purpose,
 				"error", err,
 			)
@@ -228,7 +240,7 @@ func (s *OTPService) Delete(ctx context.Context, tenantID, email, purpose string
 
 	if s.logger != nil {
 		s.logger.Info("OTP deleted successfully",
-			"email", email,
+			"email", maskEmail(email),
 			"purpose", purpose,
 		)
 	}

@@ -62,3 +62,24 @@ func TestPasswordStrengthValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestDummyVerifyRunsBcryptCompare asserts that DummyVerify lazily builds a real
+// bcrypt hash and runs a comparison against it, so the login timing-equalization
+// on the user-absent / disabled / locked paths cannot be silently dropped by a
+// future refactor.
+func TestDummyVerifyRunsBcryptCompare(t *testing.T) {
+	s := NewPasswordService(bcrypt.MinCost, nil)
+	if s.dummyHash != "" {
+		t.Fatal("dummy hash should be lazily initialized, not set at construction")
+	}
+
+	s.DummyVerify("anything")
+
+	if s.dummyHash == "" {
+		t.Fatal("expected DummyVerify to populate the dummy hash (bcrypt work ran)")
+	}
+	// The populated value must be a real bcrypt hash (a genuine compare happened).
+	if _, err := bcrypt.Cost([]byte(s.dummyHash)); err != nil {
+		t.Fatalf("dummy hash is not a valid bcrypt hash: %v", err)
+	}
+}

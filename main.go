@@ -26,9 +26,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/modgudinc/authkit-go/internal/repository"
+	"github.com/modgudinc/authkit-go/internal/service"
 	"github.com/modgudinc/authkit-go/logger"
-	"github.com/modgudinc/authkit-go/repository"
-	"github.com/modgudinc/authkit-go/service"
 )
 
 const (
@@ -73,29 +73,29 @@ type AuthKit struct {
 // required connection or secret is missing, a secret is shorter than
 // MinSecretLength, the identity schema is not a valid identifier, or the secret
 // encryption key (when provided) is not a base64-encoded 32-byte key.
-func New(config Config) (AuthKit, error) {
+func New(config Config) (*AuthKit, error) {
 	if config.DBConnection.IdentityRWDB == nil {
-		return AuthKit{}, errors.New("RW db connection for identity schema is required")
+		return nil, errors.New("RW db connection for identity schema is required")
 	}
 
 	if config.DBConnection.IdentityRODB == nil {
-		return AuthKit{}, errors.New("RO db connection for identity schema is required")
+		return nil, errors.New("RO db connection for identity schema is required")
 	}
 
 	if config.JWTConfig.AccessSecret == "" {
-		return AuthKit{}, errors.New("signing secret for access tokens is required")
+		return nil, errors.New("signing secret for access tokens is required")
 	}
 
 	if config.JWTConfig.RefreshSecret == "" {
-		return AuthKit{}, errors.New("signing secret for refresh tokens is required")
+		return nil, errors.New("signing secret for refresh tokens is required")
 	}
 
 	if config.JWTConfig.RefreshTokenHMACSecret == "" {
-		return AuthKit{}, errors.New("HMAC secret for refresh token storage hashing is required")
+		return nil, errors.New("HMAC secret for refresh token storage hashing is required")
 	}
 
 	if config.APIKeyConfig.HMACSecret == "" {
-		return AuthKit{}, errors.New("HMAC secret for API key hashing is required")
+		return nil, errors.New("HMAC secret for API key hashing is required")
 	}
 
 	// Reject weak/short secrets. A short secret silently passes the non-empty
@@ -110,7 +110,7 @@ func New(config Config) (AuthKit, error) {
 		{"API key HMAC secret", config.APIKeyConfig.HMACSecret},
 	} {
 		if len(s.value) < MinSecretLength {
-			return AuthKit{}, fmt.Errorf("%s must be at least %d bytes of high-entropy random data", s.name, MinSecretLength)
+			return nil, fmt.Errorf("%s must be at least %d bytes of high-entropy random data", s.name, MinSecretLength)
 		}
 	}
 
@@ -119,7 +119,7 @@ func New(config Config) (AuthKit, error) {
 		identitySchema = repository.DefaultIdentitySchema
 	}
 	if !repository.IsIdentifier(identitySchema) {
-		return AuthKit{}, errors.New("identity schema must be a valid PostgreSQL identifier")
+		return nil, errors.New("identity schema must be a valid PostgreSQL identifier")
 	}
 
 	accessTokenExpiry := DefaultAccessExpiry
@@ -149,15 +149,22 @@ func New(config Config) (AuthKit, error) {
 	if config.SecretConfig.EncryptionKey != "" {
 		keyBytes, err := base64.StdEncoding.DecodeString(config.SecretConfig.EncryptionKey)
 		if err != nil {
-			return AuthKit{}, errors.New("invalid secret encryption key: must be base64 encoded")
+			return nil, errors.New("invalid secret encryption key: must be base64 encoded")
 		}
 		if len(keyBytes) != 32 {
-			return AuthKit{}, errors.New("secret encryption key must be 32 bytes (256 bits)")
+			return nil, errors.New("secret encryption key must be 32 bytes (256 bits)")
 		}
 		secretEncryptionKey = keyBytes
 	}
 
-	return AuthKit{
+	// Default to a no-op logger so the library never holds a nil logger and call
+	// sites can log unconditionally (a missing nil-guard can no longer panic).
+	libLogger := config.Logger
+	if libLogger == nil {
+		libLogger = logger.NopLogger{}
+	}
+
+	return &AuthKit{
 		rwConnection: config.DBConnection.IdentityRWDB,
 		roConnection: config.DBConnection.IdentityRODB,
 
@@ -175,7 +182,7 @@ func New(config Config) (AuthKit, error) {
 		otpRateLimitDuration: otpRateLimitDuration,
 		secretEncryptionKey:  secretEncryptionKey,
 		identitySchema:       identitySchema,
-		logger:               config.Logger,
+		logger:               libLogger,
 	}, nil
 }
 

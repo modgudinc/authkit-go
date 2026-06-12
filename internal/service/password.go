@@ -86,8 +86,9 @@ func (s *PasswordService) HashPassword(password string) (string, error) {
 //   - password: plaintext password to verify
 //   - hash: bcrypt hash to compare against
 //
-// Returns nil if the password matches, error otherwise
-// Uses constant-time comparison to prevent timing attacks
+// Returns nil if the password matches, error otherwise.
+// bcrypt is a slow adaptive hash and its comparison does not short-circuit on
+// content, so verification time does not leak how much of the password matched.
 //
 // Example:
 //

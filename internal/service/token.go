@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
-	"github.com/modgudinc/authkit-go/repository"
 )
 
 // lastUsedUpdateTimeout bounds the best-effort, fire-and-forget "last used"
@@ -86,7 +86,7 @@ func (s *TokenService) GenerateTokenPair(
 	if s.logger != nil {
 		s.logger.Info("Generating token pair",
 			"user_id", user.ID.String(),
-			"email", user.Email,
+			"email", maskEmail(user.Email),
 			"tenant_id", user.TenantID,
 		)
 	}
@@ -431,6 +431,11 @@ func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString strin
 //   - userID: User UUID
 //
 // Used for "logout from all devices" functionality
+//
+// Precondition: the caller MUST have already verified that userID belongs to the
+// caller's tenant. This method scopes by user_id only and does not re-check
+// tenant membership (refresh tokens are not tenant-columned); passing a
+// caller-supplied id without that check is a cross-tenant authorization gap.
 //
 // Example:
 //

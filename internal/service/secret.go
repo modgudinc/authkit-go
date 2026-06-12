@@ -13,9 +13,9 @@ import (
 	"io"
 	"time"
 
+	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
-	"github.com/modgudinc/authkit-go/repository"
 )
 
 // SecretService handles encrypted secret management including
@@ -92,7 +92,7 @@ func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequ
 		TenantID:    secret.TenantID,
 		Key:         secret.Key,
 		MaskedValue: secret.MaskedValue,
-		CreatedBy:   secret.CreatedBy,
+		CreatedBy:   secret.CreatedBy.String(),
 		IsValid:     secret.IsValid,
 		CreatedAt:   secret.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   secret.UpdatedAt.Format(time.RFC3339),
@@ -116,7 +116,7 @@ func (s *SecretService) GetSecret(ctx context.Context, tenantID, key string) (st
 	// Get encrypted value from repository
 	encryptedValue, err := s.repo.GetEncryptedSecret(ctx, tenantID, key)
 	if err != nil {
-		return "", err
+		return "", sanitizeError(s.logger, "get secret", err)
 	}
 
 	// Decrypt the value

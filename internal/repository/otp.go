@@ -36,7 +36,7 @@ import (
 // ============================================================================
 func (r *Repository) UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest) error {
 	query := `
-		INSERT INTO authkit.verification_codes (
+		INSERT INTO {{schema}}.verification_codes (
 			tenant_id, email, code, purpose, attempts, expires_at, created_at
 		)
 		VALUES ($1, $2, $3, $4, 0, $5, $6)
@@ -66,22 +66,31 @@ func (r *Repository) UpsertVerificationCode(ctx context.Context, req model.Creat
 
 // ============================================================================
 // Get - Retrieves a verification code by (tenant, email, purpose)
-// Returns the full VerificationCode record including expiration and attempts
+// Returns the full VerificationCode record including expiration and attempts.
+//
+// Reads from the PRIMARY (rw), not a read replica: the sole caller is OTP
+// generation's rate-limit check, and reading a replica there would let
+// replication lag hide a just-issued code and bypass the limit. Returns
+// model.ErrNotFound (wrapped) when no code exists for the key.
+//
+// The plaintext code is deliberately NOT selected here — the rate-limit check
+// only needs created_at, and the code is only ever read back under a FOR UPDATE
+// row lock by ConsumeVerificationCode for the constant-time match. Keeping the
+// code out of this read narrows where the plaintext value is exposed.
 // ============================================================================
 func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*model.VerificationCode, error) {
 	query := `
-		SELECT tenant_id, email, code, purpose, attempts, expires_at, created_at
-		FROM authkit.verification_codes
+		SELECT tenant_id, email, purpose, attempts, expires_at, created_at
+		FROM {{schema}}.verification_codes
 		WHERE tenant_id = $1
 		  AND email = $2
 		  AND purpose = $3
 	`
 
 	var vc model.VerificationCode
-	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID, email, purpose).Scan(
+	err := r.rw.QueryRowContext(ctx, r.q(query), tenantID, email, purpose).Scan(
 		&vc.TenantID,
 		&vc.Email,
-		&vc.Code,
 		&vc.Purpose,
 		&vc.Attempts,
 		&vc.ExpiresAt,
@@ -125,7 +134,7 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 
 	selectQuery := `
 		SELECT code, attempts, expires_at
-		FROM authkit.verification_codes
+		FROM {{schema}}.verification_codes
 		WHERE tenant_id = $1
 		  AND email = $2
 		  AND purpose = $3
@@ -149,7 +158,7 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 	}
 
 	deleteQuery := `
-		DELETE FROM authkit.verification_codes
+		DELETE FROM {{schema}}.verification_codes
 		WHERE tenant_id = $1
 		  AND email = $2
 		  AND purpose = $3
@@ -200,7 +209,7 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 	}
 
 	updateQuery := `
-		UPDATE authkit.verification_codes
+		UPDATE {{schema}}.verification_codes
 		SET attempts = $4
 		WHERE tenant_id = $1
 		  AND email = $2
@@ -223,7 +232,7 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 // ============================================================================
 func (r *Repository) DeleteVerificationCode(ctx context.Context, tenantID, email, purpose string) error {
 	query := `
-		DELETE FROM authkit.verification_codes
+		DELETE FROM {{schema}}.verification_codes
 		WHERE tenant_id = $1
 		  AND email = $2
 		  AND purpose = $3
@@ -253,7 +262,7 @@ func (r *Repository) DeleteVerificationCode(ctx context.Context, tenantID, email
 // ============================================================================
 func (r *Repository) DeleteExpiredVerificationCodes(ctx context.Context) (int64, error) {
 	query := `
-		DELETE FROM authkit.verification_codes
+		DELETE FROM {{schema}}.verification_codes
 		WHERE expires_at <= $1
 	`
 

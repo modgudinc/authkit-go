@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
-	"github.com/modgudinc/authkit-go/repository"
 )
 
 // APIKeyService handles API key-related business logic including
@@ -84,7 +84,7 @@ func (s *APIKeyService) CreateAPIKey(ctx context.Context, req model.CreateAPIKey
 	}
 
 	// Create API key in database
-	err = s.repo.CreateAPIKey(ctx, model.InsertAPIKeyParams{
+	err = s.repo.CreateAPIKey(ctx, repository.InsertAPIKeyParams{
 		KeyID:     keyID.String(),
 		KeyHash:   keyHash,
 		TenantID:  req.TenantID,
@@ -205,7 +205,8 @@ func (s *APIKeyService) ValidateAPIKey(ctx context.Context, apiKey string) (*mod
 //
 // Returns a list of API keys (without key_hash or plaintext key) or error
 func (s *APIKeyService) ListAPIKeys(ctx context.Context, tenantID string, includeExpired bool) ([]*model.APIKey, error) {
-	return s.repo.ListAPIKeys(ctx, tenantID, includeExpired)
+	keys, err := s.repo.ListAPIKeys(ctx, tenantID, includeExpired)
+	return keys, sanitizeError(s.logger, "list api keys", err)
 }
 
 // GetAPIKey retrieves a specific API key by key_id within a tenant
@@ -218,7 +219,8 @@ func (s *APIKeyService) ListAPIKeys(ctx context.Context, tenantID string, includ
 //
 // Returns the API key metadata (without plaintext key) or error
 func (s *APIKeyService) GetAPIKey(ctx context.Context, keyID, tenantID string) (*model.APIKey, error) {
-	return s.repo.GetAPIKey(ctx, keyID, tenantID)
+	key, err := s.repo.GetAPIKey(ctx, keyID, tenantID)
+	return key, sanitizeError(s.logger, "get api key", err)
 }
 
 // RevokeAPIKey revokes (deletes) an API key within a tenant
@@ -237,7 +239,7 @@ func (s *APIKeyService) RevokeAPIKey(ctx context.Context, keyID, tenantID string
 
 	err := s.repo.DeleteAPIKey(ctx, keyID, tenantID)
 	if err != nil {
-		return err
+		return sanitizeError(s.logger, "revoke api key", err)
 	}
 
 	if s.logger != nil {
@@ -249,7 +251,8 @@ func (s *APIKeyService) RevokeAPIKey(ctx context.Context, keyID, tenantID string
 
 // CountByTenant returns the count of active (non-expired) API keys for a tenant
 func (s *APIKeyService) CountByTenant(ctx context.Context, tenantID string) (int, error) {
-	return s.repo.CountAPIKeysByTenant(ctx, tenantID)
+	n, err := s.repo.CountAPIKeysByTenant(ctx, tenantID)
+	return n, sanitizeError(s.logger, "count api keys", err)
 }
 
 // CleanupExpiredKeys removes expired API keys from the database
@@ -263,7 +266,7 @@ func (s *APIKeyService) CleanupExpiredKeys(ctx context.Context) (int64, error) {
 
 	count, err := s.repo.DeleteExpiredAPIKeys(ctx)
 	if err != nil {
-		return 0, err
+		return 0, sanitizeError(s.logger, "cleanup expired api keys", err)
 	}
 
 	if s.logger != nil {

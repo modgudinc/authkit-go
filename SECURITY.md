@@ -11,14 +11,20 @@ security issue.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-| < 0.1   | :x:                |
+| 0.3.x   | :white_check_mark: |
+| < 0.3   | :x:                |
 
 ## Reporting
 
-Use GitHub private vulnerability reporting for this repository when available. If
-private reporting is not enabled, open a minimal public issue asking for a
-maintainer security contact, but do not include vulnerability details.
+Report security issues **privately** through one of these channels — please do
+not open a public issue for a vulnerability:
+
+- **GitHub Private Vulnerability Reporting** (preferred): on this repository, go
+  to the **Security** tab and click **"Report a vulnerability"**.
+- **Email**: security@modgudinc.com.
+
+You will get an acknowledgement, and we will coordinate a fix and disclosure
+timeline with you.
 
 Include:
 
@@ -50,7 +56,10 @@ Best practices:
   and runtime set.
 - Treat logs, panic traces, metrics labels, and error reports as hostile surfaces;
   never include plaintext API keys, refresh tokens, OTPs, passwords, or provider
-  secrets.
+  secrets. Minimize PII too: authkit's own logs mask email addresses (e.g.
+  `u***@acme.com`) and avoid logging an attacker-controlled lookup error alongside
+  the email, so the auth logs are not an account-enumeration list. Keep this
+  property when adding log lines, and apply the same care in your application logs.
 
 Recommended minimum entropy:
 

@@ -19,7 +19,10 @@ var (
 	ErrRefreshTokenReuse   = model.ErrRefreshTokenReuse
 	ErrInvalidOTP          = model.ErrInvalidOTP
 	ErrOTPLockedOut        = model.ErrOTPLockedOut
+	ErrOTPRateLimited      = model.ErrOTPRateLimited
 	ErrInvalidAPIKey       = model.ErrInvalidAPIKey
 	ErrIncorrectPassword   = model.ErrIncorrectPassword
 	ErrInvitationInvalid   = model.ErrInvitationInvalid
+	ErrUserExists          = model.ErrUserExists
+	ErrInternal            = model.ErrInternal
 )

@@ -11,12 +11,12 @@ import (
 func TestRepositoryQualifiesConfiguredSchema(t *testing.T) {
 	repo := NewWithSchema(nil, nil, "custom_identity")
 
-	query := repo.q("SELECT * FROM authkit.users WHERE id = $1")
+	query := repo.q("SELECT * FROM {{schema}}.users WHERE id = $1")
 	if !strings.Contains(query, `"custom_identity".users`) {
 		t.Fatalf("expected configured schema in query, got %q", query)
 	}
-	if strings.Contains(query, "authkit.users") {
-		t.Fatalf("expected default schema to be replaced, got %q", query)
+	if strings.Contains(query, "{{schema}}") {
+		t.Fatalf("expected schema placeholder to be replaced, got %q", query)
 	}
 }
 

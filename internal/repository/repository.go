@@ -13,6 +13,13 @@ import (
 
 const DefaultIdentitySchema = "authkit"
 
+// schemaPlaceholder is the token embedded in query strings where the configured
+// identity schema should be substituted. q() replaces it (with the quoted schema
+// name) at call time. "{{...}}" is not valid SQL, so it can never collide with a
+// real identifier, comment, or string literal — unlike a bare "authkit." prefix,
+// which would silently rewrite any such substring that happened to appear.
+const schemaPlaceholder = "{{schema}}"
+
 type Repository struct {
 	rw           *sql.DB
 	ro           *sql.DB
@@ -40,7 +47,7 @@ func NewWithSchema(rw *sql.DB, ro *sql.DB, schema string) Repository {
 }
 
 func (r *Repository) q(query string) string {
-	return strings.ReplaceAll(query, DefaultIdentitySchema+".", r.schemaPrefix)
+	return strings.ReplaceAll(query, schemaPlaceholder+".", r.schemaPrefix)
 }
 
 func IsIdentifier(value string) bool {

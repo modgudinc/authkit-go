@@ -31,7 +31,10 @@ func (f *fakeOTPRepository) matches(tenantID, email, purpose string) bool {
 
 func (f *fakeOTPRepository) GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*model.VerificationCode, error) {
 	if !f.matches(tenantID, email, purpose) {
-		return nil, errors.New("not found")
+		// Mirror the real repository: not-found is reported as model.ErrNotFound
+		// (the rate-limit check treats only ErrNotFound as "no active code" and
+		// any other error as a hard failure).
+		return nil, model.ErrNotFound
 	}
 	return f.code, nil
 }
@@ -204,8 +207,8 @@ func TestOTPGenerateRateLimitWithNilLogger(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected rate limit error")
 	}
-	if !strings.Contains(err.Error(), "rate limit exceeded") {
-		t.Fatalf("expected rate limit error, got %v", err)
+	if !errors.Is(err, model.ErrOTPRateLimited) {
+		t.Fatalf("expected ErrOTPRateLimited, got %v", err)
 	}
 }
 
@@ -244,5 +247,25 @@ func TestOTPGenerateAndCleanup(t *testing.T) {
 func TestGenerateSecureOTPRejectsInvalidLength(t *testing.T) {
 	if _, err := generateSecureOTP(0); err == nil {
 		t.Fatal("expected invalid OTP length to fail")
+	}
+}
+
+func TestOTPValidateRejectsExpiredCode(t *testing.T) {
+	repo := &fakeOTPRepository{
+		code: &model.VerificationCode{
+			TenantID:  testTenantID,
+			Email:     "user@example.com",
+			Code:      "123456",
+			Purpose:   "signup",
+			ExpiresAt: time.Now().Add(-time.Minute),
+			CreatedAt: time.Now().Add(-2 * time.Minute),
+		},
+	}
+	service := &OTPService{repo: repo, rateLimitDuration: time.Minute}
+
+	// Even with the correct code, an expired OTP surfaces ErrInvalidOTP.
+	err := service.Validate(context.Background(), testTenantID, "user@example.com", "123456", "signup")
+	if !errors.Is(err, model.ErrInvalidOTP) {
+		t.Fatalf("expected ErrInvalidOTP for expired code, got %v", err)
 	}
 }

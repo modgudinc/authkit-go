@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
-	"github.com/modgudinc/authkit-go/repository"
 )
 
 // UserService handles user-related business logic
@@ -65,7 +65,8 @@ func (s *UserService) Delete(ctx context.Context, userID uuid.UUID, tenantID str
 
 // GetByID retrieves a user by ID within a specific tenant
 func (s *UserService) GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
-	return s.repo.GetByID(ctx, userID, tenantID)
+	u, err := s.repo.GetByID(ctx, userID, tenantID)
+	return u, sanitizeError(s.logger, "get user by id", err)
 }
 
 // GetByIDOnly retrieves a user by ID without tenant scoping
@@ -76,7 +77,8 @@ func (s *UserService) GetByIDOnly(ctx context.Context, userID uuid.UUID) (*model
 
 // GetByEmail retrieves a user by email within a specific tenant
 func (s *UserService) GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error) {
-	return s.repo.GetByEmail(ctx, normalizeEmail(email), tenantID)
+	u, err := s.repo.GetByEmail(ctx, normalizeEmail(email), tenantID)
+	return u, sanitizeError(s.logger, "get user by email", err)
 }
 
 // Exists checks if a user exists within a specific tenant
@@ -86,7 +88,8 @@ func (s *UserService) Exists(ctx context.Context, email, tenantID string) (bool,
 
 // List retrieves users within a specific tenant with pagination
 func (s *UserService) List(ctx context.Context, tenantID string, limit, offset int) ([]*model.User, error) {
-	return s.repo.List(ctx, tenantID, limit, offset)
+	users, err := s.repo.List(ctx, tenantID, limit, offset)
+	return users, sanitizeError(s.logger, "list users", err)
 }
 
 // ============================================================================

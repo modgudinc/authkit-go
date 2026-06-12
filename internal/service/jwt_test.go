@@ -5,6 +5,7 @@ package service
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -179,5 +180,39 @@ func TestJWTServiceRejectsMalformedToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid token") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestJWTServiceWrapsInvalidTokenSentinel verifies ValidateAccessToken returns
+// errors that satisfy errors.Is(err, model.ErrInvalidToken) across its failure
+// modes, so a consumer using the JWT service directly can branch on the sentinel
+// the same way it can with AuthService.ValidateJWT.
+func TestJWTServiceWrapsInvalidTokenSentinel(t *testing.T) {
+	valid := NewJWTService("access-secret", "refresh-secret", time.Minute, time.Hour, nil)
+	user := &model.User{ID: uuid.Must(uuid.NewV7()), Email: "u@x.com", TenantID: "t"}
+
+	// Malformed token.
+	if _, err := valid.ValidateAccessToken("not-a-jwt"); !errors.Is(err, model.ErrInvalidToken) {
+		t.Fatalf("malformed: expected ErrInvalidToken, got %v", err)
+	}
+
+	// Token signed with a different secret.
+	token, err := valid.GenerateAccessToken(user)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	wrong := NewJWTService("other-secret", "refresh-secret", time.Minute, time.Hour, nil)
+	if _, err := wrong.ValidateAccessToken(token); !errors.Is(err, model.ErrInvalidToken) {
+		t.Fatalf("wrong secret: expected ErrInvalidToken, got %v", err)
+	}
+
+	// Expired token.
+	expiredSvc := NewJWTService("access-secret", "refresh-secret", -time.Minute, time.Hour, nil)
+	expired, err := expiredSvc.GenerateAccessToken(user)
+	if err != nil {
+		t.Fatalf("generate expired token: %v", err)
+	}
+	if _, err := valid.ValidateAccessToken(expired); !errors.Is(err, model.ErrInvalidToken) {
+		t.Fatalf("expired: expected ErrInvalidToken, got %v", err)
 	}
 }

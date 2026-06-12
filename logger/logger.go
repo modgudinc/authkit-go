@@ -15,6 +15,10 @@ package logger
 //	    logger *zap.Logger
 //	}
 //
+//	func (z *ZapLogger) Debug(msg string, fields ...interface{}) {
+//	    z.logger.Sugar().Debugw(msg, fields...)
+//	}
+//
 //	func (z *ZapLogger) Info(msg string, fields ...interface{}) {
 //	    z.logger.Sugar().Infow(msg, fields...)
 //	}
@@ -27,6 +31,11 @@ package logger
 //	    z.logger.Sugar().Warnw(msg, fields...)
 //	}
 type Logger interface {
+	// Debug logs verbose diagnostic messages with optional key-value fields.
+	// Use it for high-volume or lower-sensitivity detail that should be
+	// suppressible in production.
+	Debug(msg string, fields ...interface{})
+
 	// Info logs informational messages with optional key-value fields
 	Info(msg string, fields ...interface{})
 

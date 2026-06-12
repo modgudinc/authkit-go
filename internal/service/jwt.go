@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
 )
@@ -106,7 +107,7 @@ func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
 	if s.logger != nil {
 		s.logger.Info("Generating access token",
 			"user_id", user.ID.String(),
-			"email", user.Email,
+			"email", maskEmail(user.Email),
 			"tenant_id", user.TenantID,
 		)
 	}
@@ -121,6 +122,7 @@ func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
 		Roles:        user.Roles,
 		TokenVersion: user.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.Must(uuid.NewV7()).String(), // jti: unique per token, for log correlation / future denylist
 			Subject:   user.ID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
@@ -201,7 +203,10 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 		if s.logger != nil {
 			s.logger.Warn("Failed to parse JWT token", "error", err.Error())
 		}
-		return nil, fmt.Errorf("invalid token: %w", err)
+		// Wrap the sentinel (not the raw jwt-lib error) so callers using this
+		// service directly can errors.Is(err, authkit.ErrInvalidToken), matching
+		// AuthService.ValidateJWT. The underlying cause is already logged above.
+		return nil, fmt.Errorf("invalid token: %w", model.ErrInvalidToken)
 	}
 
 	claims, ok := token.Claims.(*model.JWTClaims)
@@ -209,7 +214,7 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 		if s.logger != nil {
 			s.logger.Warn("Invalid JWT claims or token")
 		}
-		return nil, fmt.Errorf("invalid token claims")
+		return nil, fmt.Errorf("invalid token claims: %w", model.ErrInvalidToken)
 	}
 
 	if s.logger != nil {

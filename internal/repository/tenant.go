@@ -33,7 +33,7 @@ import (
 // ============================================================================
 func (r *Repository) CreateTenant(ctx context.Context, req model.CreateTenantRequest) error {
 	query := `
-		INSERT INTO authkit.tenants (
+		INSERT INTO {{schema}}.tenants (
 			tenant_id, name, allowed_domains, created_at, updated_at
 		)
 		VALUES ($1, $2, $3, NOW(), NOW())
@@ -58,7 +58,7 @@ func (r *Repository) GetTenant(ctx context.Context, tenantID string) (*model.Ten
 	query := `
 		SELECT tenant_id, name, allowed_domains,
 		       COALESCE(settings::text, '{}'), created_at, updated_at
-		FROM authkit.tenants
+		FROM {{schema}}.tenants
 		WHERE tenant_id = $1
 	`
 
@@ -90,7 +90,7 @@ func (r *Repository) GetTenantByDomain(ctx context.Context, domain string) (*mod
 	query := `
 		SELECT tenant_id, name, allowed_domains,
 		       COALESCE(settings::text, '{}'), created_at, updated_at
-		FROM authkit.tenants
+		FROM {{schema}}.tenants
 		WHERE $1 = ANY(allowed_domains)
 		LIMIT 1
 	`
@@ -119,7 +119,7 @@ func (r *Repository) GetTenantByDomain(ctx context.Context, domain string) (*mod
 // TenantExists - Checks if a tenant exists by tenant_id
 // ============================================================================
 func (r *Repository) TenantExists(ctx context.Context, tenantID string) (bool, error) {
-	query := `SELECT EXISTS(SELECT 1 FROM authkit.tenants WHERE tenant_id = $1)`
+	query := `SELECT EXISTS(SELECT 1 FROM {{schema}}.tenants WHERE tenant_id = $1)`
 
 	var exists bool
 	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID).Scan(&exists)
@@ -138,7 +138,7 @@ func (r *Repository) ListAllTenants(ctx context.Context) ([]*model.Tenant, error
 	query := `
 		SELECT tenant_id, name, allowed_domains,
 		       COALESCE(settings::text, '{}'), created_at, updated_at
-		FROM authkit.tenants
+		FROM {{schema}}.tenants
 		ORDER BY created_at DESC
 	`
 
@@ -182,7 +182,7 @@ func (r *Repository) ListAllTenants(ctx context.Context) ([]*model.Tenant, error
 // ============================================================================
 func (r *Repository) AddAllowedDomain(ctx context.Context, tenantID, domain string) error {
 	query := `
-		UPDATE authkit.tenants
+		UPDATE {{schema}}.tenants
 		SET allowed_domains = array_append(allowed_domains, $2),
 		    updated_at = NOW()
 		WHERE tenant_id = $1
@@ -211,7 +211,7 @@ func (r *Repository) AddAllowedDomain(ctx context.Context, tenantID, domain stri
 // ============================================================================
 func (r *Repository) UpdateName(ctx context.Context, tenantID, name string) error {
 	query := `
-		UPDATE authkit.tenants
+		UPDATE {{schema}}.tenants
 		SET name = $2,
 		    updated_at = NOW()
 		WHERE tenant_id = $1
@@ -239,7 +239,7 @@ func (r *Repository) UpdateName(ctx context.Context, tenantID, name string) erro
 // ============================================================================
 func (r *Repository) SetAllowedDomains(ctx context.Context, tenantID string, domains []string) error {
 	query := `
-		UPDATE authkit.tenants
+		UPDATE {{schema}}.tenants
 		SET allowed_domains = $2,
 		    updated_at = NOW()
 		WHERE tenant_id = $1
@@ -268,7 +268,7 @@ func (r *Repository) SetAllowedDomains(ctx context.Context, tenantID string, dom
 // ============================================================================
 func (r *Repository) UpdateSettings(ctx context.Context, tenantID, settingsJSON string) error {
 	query := `
-		UPDATE authkit.tenants
+		UPDATE {{schema}}.tenants
 		SET settings = $2::jsonb,
 		    updated_at = NOW()
 		WHERE tenant_id = $1

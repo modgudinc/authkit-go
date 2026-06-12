@@ -52,6 +52,10 @@ var (
 	// failed validation attempts and has been invalidated.
 	ErrOTPLockedOut = errors.New("authkit: too many invalid OTP attempts")
 
+	// ErrOTPRateLimited is returned by OTP generation when a new code is requested
+	// before the per-(tenant, email, purpose) rate-limit window has elapsed.
+	ErrOTPRateLimited = errors.New("authkit: OTP rate limit exceeded")
+
 	// ErrInvalidAPIKey is returned when an API key is malformed, unknown, or expired.
 	ErrInvalidAPIKey = errors.New("authkit: invalid API key")
 
@@ -62,4 +66,14 @@ var (
 	// ErrInvitationInvalid is returned when an invitation code is unknown, expired,
 	// or has no remaining uses.
 	ErrInvitationInvalid = errors.New("authkit: invitation is invalid or expired")
+
+	// ErrUserExists is returned (wrapped) when creating a user that already exists
+	// for the tenant — i.e. a (tenant_id, email) uniqueness conflict, including
+	// when accepting an invitation for an email that already has an account.
+	ErrUserExists = errors.New("authkit: user already exists")
+
+	// ErrInternal is returned (wrapped) when an unexpected internal/storage error
+	// occurs. The underlying cause is logged server-side; callers receive this
+	// generic error so driver/schema details do not leak across the API boundary.
+	ErrInternal = errors.New("authkit: internal error")
 )

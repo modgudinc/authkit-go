@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -29,10 +30,11 @@ import (
 // ============================================================================
 func (r *Repository) SaveSecret(
 	ctx context.Context,
-	tenantID, key, encryptedValue, maskedValue, createdBy string,
+	tenantID, key, encryptedValue, maskedValue string,
+	createdBy uuid.UUID,
 ) (*model.Secret, error) {
 	query := `
-		INSERT INTO authkit.provider_keys
+		INSERT INTO {{schema}}.provider_keys
 			(tenant_id, provider, encrypted_key, masked_key, created_by, is_valid)
 		VALUES ($1, $2, $3, $4, $5, true)
 		ON CONFLICT (tenant_id, provider)
@@ -76,7 +78,7 @@ func (r *Repository) SaveSecret(
 func (r *Repository) ListSecrets(ctx context.Context, tenantID string) ([]*model.Secret, error) {
 	query := `
 		SELECT tenant_id, provider, masked_key, created_by, last_verified_at, is_valid, created_at, updated_at
-		FROM authkit.provider_keys
+		FROM {{schema}}.provider_keys
 		WHERE tenant_id = $1
 		ORDER BY provider ASC
 	`
@@ -133,7 +135,7 @@ func (r *Repository) ListSecrets(ctx context.Context, tenantID string) ([]*model
 func (r *Repository) GetEncryptedSecret(ctx context.Context, tenantID, key string) (string, error) {
 	query := `
 		SELECT encrypted_key
-		FROM authkit.provider_keys
+		FROM {{schema}}.provider_keys
 		WHERE tenant_id = $1 AND provider = $2
 	`
 
@@ -155,7 +157,7 @@ func (r *Repository) GetEncryptedSecret(ctx context.Context, tenantID, key strin
 // ============================================================================
 func (r *Repository) DeleteSecret(ctx context.Context, tenantID, key string) error {
 	query := `
-		DELETE FROM authkit.provider_keys
+		DELETE FROM {{schema}}.provider_keys
 		WHERE tenant_id = $1 AND provider = $2
 	`
 
@@ -182,7 +184,7 @@ func (r *Repository) DeleteSecret(ctx context.Context, tenantID, key string) err
 func (r *Repository) CountSecretsByTenant(ctx context.Context, tenantID string) (int, error) {
 	query := `
 		SELECT COUNT(*)
-		FROM authkit.provider_keys
+		FROM {{schema}}.provider_keys
 		WHERE tenant_id = $1
 	`
 
@@ -202,7 +204,7 @@ func (r *Repository) CountSecretsByTenant(ctx context.Context, tenantID string) 
 // ============================================================================
 func (r *Repository) UpdateSecretVerified(ctx context.Context, tenantID, key string) error {
 	query := `
-		UPDATE authkit.provider_keys
+		UPDATE {{schema}}.provider_keys
 		SET last_verified_at = NOW(), is_valid = true
 		WHERE tenant_id = $1 AND provider = $2
 	`

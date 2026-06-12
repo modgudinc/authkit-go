@@ -12,6 +12,9 @@ package logger
 // only a convenience for callers that prefer a non-nil value.
 type NopLogger struct{}
 
+// Debug implements Logger and discards the record.
+func (NopLogger) Debug(msg string, fields ...interface{}) {}
+
 // Info implements Logger and discards the record.
 func (NopLogger) Info(msg string, fields ...interface{}) {}
 

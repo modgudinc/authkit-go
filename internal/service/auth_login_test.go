@@ -65,6 +65,26 @@ func (f *fakeAuthRepository) IncrementFailedLoginCount(ctx context.Context, user
 	return nil
 }
 
+func (f *fakeAuthRepository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error) {
+	count := 0
+	if f.user != nil {
+		f.user.FailedLoginCount++
+		count = f.user.FailedLoginCount
+	}
+	locked := maxAttempts > 0 && count >= maxAttempts
+	if locked {
+		f.lockCalled = true
+		until := time.Now().Add(lockDuration)
+		f.lockedUntilPassed = &until
+		if f.user != nil {
+			f.user.IsLocked = true
+		}
+	} else {
+		f.incFailedCalled++
+	}
+	return count, locked, nil
+}
+
 func (f *fakeAuthRepository) UpdateLastLogin(ctx context.Context, userID uuid.UUID) error {
 	f.updateLastLogin++
 	return nil

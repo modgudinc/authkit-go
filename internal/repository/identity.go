@@ -12,6 +12,7 @@ import (
 	"time"
 
 	uuid "github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -63,7 +64,7 @@ func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (
 	}
 
 	query := `
-		INSERT INTO authkit.users (
+		INSERT INTO {{schema}}.users (
 			id, email, password_hash, tenant_id, display_name, roles, token_version,
 			is_enabled, is_locked, failed_login_count,
 			created_at, updated_at
@@ -86,6 +87,13 @@ func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (
 		now,   // updated_at
 	)
 	if err != nil {
+		// A (tenant_id, email) uniqueness conflict means an account already
+		// exists for this email; surface a clean sentinel instead of the raw
+		// driver/constraint string so callers can errors.Is it.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && string(pqErr.Code) == uniqueViolation {
+			return uuid.Nil, fmt.Errorf("user already exists for this tenant: %w", model.ErrUserExists)
+		}
 		return uuid.Nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
@@ -103,7 +111,7 @@ func (r *Repository) Update(ctx context.Context, userID uuid.UUID, req model.Upd
 	}
 
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			display_name = $1,
 			roles = $2,
@@ -140,7 +148,7 @@ func (r *Repository) Update(ctx context.Context, userID uuid.UUID, req model.Upd
 // ============================================================================
 func (r *Repository) SetPassword(ctx context.Context, userID uuid.UUID, hashedPassword string) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			password_hash = $1,
 			updated_at = $2
@@ -176,7 +184,7 @@ func (r *Repository) SetPassword(ctx context.Context, userID uuid.UUID, hashedPa
 func (r *Repository) VerifyPassword(ctx context.Context, userID uuid.UUID) (string, error) {
 	query := `
 		SELECT password_hash
-		FROM authkit.users
+		FROM {{schema}}.users
 		WHERE id = $1
 	`
 
@@ -198,7 +206,7 @@ func (r *Repository) VerifyPassword(ctx context.Context, userID uuid.UUID) (stri
 // ============================================================================
 func (r *Repository) Delete(ctx context.Context, userID uuid.UUID) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			is_enabled = false,
 			disabled_at = $1,
@@ -234,7 +242,7 @@ func (r *Repository) GetByID(ctx context.Context, userID uuid.UUID, tenantID str
 			id, email, password_hash, tenant_id, display_name, roles, token_version,
 			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
 			created_at, updated_at
-		FROM authkit.users
+		FROM {{schema}}.users
 		WHERE id = $1 AND tenant_id = $2
 	`
 
@@ -291,7 +299,7 @@ func (r *Repository) GetByIDOnly(ctx context.Context, userID uuid.UUID) (*model.
 			id, email, password_hash, tenant_id, display_name, roles, token_version,
 			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
 			created_at, updated_at
-		FROM authkit.users
+		FROM {{schema}}.users
 		WHERE id = $1
 	`
 
@@ -348,7 +356,7 @@ func (r *Repository) GetByEmail(ctx context.Context, email string, tenantID stri
 			id, email, password_hash, tenant_id, display_name, roles, token_version,
 			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
 			created_at, updated_at
-		FROM authkit.users
+		FROM {{schema}}.users
 		WHERE email = $1 AND tenant_id = $2
 	`
 
@@ -403,7 +411,7 @@ func (r *Repository) Exists(ctx context.Context, email string, tenantID string) 
 	query := `
 		SELECT EXISTS(
 			SELECT 1
-			FROM authkit.users
+			FROM {{schema}}.users
 			WHERE email = $1 AND tenant_id = $2
 		)
 	`
@@ -428,7 +436,7 @@ func (r *Repository) List(ctx context.Context, tenantID string, limit, offset in
 			id, email, password_hash, tenant_id, display_name, roles, token_version,
 			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
 			created_at, updated_at
-		FROM authkit.users
+		FROM {{schema}}.users
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3
@@ -498,7 +506,7 @@ func (r *Repository) List(ctx context.Context, tenantID string, limit, offset in
 // ============================================================================
 func (r *Repository) IncrementTokenVersion(ctx context.Context, userID uuid.UUID) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			token_version = token_version + 1,
 			updated_at = $1
@@ -528,7 +536,7 @@ func (r *Repository) IncrementTokenVersion(ctx context.Context, userID uuid.UUID
 // ============================================================================
 func (r *Repository) Enable(ctx context.Context, userID uuid.UUID) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			is_enabled = true,
 			disabled_at = NULL,
@@ -560,7 +568,7 @@ func (r *Repository) Enable(ctx context.Context, userID uuid.UUID) error {
 // ============================================================================
 func (r *Repository) Disable(ctx context.Context, userID uuid.UUID) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			is_enabled = false,
 			disabled_at = $1,
@@ -592,7 +600,7 @@ func (r *Repository) Disable(ctx context.Context, userID uuid.UUID) error {
 // ============================================================================
 func (r *Repository) IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			failed_login_count = failed_login_count + 1,
 			last_failed_login = $1,
@@ -618,6 +626,44 @@ func (r *Repository) IncrementFailedLoginCount(ctx context.Context, userID uuid.
 }
 
 // ============================================================================
+// RegisterFailedLogin - Atomically records a failed login attempt and, if the
+// post-increment count reaches maxAttempts, locks the account — all in a single
+// UPDATE ... RETURNING. This makes the lockout decision against the authoritative
+// DB count instead of a value read at the start of the request, so concurrent
+// failed logins can no longer trip the lock one attempt early or late.
+// maxAttempts <= 0 disables auto-lock (the count is still incremented). Returns
+// the new failed_login_count and whether the account is now locked. It never
+// clears an existing lock.
+// ============================================================================
+func (r *Repository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error) {
+	now := time.Now()
+	lockedUntil := now.Add(lockDuration)
+	query := `
+		UPDATE {{schema}}.users
+		SET
+			failed_login_count = failed_login_count + 1,
+			last_failed_login = $1,
+			updated_at = $1,
+			is_locked = CASE WHEN $2 > 0 AND failed_login_count + 1 >= $2 THEN true ELSE is_locked END,
+			locked_until = CASE WHEN $2 > 0 AND failed_login_count + 1 >= $2 THEN $3 ELSE locked_until END
+		WHERE id = $4
+		RETURNING failed_login_count, is_locked
+	`
+
+	var count int
+	var locked bool
+	err := r.rw.QueryRowContext(ctx, r.q(query), now, maxAttempts, lockedUntil, userID).Scan(&count, &locked)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, fmt.Errorf("user not found: %w", model.ErrNotFound)
+		}
+		return 0, false, fmt.Errorf("failed to register failed login: %w", err)
+	}
+
+	return count, locked, nil
+}
+
+// ============================================================================
 // Lock - Locks a user account (security control)
 // Sets is_locked to true and optionally sets locked_until for auto-unlock
 // Also increments failed_login_count to reflect the final failed attempt
@@ -625,7 +671,7 @@ func (r *Repository) IncrementFailedLoginCount(ctx context.Context, userID uuid.
 // ============================================================================
 func (r *Repository) Lock(ctx context.Context, userID uuid.UUID, lockedUntil *time.Time) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			is_locked = true,
 			locked_until = $1,
@@ -658,7 +704,7 @@ func (r *Repository) Lock(ctx context.Context, userID uuid.UUID, lockedUntil *ti
 // ============================================================================
 func (r *Repository) Unlock(ctx context.Context, userID uuid.UUID) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			is_locked = false,
 			locked_until = NULL,
@@ -690,7 +736,7 @@ func (r *Repository) Unlock(ctx context.Context, userID uuid.UUID) error {
 // ============================================================================
 func (r *Repository) UpdateLastLogin(ctx context.Context, userID uuid.UUID) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			last_login = $1,
 			updated_at = $1
@@ -722,7 +768,7 @@ func (r *Repository) UpdateLastLogin(ctx context.Context, userID uuid.UUID) erro
 func (r *Repository) ExistsActive(ctx context.Context, email, tenantID string) (bool, error) {
 	query := `
 		SELECT EXISTS(
-			SELECT 1 FROM authkit.users
+			SELECT 1 FROM {{schema}}.users
 			WHERE email = $1 AND tenant_id = $2 AND is_enabled = TRUE AND is_locked = FALSE
 		)
 	`
@@ -741,7 +787,7 @@ func (r *Repository) ExistsActive(ctx context.Context, email, tenantID string) (
 // Useful when enriching responses with user names
 // ============================================================================
 func (r *Repository) GetDisplayName(ctx context.Context, userID uuid.UUID) (string, error) {
-	query := `SELECT display_name FROM authkit.users WHERE id = $1`
+	query := `SELECT display_name FROM {{schema}}.users WHERE id = $1`
 
 	var displayName string
 	err := r.ro.QueryRowContext(ctx, r.q(query), userID).Scan(&displayName)
@@ -761,7 +807,7 @@ func (r *Repository) GetDisplayName(ctx context.Context, userID uuid.UUID) (stri
 // ============================================================================
 func (r *Repository) GetActiveUserIDByEmail(ctx context.Context, email, tenantID string) (uuid.UUID, error) {
 	query := `
-		SELECT id FROM authkit.users
+		SELECT id FROM {{schema}}.users
 		WHERE email = $1 AND tenant_id = $2 AND is_enabled = TRUE AND is_locked = FALSE
 		LIMIT 1
 	`
@@ -782,7 +828,7 @@ func (r *Repository) GetActiveUserIDByEmail(ctx context.Context, email, tenantID
 // CountUsersByTenant - Returns the count of users in a tenant
 // ============================================================================
 func (r *Repository) CountUsersByTenant(ctx context.Context, tenantID string) (int, error) {
-	query := `SELECT COUNT(*) FROM authkit.users WHERE tenant_id = $1`
+	query := `SELECT COUNT(*) FROM {{schema}}.users WHERE tenant_id = $1`
 
 	var count int
 	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID).Scan(&count)
@@ -808,7 +854,7 @@ func (r *Repository) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, 
 	}
 
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			roles = $1,
 			token_version = token_version + 1,
@@ -844,7 +890,7 @@ func (r *Repository) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, 
 // ============================================================================
 func (r *Repository) EnableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			is_enabled = true,
 			disabled_at = NULL,
@@ -882,7 +928,7 @@ func (r *Repository) UpdateByTenant(ctx context.Context, userID uuid.UUID, tenan
 	}
 
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET display_name = $1, roles = $2, token_version = token_version + 1, updated_at = $3
 		WHERE id = $4 AND tenant_id = $5
 	`
@@ -898,7 +944,7 @@ func (r *Repository) UpdateByTenant(ctx context.Context, userID uuid.UUID, tenan
 // ============================================================================
 func (r *Repository) SetPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET password_hash = $1, updated_at = $2
 		WHERE id = $3 AND tenant_id = $4
 	`
@@ -914,7 +960,7 @@ func (r *Repository) SetPasswordByTenant(ctx context.Context, userID uuid.UUID, 
 // ============================================================================
 func (r *Repository) DeleteByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET is_enabled = false, disabled_at = $1, updated_at = $1
 		WHERE id = $2 AND tenant_id = $3
 	`
@@ -931,7 +977,7 @@ func (r *Repository) DeleteByTenant(ctx context.Context, userID uuid.UUID, tenan
 // ============================================================================
 func (r *Repository) LockByTenant(ctx context.Context, userID uuid.UUID, tenantID string, lockedUntil *time.Time) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET is_locked = true, locked_until = $1, updated_at = $2
 		WHERE id = $3 AND tenant_id = $4
 	`
@@ -947,7 +993,7 @@ func (r *Repository) LockByTenant(ctx context.Context, userID uuid.UUID, tenantI
 // ============================================================================
 func (r *Repository) UnlockByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET is_locked = false, locked_until = NULL, failed_login_count = 0, updated_at = $1
 		WHERE id = $2 AND tenant_id = $3
 	`
@@ -963,7 +1009,7 @@ func (r *Repository) UnlockByTenant(ctx context.Context, userID uuid.UUID, tenan
 // ============================================================================
 func (r *Repository) IncrementTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET token_version = token_version + 1, updated_at = $1
 		WHERE id = $2 AND tenant_id = $3
 	`
@@ -993,7 +1039,7 @@ func rowsAffectedOrNotFound(result sql.Result) error {
 // ============================================================================
 func (r *Repository) DisableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	query := `
-		UPDATE authkit.users
+		UPDATE {{schema}}.users
 		SET
 			is_enabled = false,
 			disabled_at = $1,

@@ -4,6 +4,7 @@
 package service
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -41,7 +42,15 @@ func TestSecretServiceDecryptRejectsInvalidCiphertext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	tampered := encrypted[:len(encrypted)-2] + "aa"
+	// Flip a guaranteed-different byte inside the ciphertext body so the GCM auth
+	// check always fails. (Appending fixed base64 chars is a no-op whenever the
+	// random nonce already ends in those chars — ~1 in 3500 runs.)
+	raw, err := base64.StdEncoding.DecodeString(encrypted)
+	if err != nil {
+		t.Fatalf("decode encrypted: %v", err)
+	}
+	raw[len(raw)-1] ^= 0xFF
+	tampered := base64.StdEncoding.EncodeToString(raw)
 	if _, err := service.decrypt(tampered); err == nil {
 		t.Fatal("expected tampered ciphertext to fail decrypt")
 	}
@@ -71,7 +80,7 @@ func TestMaskValue(t *testing.T) {
 		if got != want {
 			t.Fatalf("maskValue(%q) = %q, want %q", input, got, want)
 		}
-		if len(input) >= 8 && strings.Contains(got, input[:len(input)-4]) && input != "plainsecret" {
+		if len(input) >= 8 && strings.Contains(got, input[:len(input)-4]) {
 			t.Fatalf("masked value leaked too much input: %q", got)
 		}
 	}

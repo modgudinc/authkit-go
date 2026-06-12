@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
-	"github.com/modgudinc/authkit-go/repository"
 )
 
 // authRepository is the subset of the repository used by AuthService. Depending
@@ -23,6 +23,7 @@ type authRepository interface {
 	Lock(ctx context.Context, userID uuid.UUID, lockedUntil *time.Time) error
 	Unlock(ctx context.Context, userID uuid.UUID) error
 	IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID) error
+	RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error)
 	UpdateLastLogin(ctx context.Context, userID uuid.UUID) error
 	VerifyPassword(ctx context.Context, userID uuid.UUID) (string, error)
 	SetPassword(ctx context.Context, userID uuid.UUID, hashedPassword string) error
@@ -108,7 +109,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 
 	if s.logger != nil {
 		s.logger.Info("User login attempt",
-			"email", email,
+			"email", maskEmail(email),
 			"tenant_id", req.TenantID,
 		)
 	}
@@ -121,10 +122,12 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		// and return a generic error that does not reveal whether the account exists.
 		s.passwordService.DummyVerify(req.Password)
 		if s.logger != nil {
+			// Do not log err.Error() here: it can echo lookup/query context and,
+			// together with the email, turns this line into an account-enumeration
+			// list. The generic ErrInvalidCredentials is what callers receive.
 			s.logger.Warn("Login failed: user not found",
-				"email", email,
+				"email", maskEmail(email),
 				"tenant_id", req.TenantID,
-				"error", err.Error(),
 			)
 		}
 		return nil, model.ErrInvalidCredentials
@@ -138,7 +141,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		if s.logger != nil {
 			s.logger.Warn("Login failed: account disabled",
 				"user_id", user.ID.String(),
-				"email", req.Email,
+				"email", maskEmail(req.Email),
 			)
 		}
 		return nil, model.ErrInvalidCredentials
@@ -184,43 +187,34 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		if s.logger != nil {
 			s.logger.Warn("Password verification failed",
 				"user_id", user.ID.String(),
-				"email", req.Email,
+				"email", maskEmail(req.Email),
 			)
 		}
 
-		// Check if account will be locked with this failed attempt
-		now := time.Now()
-		if user.FailedLoginCount+1 >= MaxFailedLoginAttempts {
-			// Lock account (this also increments failed_login_count)
-			lockedUntil := now.Add(LockDuration)
-			if err := s.repo.Lock(ctx, user.ID, &lockedUntil); err != nil {
-				if s.logger != nil {
-					s.logger.Error("Failed to lock account after max attempts", "error", err.Error())
-				}
-			} else {
-				if s.logger != nil {
-					s.logger.Warn("Account locked after max failed attempts",
-						"user_id", user.ID.String(),
-						"failed_attempts", user.FailedLoginCount+1,
-						"locked_until", lockedUntil,
-					)
-				}
+		// Record the failed attempt and lock at the threshold atomically in the DB.
+		// The lock decision uses the authoritative post-increment count returned by
+		// the UPDATE, not the (possibly stale) count loaded at the start of this
+		// request, so concurrent failures can't trip the lock one attempt early/late.
+		count, locked, regErr := s.repo.RegisterFailedLogin(ctx, user.ID, MaxFailedLoginAttempts, LockDuration)
+		switch {
+		case regErr != nil:
+			if s.logger != nil {
+				s.logger.Error("Failed to record failed login attempt", "error", regErr.Error())
 			}
-			return nil, model.ErrInvalidCredentials
-		} else {
-			// Increment failed login count (not at lock threshold yet)
-			if err := s.repo.IncrementFailedLoginCount(ctx, user.ID); err != nil {
-				if s.logger != nil {
-					s.logger.Error("Failed to increment failed login count", "error", err.Error())
-				}
-				// Continue anyway - authentication still failed
-			} else {
-				if s.logger != nil {
-					s.logger.Info("Failed login attempt recorded",
-						"user_id", user.ID.String(),
-						"failed_attempts", user.FailedLoginCount+1,
-					)
-				}
+			// Continue anyway - authentication still failed.
+		case locked:
+			if s.logger != nil {
+				s.logger.Warn("Account locked after max failed attempts",
+					"user_id", user.ID.String(),
+					"failed_attempts", count,
+				)
+			}
+		default:
+			if s.logger != nil {
+				s.logger.Info("Failed login attempt recorded",
+					"user_id", user.ID.String(),
+					"failed_attempts", count,
+				)
 			}
 		}
 
@@ -258,7 +252,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	if s.logger != nil {
 		s.logger.Info("User login successful",
 			"user_id", user.ID.String(),
-			"email", req.Email,
+			"email", maskEmail(req.Email),
 			"tenant_id", req.TenantID,
 		)
 	}
@@ -320,6 +314,10 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 //   - "Logout from all devices" functionality
 //   - Security breach response
 //   - Password reset
+//
+// Precondition: the caller MUST have already verified that userID belongs to the
+// caller's tenant. This method acts on a caller-supplied user id and does not
+// re-check tenant membership, so authorize the id before calling it.
 //
 // Example:
 //
@@ -600,12 +598,18 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		return fmt.Errorf("failed to update password: %w", err)
 	}
 
-	// 6. Invalidate all sessions (logout from all devices)
+	// 6. Invalidate all sessions (logout from all devices).
+	// The password is already changed at this point, but session revocation
+	// (refresh-token deletion + token_version bump) is part of the operation's
+	// security contract: if it fails we must NOT report success, otherwise old
+	// access tokens (<=15m) and refresh tokens (<=7d) silently keep working
+	// against the new password. Surface the failure so the caller can react
+	// (retry revocation / force re-login).
 	if err := s.LogoutAll(ctx, req.UserID); err != nil {
 		if s.logger != nil {
-			s.logger.Warn("Failed to logout from all devices", "error", err.Error())
+			s.logger.Error("Password updated but session revocation failed", "user_id", req.UserID, "error", err.Error())
 		}
-		// Continue anyway - password has been changed successfully
+		return fmt.Errorf("password updated but failed to revoke existing sessions: %w", err)
 	}
 
 	if s.logger != nil {

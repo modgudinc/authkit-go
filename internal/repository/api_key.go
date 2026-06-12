@@ -10,8 +10,21 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/model"
 )
+
+// InsertAPIKeyParams contains the data needed to insert a new API key. It is a
+// repository-internal persistence DTO — callers use APIKeyService.CreateAPIKey
+// with model.CreateAPIKeyRequest, which the service maps onto this type.
+type InsertAPIKeyParams struct {
+	KeyID     string
+	KeyHash   string
+	TenantID  string
+	Name      string
+	CreatedBy uuid.UUID
+	ExpiresAt *time.Time
+}
 
 // API Key Repository Methods:
 //
@@ -33,9 +46,9 @@ import (
 // IMPORTANT: The key_hash must be a HMAC-SHA256 hash of the API key
 // Never store plaintext API keys
 // ============================================================================
-func (r *Repository) CreateAPIKey(ctx context.Context, req model.InsertAPIKeyParams) error {
+func (r *Repository) CreateAPIKey(ctx context.Context, req InsertAPIKeyParams) error {
 	query := `
-		INSERT INTO authkit.api_keys (
+		INSERT INTO {{schema}}.api_keys (
 			key_id, key_hash, tenant_id, name, created_by, expires_at, created_at
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -66,7 +79,7 @@ func (r *Repository) CreateAPIKey(ctx context.Context, req model.InsertAPIKeyPar
 func (r *Repository) GetAPIKey(ctx context.Context, keyID, tenantID string) (*model.APIKey, error) {
 	query := `
 		SELECT key_id, key_hash, tenant_id, name, created_by, last_used_at, expires_at, created_at
-		FROM authkit.api_keys
+		FROM {{schema}}.api_keys
 		WHERE key_id = $1
 		  AND tenant_id = $2
 	`
@@ -103,11 +116,16 @@ func (r *Repository) GetAPIKey(ctx context.Context, keyID, tenantID string) (*mo
 // 1. A key exists with the given hash
 // 2. The key has not expired (if expires_at is set)
 // Returns the APIKey if valid, error otherwise
+//
+// Reads from the PRIMARY (rw), not a read replica: this is the credential
+// validation path run immediately after a key is created, where replica lag
+// could spuriously reject a freshly minted key. Do not switch to r.ro without
+// accepting that auth-failure risk.
 // ============================================================================
 func (r *Repository) GetAPIKeyByHash(ctx context.Context, keyHash string) (*model.APIKey, error) {
 	query := `
 		SELECT key_id, key_hash, tenant_id, name, created_by, last_used_at, expires_at, created_at
-		FROM authkit.api_keys
+		FROM {{schema}}.api_keys
 		WHERE key_hash = $1
 		  AND (expires_at IS NULL OR expires_at > $2)
 	`
@@ -148,14 +166,14 @@ func (r *Repository) ListAPIKeys(ctx context.Context, tenantID string, includeEx
 	if includeExpired {
 		query = `
 			SELECT key_id, key_hash, tenant_id, name, created_by, last_used_at, expires_at, created_at
-			FROM authkit.api_keys
+			FROM {{schema}}.api_keys
 			WHERE tenant_id = $1
 			ORDER BY created_at DESC
 		`
 	} else {
 		query = `
 			SELECT key_id, key_hash, tenant_id, name, created_by, last_used_at, expires_at, created_at
-			FROM authkit.api_keys
+			FROM {{schema}}.api_keys
 			WHERE tenant_id = $1
 			  AND (expires_at IS NULL OR expires_at > $2)
 			ORDER BY created_at DESC
@@ -218,7 +236,7 @@ func (r *Repository) ListAPIKeys(ctx context.Context, tenantID string, includeEx
 // ============================================================================
 func (r *Repository) UpdateAPIKeyLastUsed(ctx context.Context, keyID, tenantID string) error {
 	query := `
-		UPDATE authkit.api_keys
+		UPDATE {{schema}}.api_keys
 		SET last_used_at = $1
 		WHERE key_id = $2
 		  AND tenant_id = $3
@@ -248,7 +266,7 @@ func (r *Repository) UpdateAPIKeyLastUsed(ctx context.Context, keyID, tenantID s
 // ============================================================================
 func (r *Repository) DeleteAPIKey(ctx context.Context, keyID, tenantID string) error {
 	query := `
-		DELETE FROM authkit.api_keys
+		DELETE FROM {{schema}}.api_keys
 		WHERE key_id = $1
 		  AND tenant_id = $2
 	`
@@ -276,7 +294,7 @@ func (r *Repository) DeleteAPIKey(ctx context.Context, keyID, tenantID string) e
 func (r *Repository) CountAPIKeysByTenant(ctx context.Context, tenantID string) (int, error) {
 	query := `
 		SELECT COUNT(*)
-		FROM authkit.api_keys
+		FROM {{schema}}.api_keys
 		WHERE tenant_id = $1
 		  AND (expires_at IS NULL OR expires_at > $2)
 	`
@@ -297,7 +315,7 @@ func (r *Repository) CountAPIKeysByTenant(ctx context.Context, tenantID string) 
 // ============================================================================
 func (r *Repository) DeleteExpiredAPIKeys(ctx context.Context) (int64, error) {
 	query := `
-		DELETE FROM authkit.api_keys
+		DELETE FROM {{schema}}.api_keys
 		WHERE expires_at IS NOT NULL
 		  AND expires_at <= $1
 	`

@@ -47,7 +47,7 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, req model.CreateRef
 	}
 
 	query := `
-		INSERT INTO authkit.refresh_tokens (
+		INSERT INTO {{schema}}.refresh_tokens (
 			id, user_id, token_hash, family_id, ip_address, user_agent, device_name,
 			last_used_at, expires_at, created_at
 		)
@@ -94,7 +94,7 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 	// state so we can distinguish "never existed" from "already consumed" (reuse).
 	lookupQuery := `
 		SELECT user_id, family_id, revoked_at, expires_at
-		FROM authkit.refresh_tokens
+		FROM {{schema}}.refresh_tokens
 		WHERE token_hash = $1
 		FOR UPDATE
 	`
@@ -114,7 +114,7 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 	// neither the legitimate holder nor an attacker can keep refreshing.
 	if revokedAt != nil {
 		if _, err := tx.ExecContext(ctx, r.q(`
-			UPDATE authkit.refresh_tokens
+			UPDATE {{schema}}.refresh_tokens
 			SET revoked_at = $1
 			WHERE family_id = $2 AND revoked_at IS NULL
 		`), time.Now(), familyID); err != nil {
@@ -131,7 +131,7 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 
 	// Expired: consume it and reject.
 	if now.After(expiresAt) {
-		if _, err := tx.ExecContext(ctx, r.q(`UPDATE authkit.refresh_tokens SET revoked_at = $1 WHERE token_hash = $2`), now, oldTokenHash); err != nil {
+		if _, err := tx.ExecContext(ctx, r.q(`UPDATE {{schema}}.refresh_tokens SET revoked_at = $1 WHERE token_hash = $2`), now, oldTokenHash); err != nil {
 			return nil, uuid.Nil, fmt.Errorf("failed to revoke expired refresh token: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -143,7 +143,7 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 
 	// Consume (soft-revoke) the presented token. It is retained, not deleted, so a
 	// later replay is detectable until the row is cleaned up after expiry.
-	if _, err := tx.ExecContext(ctx, r.q(`UPDATE authkit.refresh_tokens SET revoked_at = $1 WHERE token_hash = $2`), now, oldTokenHash); err != nil {
+	if _, err := tx.ExecContext(ctx, r.q(`UPDATE {{schema}}.refresh_tokens SET revoked_at = $1 WHERE token_hash = $2`), now, oldTokenHash); err != nil {
 		return nil, uuid.Nil, fmt.Errorf("failed to consume refresh token: %w", err)
 	}
 
@@ -152,7 +152,7 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 			id, email, password_hash, tenant_id, display_name, roles, token_version,
 			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
 			created_at, updated_at
-		FROM authkit.users
+		FROM {{schema}}.users
 		WHERE id = $1
 	`
 
@@ -195,7 +195,7 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 	}
 
 	insertQuery := `
-		INSERT INTO authkit.refresh_tokens (
+		INSERT INTO {{schema}}.refresh_tokens (
 			id, user_id, token_hash, family_id, ip_address, user_agent, device_name,
 			last_used_at, expires_at, created_at
 		)
@@ -226,15 +226,20 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 }
 
 // ============================================================================
-// GetByTokenHash - Retrieves a refresh token by its SHA256 hash
-// Returns error if token not found or expired
+// GetByTokenHash - Retrieves a refresh token by its HMAC-SHA256 hash
+// Returns ErrInvalidRefreshToken if the token is not found or expired.
+//
+// Reads from the PRIMARY (rw), not a read replica: this is the credential
+// validation path run immediately after a token is issued/rotated, where
+// replica lag could spuriously reject a freshly minted token. Do not switch to
+// r.ro without accepting that auth-failure risk.
 // ============================================================================
 func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*model.RefreshToken, error) {
 	query := `
 		SELECT
 			id, user_id, token_hash, ip_address, user_agent, device_name,
 			last_used_at, expires_at, created_at
-		FROM authkit.refresh_tokens
+		FROM {{schema}}.refresh_tokens
 		WHERE token_hash = $1
 		  AND revoked_at IS NULL
 	`
@@ -255,6 +260,12 @@ func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*mod
 		&token.CreatedAt,
 	)
 	if err != nil {
+		// Translate not-found to the sentinel so callers can branch with
+		// errors.Is(err, model.ErrInvalidRefreshToken), matching every sibling
+		// Get* method and RotateRefreshToken in this file.
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("refresh token not found: %w", model.ErrInvalidRefreshToken)
+		}
 		return nil, fmt.Errorf("failed to get refresh token by hash: %w", err)
 	}
 
@@ -266,7 +277,7 @@ func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*mod
 
 	// Check if token is expired
 	if time.Now().After(token.ExpiresAt) {
-		return nil, fmt.Errorf("refresh token has expired")
+		return nil, fmt.Errorf("refresh token has expired: %w", model.ErrInvalidRefreshToken)
 	}
 
 	return &token, nil
@@ -276,13 +287,16 @@ func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*mod
 // GetByUserID - Lists all refresh tokens for a specific user
 // Returns active and expired tokens (caller should filter if needed)
 // Ordered by created_at DESC (newest first)
+//
+// Scoped by user_id only (refresh_tokens has no tenant column). Callers MUST
+// tenant-authorize the userID before calling.
 // ============================================================================
 func (r *Repository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*model.RefreshToken, error) {
 	query := `
 		SELECT
 			id, user_id, token_hash, ip_address, user_agent, device_name,
 			last_used_at, expires_at, created_at
-		FROM authkit.refresh_tokens
+		FROM {{schema}}.refresh_tokens
 		WHERE user_id = $1
 		  AND revoked_at IS NULL
 		ORDER BY created_at DESC
@@ -339,7 +353,7 @@ func (r *Repository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*mode
 // ============================================================================
 func (r *Repository) UpdateLastUsed(ctx context.Context, tokenID uuid.UUID) error {
 	query := `
-		UPDATE authkit.refresh_tokens
+		UPDATE {{schema}}.refresh_tokens
 		SET last_used_at = $1
 		WHERE id = $2
 	`
@@ -358,7 +372,7 @@ func (r *Repository) UpdateLastUsed(ctx context.Context, tokenID uuid.UUID) erro
 // ============================================================================
 func (r *Repository) DeleteByTokenHash(ctx context.Context, tokenHash string) error {
 	query := `
-		DELETE FROM authkit.refresh_tokens
+		DELETE FROM {{schema}}.refresh_tokens
 		WHERE token_hash = $1
 	`
 
@@ -382,10 +396,13 @@ func (r *Repository) DeleteByTokenHash(ctx context.Context, tokenHash string) er
 // ============================================================================
 // DeleteByUserID - Revokes all refresh tokens for a user
 // Used for "logout from all devices" functionality
+//
+// Scoped by user_id only (refresh_tokens has no tenant column). Callers MUST
+// tenant-authorize the userID before calling.
 // ============================================================================
 func (r *Repository) DeleteByUserID(ctx context.Context, userID uuid.UUID) error {
 	query := `
-		DELETE FROM authkit.refresh_tokens
+		DELETE FROM {{schema}}.refresh_tokens
 		WHERE user_id = $1
 	`
 
@@ -404,7 +421,7 @@ func (r *Repository) DeleteByUserID(ctx context.Context, userID uuid.UUID) error
 // ============================================================================
 func (r *Repository) DeleteExpired(ctx context.Context) (int64, error) {
 	query := `
-		DELETE FROM authkit.refresh_tokens
+		DELETE FROM {{schema}}.refresh_tokens
 		WHERE expires_at < $1
 	`
 

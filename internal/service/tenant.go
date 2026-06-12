@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
-	"github.com/modgudinc/authkit-go/repository"
 )
 
 // TenantService handles tenant-related business logic including
@@ -122,11 +122,16 @@ func (s *TenantService) CreateTenant(ctx context.Context, req model.CreateTenant
 		)
 	}
 
-	// Validate all allowed_domains
-	for _, domain := range req.AllowedDomains {
-		if err := s.validateDomain(domain); err != nil {
+	// Validate and normalize all allowed_domains. Domains are lowercased on write
+	// so the (already-lowercased) lookups in ValidateDomainAccess and
+	// GetTenantByDomain match — fulfilling the documented case-insensitive
+	// matching contract.
+	for i, domain := range req.AllowedDomains {
+		normalized := strings.ToLower(strings.TrimSpace(domain))
+		if err := s.validateDomain(normalized); err != nil {
 			return nil, fmt.Errorf("invalid allowed_domain '%s': %w", domain, err)
 		}
+		req.AllowedDomains[i] = normalized
 	}
 
 	// Create tenant
@@ -272,9 +277,10 @@ func (s *TenantService) SetAllowedDomains(ctx context.Context, tenantID string, 
 		)
 	}
 
-	// Validate all domains
-	for _, domain := range domains {
-		if err := s.validateDomain(domain); err != nil {
+	// Validate and normalize all domains (lowercased on write; see CreateTenant).
+	for i, domain := range domains {
+		normalized := strings.ToLower(strings.TrimSpace(domain))
+		if err := s.validateDomain(normalized); err != nil {
 			if s.logger != nil {
 				s.logger.Error("Invalid domain format",
 					"tenant_id", tenantID,
@@ -284,6 +290,7 @@ func (s *TenantService) SetAllowedDomains(ctx context.Context, tenantID string, 
 			}
 			return fmt.Errorf("invalid domain '%s': %w", domain, err)
 		}
+		domains[i] = normalized
 	}
 
 	err := s.repo.SetAllowedDomains(ctx, tenantID, domains)
@@ -325,6 +332,9 @@ func (s *TenantService) AddAllowedDomain(ctx context.Context, tenantID, domain s
 			"domain", domain,
 		)
 	}
+
+	// Normalize on write (lowercased; see CreateTenant) so it matches lookups.
+	domain = strings.ToLower(strings.TrimSpace(domain))
 
 	// Validate domain format
 	if err := s.validateDomain(domain); err != nil {

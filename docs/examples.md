@@ -96,7 +96,7 @@ expiresIn := "90d"
 
 created, err := apiKeyService.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
 	TenantID:  "acme.com",
-	CreatedBy: userID.String(),
+	CreatedBy: userID,
 	Name:      "Production",
 	ExpiresIn: &expiresIn,
 })
@@ -121,7 +121,7 @@ invitationService := identity.InvitationService()
 invitation, err := invitationService.CreateInvitation(
 	ctx,
 	"acme.com",
-	userID.String(),
+	userID,
 	[]string{"Member"},
 	"invitee@acme.com",
 	nil,
@@ -170,7 +170,7 @@ saved, err := secretService.SaveSecret(ctx, model.SaveSecretRequest{
 	TenantID:   "acme.com",
 	Key:        "openai",
 	PlainValue: "sk-live-secret",
-	CreatedBy:  userID.String(),
+	CreatedBy:  userID,
 })
 if err != nil {
 	return err

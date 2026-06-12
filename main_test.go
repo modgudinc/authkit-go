@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/modgudinc/authkit-go/repository"
-	"github.com/modgudinc/authkit-go/service"
+	"github.com/modgudinc/authkit-go/internal/repository"
+	"github.com/modgudinc/authkit-go/internal/service"
 )
 
 func validTestConfig() Config {

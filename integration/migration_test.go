@@ -18,9 +18,9 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	authkit "github.com/modgudinc/authkit-go"
+	"github.com/modgudinc/authkit-go/internal/repository"
+	"github.com/modgudinc/authkit-go/internal/service"
 	"github.com/modgudinc/authkit-go/model"
-	"github.com/modgudinc/authkit-go/repository"
-	"github.com/modgudinc/authkit-go/service"
 )
 
 const defaultDatabaseURL = "postgres://authkit_test:authkit_test@localhost:55432/authkit_test?sslmode=disable"
@@ -358,7 +358,7 @@ func createUserWithPassword(
 	return userID
 }
 
-func newIntegrationAuthKit(t *testing.T, db *sql.DB) authkit.AuthKit {
+func newIntegrationAuthKit(t *testing.T, db *sql.DB) *authkit.AuthKit {
 	t.Helper()
 
 	authKit, err := authkit.New(authkit.Config{
@@ -436,12 +436,12 @@ func testAPIKeyPersistence(t *testing.T, ctx context.Context, repo *repository.R
 	t.Helper()
 
 	keyID := uuid.NewString()
-	if err := repo.CreateAPIKey(ctx, model.InsertAPIKeyParams{
+	if err := repo.CreateAPIKey(ctx, repository.InsertAPIKeyParams{
 		KeyID:     keyID,
 		KeyHash:   "api-key-hash",
 		TenantID:  tenantID,
 		Name:      "Test Key",
-		CreatedBy: userID.String(),
+		CreatedBy: userID,
 	}); err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
@@ -513,7 +513,7 @@ func testInvitationPersistence(t *testing.T, ctx context.Context, repo *reposito
 	if err := repo.CreateInvitation(ctx, model.CreateInvitationRequest{
 		Code:      "INVITE12345678901234",
 		TenantID:  tenantID,
-		CreatedBy: userID.String(),
+		CreatedBy: userID,
 		Roles:     []string{"Member"},
 		Email:     "invitee@acme.test",
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -562,7 +562,7 @@ func testInvitationAccept(t *testing.T, ctx context.Context, repo *repository.Re
 	if err := repo.CreateInvitation(ctx, model.CreateInvitationRequest{
 		Code:      code,
 		TenantID:  tenantID,
-		CreatedBy: userID.String(),
+		CreatedBy: userID,
 		Roles:     []string{"Member"},
 		Email:     email,
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -723,7 +723,7 @@ func TestDisableByTenantRevokesRefreshTokens(t *testing.T) {
 func testSecretPersistence(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID uuid.UUID) {
 	t.Helper()
 
-	secret, err := repo.SaveSecret(ctx, tenantID, "openai", "encrypted-value", "sk-************abcd", userID.String())
+	secret, err := repo.SaveSecret(ctx, tenantID, "openai", "encrypted-value", "sk-************abcd", userID)
 	if err != nil {
 		t.Fatalf("save secret: %v", err)
 	}

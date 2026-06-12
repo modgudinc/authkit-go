@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
-	"github.com/modgudinc/authkit-go/repository"
 )
 
 const (
@@ -72,13 +72,13 @@ func NewInvitationService(repo *repository.Repository, logger logger.Logger) *In
 //   - expiresIn: Optional expiration duration (defaults to 7 days if nil)
 //
 // Returns the created invitation or error
-func (s *InvitationService) CreateInvitation(ctx context.Context, tenantID, createdBy string, roles []string, email string, maxUses *int, expiresIn *time.Duration) (*model.Invitation, error) {
+func (s *InvitationService) CreateInvitation(ctx context.Context, tenantID string, createdBy uuid.UUID, roles []string, email string, maxUses *int, expiresIn *time.Duration) (*model.Invitation, error) {
 	if s.logger != nil {
 		s.logger.Info("Creating invitation",
 			"tenant_id", tenantID,
 			"created_by", createdBy,
 			"roles", roles,
-			"email", email,
+			"email", maskEmail(email),
 		)
 	}
 
@@ -269,7 +269,7 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, code, email, d
 	if s.logger != nil {
 		s.logger.Info("Accepting invitation",
 			"code", maskCode(code),
-			"email", email,
+			"email", maskEmail(email),
 		)
 	}
 
@@ -278,7 +278,7 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, code, email, d
 		if s.logger != nil {
 			s.logger.Warn("Failed to accept invitation",
 				"code", maskCode(code),
-				"email", email,
+				"email", maskEmail(email),
 				"error", err.Error(),
 			)
 		}
@@ -524,7 +524,7 @@ func (s *InvitationService) HasPending(ctx context.Context, email, tenantID stri
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("Failed to check for pending invitation",
-				"email", normalizedEmail,
+				"email", maskEmail(normalizedEmail),
 				"tenant_id", tenantID,
 				"error", err.Error(),
 			)

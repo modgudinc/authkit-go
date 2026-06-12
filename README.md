@@ -106,6 +106,10 @@ type ZapLogger struct {
     logger *zap.Logger
 }
 
+func (z *ZapLogger) Debug(msg string, fields ...interface{}) {
+    z.logger.Sugar().Debugw(msg, fields...)
+}
+
 func (z *ZapLogger) Info(msg string, fields ...interface{}) {
     z.logger.Sugar().Infow(msg, fields...)
 }
@@ -128,6 +132,11 @@ identity, err := authkit.New(authkit.Config{
 })
 ```
 
+> **PII in logs:** authkit masks sensitive values before logging — email addresses
+> are emitted as `u***@acme.com`, OTP/invitation codes are truncated, and secrets
+> are never logged. Logs are treated as a hostile surface (see
+> [SECURITY.md](SECURITY.md)); keep this in mind for your own log lines.
+
 ## API Key Management
 
 ### Create an API Key
@@ -138,7 +147,7 @@ apiKeyService := identity.APIKeyService()
 expiresIn := "90d" // Optional: expires in 90 days
 response, err := apiKeyService.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
     TenantID:  "acme.com",
-    CreatedBy: "user-uuid-v7",
+    CreatedBy: adminUserID, // uuid.UUID of the admin (FK to users.id)
     Name:      "Production SDK Key",
     ExpiresIn: &expiresIn, // Optional
 })
@@ -738,7 +747,7 @@ expiresIn := 7 * 24 * time.Hour // 7 days
 
 invitation, err := invitationService.CreateInvitation(ctx,
     "acme.com",             // Tenant ID
-    "admin-user-id",        // Created by (admin user ID)
+    adminUserID,            // Created by: uuid.UUID of the admin (FK to users.id)
     []string{"Member"},     // Roles (array of role names, validated by app layer)
     "user@acme.com",        // Target email address
     &maxUses,               // Optional max uses (nil = default 1)
@@ -938,7 +947,7 @@ fmt.Printf("Deleted %d expired invitations\n", count)
 
 ```go
 // Step 1: Admin creates invitation
-func AdminCreateInvitation(ctx context.Context, tenantID, adminUserID, inviteeEmail string) (string, error) {
+func AdminCreateInvitation(ctx context.Context, tenantID string, adminUserID uuid.UUID, inviteeEmail string) (string, error) {
     invitationService := identity.InvitationService()
 
     // Optional: enforce the tenant's allowed_domains for invited users. The
@@ -1333,13 +1342,18 @@ keyID, err := uuid.NewV7()
 
 ```
 authkit-go/
-├── model/           # Data models and structs
-├── repository/      # Database operations (CRUD)
-├── service/         # Business logic layer
-├── config.go        # Configuration structures
-├── main.go          # Library entry point
-└── logger/logger.go # Logger interface
+├── model/                    # Data models, request/response structs, sentinel errors (public)
+├── logger/                   # Logger interface + NopLogger (public)
+├── internal/
+│   ├── repository/           # Database operations (CRUD) — not importable by consumers
+│   └── service/              # Business logic layer — not importable by consumers
+├── config.go                 # Configuration structures (public)
+└── main.go                   # Library entry point: New + AuthKit accessors (public)
 ```
+
+Only the root `authkit` package, `model`, and `logger` are part of the public
+import surface; `service` and `repository` live under `internal/` and are reached
+exclusively through `AuthKit`'s accessor methods (`AuthService()`, etc.).
 
 ### Service Layer Pattern
 

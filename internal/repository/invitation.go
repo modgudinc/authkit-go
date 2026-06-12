@@ -13,8 +13,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/modgudinc/authkit-go/model"
 )
+
+// uniqueViolation is the PostgreSQL SQLSTATE for a unique_violation (23505).
+const uniqueViolation = "23505"
 
 // Invitation Repository Methods:
 //
@@ -41,7 +45,7 @@ import (
 // ============================================================================
 func (r *Repository) CreateInvitation(ctx context.Context, req model.CreateInvitationRequest) error {
 	query := `
-		INSERT INTO authkit.invitations (
+		INSERT INTO {{schema}}.invitations (
 			code, tenant_id, created_by, roles, email, expires_at, max_uses, created_at
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
@@ -75,7 +79,7 @@ func (r *Repository) CreateInvitation(ctx context.Context, req model.CreateInvit
 func (r *Repository) GetInvitation(ctx context.Context, code string) (*model.Invitation, error) {
 	query := `
 		SELECT code, tenant_id, created_by, roles, email, expires_at, max_uses, current_uses, created_at
-		FROM authkit.invitations
+		FROM {{schema}}.invitations
 		WHERE code = $1
 	`
 
@@ -132,7 +136,7 @@ func (r *Repository) IsValid(invitation *model.Invitation) (bool, error) {
 // ============================================================================
 func (r *Repository) IncrementUseCount(ctx context.Context, code string) error {
 	query := `
-		UPDATE authkit.invitations
+		UPDATE {{schema}}.invitations
 		SET current_uses = current_uses + 1
 		WHERE code = $1
 		  AND current_uses < max_uses  -- Ensure we don't exceed max uses
@@ -188,7 +192,7 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 	var maxUses, currentUses int
 	lookup := `
 		SELECT tenant_id, roles, email, expires_at, max_uses, current_uses
-		FROM authkit.invitations
+		FROM {{schema}}.invitations
 		WHERE code = $1
 		FOR UPDATE
 	`
@@ -221,7 +225,7 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 	// Consume one use under the max_uses guard (defends against a concurrent race
 	// even though the row is locked, and keeps the invariant explicit).
 	res, err := tx.ExecContext(ctx, r.q(`
-		UPDATE authkit.invitations
+		UPDATE {{schema}}.invitations
 		SET current_uses = current_uses + 1
 		WHERE code = $1 AND current_uses < max_uses
 	`), code)
@@ -247,7 +251,7 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 	}
 	now := time.Now()
 	insertUser := `
-		INSERT INTO authkit.users (
+		INSERT INTO {{schema}}.users (
 			id, email, password_hash, tenant_id, display_name, roles, token_version,
 			is_enabled, is_locked, failed_login_count, created_at, updated_at
 		)
@@ -257,6 +261,14 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 		userID, normEmail, passwordHash, tenantID, displayName, rolesOut,
 		0, true, false, 0, now, now,
 	); err != nil {
+		// A (tenant_id, email) uniqueness conflict means an account already
+		// exists for this email; surface a clean sentinel instead of leaking the
+		// raw driver/constraint string. The deferred rollback leaves the
+		// invitation unconsumed.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && string(pqErr.Code) == uniqueViolation {
+			return uuid.Nil, fmt.Errorf("user already exists for this tenant: %w", model.ErrUserExists)
+		}
 		return uuid.Nil, fmt.Errorf("failed to create user from invitation: %w", err)
 	}
 
@@ -274,7 +286,7 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 // ============================================================================
 func (r *Repository) InvalidateInvitation(ctx context.Context, code string) error {
 	query := `
-		UPDATE authkit.invitations
+		UPDATE {{schema}}.invitations
 		SET current_uses = max_uses
 		WHERE code = $1
 	`
@@ -304,7 +316,7 @@ func (r *Repository) InvalidateInvitation(ctx context.Context, code string) erro
 func (r *Repository) ListInvitations(ctx context.Context, tenantID string) ([]*model.Invitation, error) {
 	query := `
 		SELECT code, tenant_id, created_by, roles, email, expires_at, max_uses, current_uses, created_at
-		FROM authkit.invitations
+		FROM {{schema}}.invitations
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
 	`
@@ -359,7 +371,7 @@ func (r *Repository) ListInvitations(ctx context.Context, tenantID string) ([]*m
 func (r *Repository) ListActiveInvitations(ctx context.Context, tenantID string) ([]*model.Invitation, error) {
 	query := `
 		SELECT code, tenant_id, created_by, roles, email, expires_at, max_uses, current_uses, created_at
-		FROM authkit.invitations
+		FROM {{schema}}.invitations
 		WHERE tenant_id = $1
 		  AND expires_at > NOW()
 		  AND current_uses < max_uses
@@ -413,7 +425,7 @@ func (r *Repository) ListActiveInvitations(ctx context.Context, tenantID string)
 // Permanently removes the invitation from the database
 // ============================================================================
 func (r *Repository) DeleteInvitation(ctx context.Context, code string) error {
-	query := `DELETE FROM authkit.invitations WHERE code = $1`
+	query := `DELETE FROM {{schema}}.invitations WHERE code = $1`
 
 	result, err := r.rw.ExecContext(ctx, r.q(query), code)
 	if err != nil {
@@ -438,7 +450,7 @@ func (r *Repository) DeleteInvitation(ctx context.Context, code string) error {
 // Returns the number of expired invitations deleted
 // ============================================================================
 func (r *Repository) CleanupExpiredInvitations(ctx context.Context) (int64, error) {
-	query := `DELETE FROM authkit.invitations WHERE expires_at < NOW()`
+	query := `DELETE FROM {{schema}}.invitations WHERE expires_at < NOW()`
 
 	result, err := r.rw.ExecContext(ctx, r.q(query))
 	if err != nil {
@@ -461,7 +473,7 @@ func (r *Repository) CleanupExpiredInvitations(ctx context.Context) (int64, erro
 func (r *Repository) HasPending(ctx context.Context, email, tenantID string) (bool, error) {
 	query := `
 		SELECT EXISTS(
-			SELECT 1 FROM authkit.invitations
+			SELECT 1 FROM {{schema}}.invitations
 			WHERE email = $1
 			  AND tenant_id = $2
 			  AND current_uses < max_uses
