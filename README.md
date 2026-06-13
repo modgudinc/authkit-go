@@ -42,18 +42,18 @@ import (
 	"time"
 
     authkit "github.com/modgudinc/authkit-go"
-    _ "github.com/lib/pq" // PostgreSQL driver
+    _ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver (pgx, database/sql-compatible)
 )
 
 func main() {
-    // Set up database connections
-    rwDB, err := sql.Open("postgres", os.Getenv("RW_DATABASE_URL"))
+    // Set up database connections (database/sql with the pgx driver).
+    rwDB, err := sql.Open("pgx", os.Getenv("RW_DATABASE_URL"))
     if err != nil {
         log.Fatal(err)
     }
     defer rwDB.Close()
 
-    roDB, err := sql.Open("postgres", os.Getenv("RO_DATABASE_URL"))
+    roDB, err := sql.Open("pgx", os.Getenv("RO_DATABASE_URL"))
     if err != nil {
         log.Fatal(err)
     }

@@ -2,10 +2,10 @@
 
 ## Single Database Connection
 
-For small deployments or local development, use the same database handle for read and write connections:
+For small deployments or local development, use the same database handle for read and write connections. The library uses `database/sql`; register the pgx driver with a blank import (`_ "github.com/jackc/pgx/v5/stdlib"`) and open with the `pgx` driver name:
 
 ```go
-db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+db, err := sql.Open("pgx", os.Getenv("DATABASE_URL"))
 if err != nil {
 	return err
 }

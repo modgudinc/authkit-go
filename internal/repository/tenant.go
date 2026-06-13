@@ -6,10 +6,10 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
-	"github.com/lib/pq"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -42,7 +42,7 @@ func (r *Repository) CreateTenant(ctx context.Context, req model.CreateTenantReq
 	_, err := r.rw.ExecContext(ctx, r.q(query),
 		req.TenantID,
 		req.Name,
-		pq.Array(req.AllowedDomains),
+		req.AllowedDomains,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create tenant: %w", err)
@@ -56,18 +56,19 @@ func (r *Repository) CreateTenant(ctx context.Context, req model.CreateTenantReq
 // ============================================================================
 func (r *Repository) GetTenant(ctx context.Context, tenantID string) (*model.Tenant, error) {
 	query := `
-		SELECT tenant_id, name, allowed_domains,
+		SELECT tenant_id, name, array_to_json(allowed_domains)::text,
 		       COALESCE(settings::text, '{}'), created_at, updated_at
 		FROM {{schema}}.tenants
 		WHERE tenant_id = $1
 	`
 
 	var tenant model.Tenant
+	var domainsJSON []byte
 
 	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID).Scan(
 		&tenant.TenantID,
 		&tenant.Name,
-		pq.Array(&tenant.AllowedDomains),
+		&domainsJSON,
 		&tenant.Settings,
 		&tenant.CreatedAt,
 		&tenant.UpdatedAt,
@@ -79,6 +80,10 @@ func (r *Repository) GetTenant(ctx context.Context, tenantID string) (*model.Ten
 		return nil, fmt.Errorf("failed to get tenant: %w", err)
 	}
 
+	if err := json.Unmarshal(domainsJSON, &tenant.AllowedDomains); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal allowed_domains: %w", err)
+	}
+
 	return &tenant, nil
 }
 
@@ -88,7 +93,7 @@ func (r *Repository) GetTenant(ctx context.Context, tenantID string) (*model.Ten
 // ============================================================================
 func (r *Repository) GetTenantByDomain(ctx context.Context, domain string) (*model.Tenant, error) {
 	query := `
-		SELECT tenant_id, name, allowed_domains,
+		SELECT tenant_id, name, array_to_json(allowed_domains)::text,
 		       COALESCE(settings::text, '{}'), created_at, updated_at
 		FROM {{schema}}.tenants
 		WHERE $1 = ANY(allowed_domains)
@@ -96,11 +101,12 @@ func (r *Repository) GetTenantByDomain(ctx context.Context, domain string) (*mod
 	`
 
 	var tenant model.Tenant
+	var domainsJSON []byte
 
 	err := r.ro.QueryRowContext(ctx, r.q(query), domain).Scan(
 		&tenant.TenantID,
 		&tenant.Name,
-		pq.Array(&tenant.AllowedDomains),
+		&domainsJSON,
 		&tenant.Settings,
 		&tenant.CreatedAt,
 		&tenant.UpdatedAt,
@@ -110,6 +116,10 @@ func (r *Repository) GetTenantByDomain(ctx context.Context, domain string) (*mod
 			return nil, fmt.Errorf("tenant not found with domain: %w", model.ErrNotFound)
 		}
 		return nil, fmt.Errorf("failed to get tenant by domain: %w", err)
+	}
+
+	if err := json.Unmarshal(domainsJSON, &tenant.AllowedDomains); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal allowed_domains: %w", err)
 	}
 
 	return &tenant, nil
@@ -136,7 +146,7 @@ func (r *Repository) TenantExists(ctx context.Context, tenantID string) (bool, e
 // ============================================================================
 func (r *Repository) ListAllTenants(ctx context.Context) ([]*model.Tenant, error) {
 	query := `
-		SELECT tenant_id, name, allowed_domains,
+		SELECT tenant_id, name, array_to_json(allowed_domains)::text,
 		       COALESCE(settings::text, '{}'), created_at, updated_at
 		FROM {{schema}}.tenants
 		ORDER BY created_at DESC
@@ -153,17 +163,22 @@ func (r *Repository) ListAllTenants(ctx context.Context) ([]*model.Tenant, error
 	var tenants []*model.Tenant
 	for rows.Next() {
 		var tenant model.Tenant
+		var domainsJSON []byte
 
 		err := rows.Scan(
 			&tenant.TenantID,
 			&tenant.Name,
-			pq.Array(&tenant.AllowedDomains),
+			&domainsJSON,
 			&tenant.Settings,
 			&tenant.CreatedAt,
 			&tenant.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan tenant row: %w", err)
+		}
+
+		if err := json.Unmarshal(domainsJSON, &tenant.AllowedDomains); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal allowed_domains: %w", err)
 		}
 
 		tenants = append(tenants, &tenant)
@@ -245,7 +260,7 @@ func (r *Repository) SetAllowedDomains(ctx context.Context, tenantID string, dom
 		WHERE tenant_id = $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, pq.Array(domains))
+	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, domains)
 	if err != nil {
 		return fmt.Errorf("failed to update allowed domains: %w", err)
 	}

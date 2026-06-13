@@ -12,7 +12,7 @@ import (
 	"time"
 
 	uuid "github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -90,8 +90,8 @@ func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (
 		// A (tenant_id, email) uniqueness conflict means an account already
 		// exists for this email; surface a clean sentinel instead of the raw
 		// driver/constraint string so callers can errors.Is it.
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && string(pqErr.Code) == uniqueViolation {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
 			return uuid.Nil, fmt.Errorf("user already exists for this tenant: %w", model.ErrUserExists)
 		}
 		return uuid.Nil, fmt.Errorf("failed to create user: %w", err)

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	authkit "github.com/modgudinc/authkit-go"
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/internal/service"
@@ -194,7 +194,7 @@ func openTestDB(t *testing.T) *sql.DB {
 		dsn = defaultDatabaseURL
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}

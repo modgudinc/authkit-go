@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -265,8 +265,8 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 		// exists for this email; surface a clean sentinel instead of leaking the
 		// raw driver/constraint string. The deferred rollback leaves the
 		// invitation unconsumed.
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && string(pqErr.Code) == uniqueViolation {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
 			return uuid.Nil, fmt.Errorf("user already exists for this tenant: %w", model.ErrUserExists)
 		}
 		return uuid.Nil, fmt.Errorf("failed to create user from invitation: %w", err)

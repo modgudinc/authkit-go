@@ -8,6 +8,42 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-13
+
+Database-driver release: the library now runs on **pgx**
+(`github.com/jackc/pgx/v5`) instead of `lib/pq`, and `lib/pq` is dropped as a
+dependency. The Go API is **unchanged** — `Config.DatabaseConnection` still takes
+`*sql.DB` and no `authkit` signatures changed — but because the repository layer
+now relies on pgx's driver behavior, **consumers must use the pgx driver**. That
+driver swap is the only upgrade step; it is flagged breaking per SemVer because
+existing `lib/pq` callers must change their connection setup.
+
+### Changed (breaking)
+
+- **PostgreSQL driver is now pgx.** The library is still built on `database/sql`,
+  so `Config` continues to accept `*sql.DB` — but register the pgx driver and open
+  with the `pgx` driver name instead of `lib/pq`:
+  ```go
+  import _ "github.com/jackc/pgx/v5/stdlib"
+  db, err := sql.Open("pgx", dsn) // was: _ "github.com/lib/pq"; sql.Open("postgres", dsn)
+  ```
+
+### Removed
+
+- The `github.com/lib/pq` dependency. `github.com/jackc/pgx/v5` is now the only
+  PostgreSQL driver dependency (no change to the Go version requirement).
+
+### Internal
+
+- `tenants.allowed_domains` (`text[]`) is now written with native `[]string`
+  parameters and read via `array_to_json(...)::text` + `encoding/json`, because
+  pgx's `database/sql` layer does not scan a Postgres array directly into a Go
+  `[]string`.
+- Duplicate-user / invitation conflict detection (`ErrUserExists`) now matches
+  `*pgconn.PgError` instead of `*pq.Error`.
+- Schema-identifier quoting uses `pgx.Identifier{}.Sanitize()` instead of
+  `pq.QuoteIdentifier`; integration tests use the pgx `stdlib` driver.
+
 ## [0.3.0] - 2026-06-12
 
 Security-hardening, error-contract, and API/consistency release covering every
@@ -257,7 +293,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/modgudinc/authkit-go/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/modgudinc/authkit-go/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/modgudinc/authkit-go/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/modgudinc/authkit-go/compare/v0.1.0...v0.2.0

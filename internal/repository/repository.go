@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
 )
 
 const DefaultIdentitySchema = "authkit"
@@ -42,7 +42,7 @@ func NewWithSchema(rw *sql.DB, ro *sql.DB, schema string) Repository {
 	return Repository{
 		rw:           rw,
 		ro:           ro,
-		schemaPrefix: pq.QuoteIdentifier(schema) + ".",
+		schemaPrefix: pgx.Identifier{schema}.Sanitize() + ".",
 	}
 }
 
