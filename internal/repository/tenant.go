@@ -196,12 +196,18 @@ func (r *Repository) ListAllTenants(ctx context.Context) ([]*model.Tenant, error
 // Uses PostgreSQL array_append to add domain only if not already present
 // ============================================================================
 func (r *Repository) AddAllowedDomain(ctx context.Context, tenantID, domain string) error {
+	// Idempotent: append only when absent, but still match (and touch) the row when
+	// the domain is already present. That way a zero rows-affected result means the
+	// tenant does not exist — not "the domain was already there" — so we can return
+	// a clean ErrNotFound without conflating the two cases.
 	query := `
 		UPDATE {{schema}}.tenants
-		SET allowed_domains = array_append(allowed_domains, $2),
+		SET allowed_domains = CASE
+			WHEN $2 = ANY(allowed_domains) THEN allowed_domains
+			ELSE array_append(allowed_domains, $2)
+		END,
 		    updated_at = NOW()
 		WHERE tenant_id = $1
-		  AND NOT ($2 = ANY(allowed_domains))  -- Prevent duplicates
 	`
 
 	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, domain)
@@ -215,7 +221,7 @@ func (r *Repository) AddAllowedDomain(ctx context.Context, tenantID, domain stri
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("tenant not found or domain already exists: %s", tenantID)
+		return fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound)
 	}
 
 	return nil
@@ -243,7 +249,7 @@ func (r *Repository) UpdateName(ctx context.Context, tenantID, name string) erro
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("tenant not found: %s", tenantID)
+		return fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound)
 	}
 
 	return nil
@@ -271,7 +277,7 @@ func (r *Repository) SetAllowedDomains(ctx context.Context, tenantID string, dom
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("tenant not found: %s", tenantID)
+		return fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound)
 	}
 
 	return nil
@@ -300,7 +306,7 @@ func (r *Repository) UpdateSettings(ctx context.Context, tenantID, settingsJSON 
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("tenant not found: %s", tenantID)
+		return fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound)
 	}
 
 	return nil

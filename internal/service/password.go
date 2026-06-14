@@ -19,6 +19,12 @@ import (
 // Cost of 12 provides a good balance between security and performance
 const DefaultBcryptCost = 12
 
+// bcryptMaxPasswordBytes is the maximum input length bcrypt considers. The
+// golang.org/x/crypto implementation rejects passwords longer than this rather
+// than silently truncating, so it doubles as the hard upper bound on password
+// length regardless of the configured MaxLength.
+const bcryptMaxPasswordBytes = 72
+
 // PasswordService handles password hashing and verification using bcrypt
 type PasswordService struct {
 	cost   int
@@ -73,6 +79,12 @@ func (s *PasswordService) HashPassword(password string) (string, error) {
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("Failed to hash password", "error", err.Error())
+		}
+		// A password over bcrypt's 72-byte limit is a caller input problem, not an
+		// internal fault; surface it as the matchable strength sentinel so callers
+		// that bypass ValidatePasswordStrength still get a clean classification.
+		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
+			return "", fmt.Errorf("password exceeds %d bytes: %w", bcryptMaxPasswordBytes, model.ErrPasswordTooWeak)
 		}
 		return "", fmt.Errorf("failed to hash password: %w", err)
 	}
@@ -156,38 +168,49 @@ func (s *PasswordService) DummyVerify(password string) {
 //	    return fmt.Errorf("password validation failed: %w", err)
 //	}
 func (s *PasswordService) ValidatePasswordStrength(password string, requirements model.PasswordStrengthRequirements) error {
-	var errors []string
+	var problems []string
 
 	// Check minimum length
 	if len(password) < requirements.MinLength {
-		errors = append(errors, fmt.Sprintf("must be at least %d characters", requirements.MinLength))
+		problems = append(problems, fmt.Sprintf("must be at least %d characters", requirements.MinLength))
+	}
+
+	// Check maximum length. bcrypt only hashes the first 72 bytes and rejects
+	// longer input, so cap at bcryptMaxPasswordBytes even when MaxLength is unset
+	// (0) or configured higher.
+	maxLength := requirements.MaxLength
+	if maxLength <= 0 || maxLength > bcryptMaxPasswordBytes {
+		maxLength = bcryptMaxPasswordBytes
+	}
+	if len(password) > maxLength {
+		problems = append(problems, fmt.Sprintf("must be at most %d bytes", maxLength))
 	}
 
 	// Check for uppercase letter
 	if requirements.RequireUpper && !hasUppercase(password) {
-		errors = append(errors, "must contain at least one uppercase letter")
+		problems = append(problems, "must contain at least one uppercase letter")
 	}
 
 	// Check for lowercase letter
 	if requirements.RequireLower && !hasLowercase(password) {
-		errors = append(errors, "must contain at least one lowercase letter")
+		problems = append(problems, "must contain at least one lowercase letter")
 	}
 
 	// Check for digit
 	if requirements.RequireNumber && !hasDigit(password) {
-		errors = append(errors, "must contain at least one digit")
+		problems = append(problems, "must contain at least one digit")
 	}
 
 	// Check for special character
 	if requirements.RequireSpecial && !hasSpecial(password) {
-		errors = append(errors, "must contain at least one special character")
+		problems = append(problems, "must contain at least one special character")
 	}
 
-	if len(errors) > 0 {
+	if len(problems) > 0 {
 		if s.logger != nil {
-			s.logger.Warn("Password strength validation failed", "errors", errors)
+			s.logger.Warn("Password strength validation failed", "errors", problems)
 		}
-		return fmt.Errorf("password validation failed: %s", strings.Join(errors, "; "))
+		return fmt.Errorf("password %s: %w", strings.Join(problems, "; "), model.ErrPasswordTooWeak)
 	}
 
 	if s.logger != nil {

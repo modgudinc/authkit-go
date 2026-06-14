@@ -67,6 +67,14 @@ func (r *Repository) CreateInvitation(ctx context.Context, req model.CreateInvit
 		req.MaxUses,
 	)
 	if err != nil {
+		// code is the primary key and is server-minted from crypto/rand, so a
+		// unique violation here is an astronomically rare internal collision, not a
+		// caller error. Surface a generic sentinel instead of leaking the raw
+		// constraint string, matching the other writers.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+			return fmt.Errorf("invitation code collision: %w", model.ErrInternal)
+		}
 		return fmt.Errorf("failed to create invitation: %w", err)
 	}
 
@@ -153,7 +161,7 @@ func (r *Repository) IncrementUseCount(ctx context.Context, code string) error {
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("invitation not found or max uses exceeded: %s", code)
+		return fmt.Errorf("invitation %q not found or max uses exceeded: %w", code, model.ErrInvitationInvalid)
 	}
 
 	return nil
@@ -302,7 +310,7 @@ func (r *Repository) InvalidateInvitation(ctx context.Context, code string) erro
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("invitation not found: %s", code)
+		return fmt.Errorf("invitation %q not found: %w", code, model.ErrNotFound)
 	}
 
 	return nil
@@ -438,7 +446,7 @@ func (r *Repository) DeleteInvitation(ctx context.Context, code string) error {
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("invitation not found: %s", code)
+		return fmt.Errorf("invitation %q not found: %w", code, model.ErrNotFound)
 	}
 
 	return nil

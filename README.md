@@ -828,14 +828,17 @@ composing them yourself reintroduces a TOCTOU / over-redemption window.
 > atomic. Use `ValidateInvitation` for display or pre-flight checks only.
 
 ```go
-// Read-only check (e.g. to show "invitation valid" in a UI before signup)
+// Read-only check (e.g. to show "invitation valid" in a UI before signup).
+// The boolean is the answer; a non-nil error means a genuine system fault, not
+// "the invitation is invalid".
 valid, err := invitationService.ValidateInvitation(ctx, invitationCode)
 if err != nil {
-    // Invalid invitation (not found, expired, or fully used)
-    return fmt.Errorf("invitation invalid: %w", err)
+    // Storage/system fault (already sanitized) — surface as a 500.
+    return fmt.Errorf("could not validate invitation: %w", err)
 }
 
 if !valid {
+    // Unknown, expired, or exhausted — a normal "not usable" outcome (false, nil).
     return fmt.Errorf("invitation cannot be used")
 }
 ```
@@ -844,7 +847,8 @@ if !valid {
 - Invitation exists
 - Not expired (ExpiresAt > NOW())
 - Has remaining uses (CurrentUses < MaxUses)
-- Returns detailed error messages
+- Unknown/expired/exhausted is reported as `(false, nil)`; `err` is reserved for
+  genuine storage faults
 
 ### List Invitations
 
@@ -1407,9 +1411,14 @@ Exported sentinels include `ErrInvalidCredentials`, `ErrAccountDisabled`,
 `ErrAccountLocked`, `ErrInvalidToken`, `ErrTokenRevoked`, `ErrInvalidRefreshToken`,
 `ErrRefreshTokenReuse`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrOTPRateLimited`,
 `ErrInvalidAPIKey`, `ErrIncorrectPassword`, `ErrInvitationInvalid`, `ErrUserExists`,
-`ErrNotFound`, and `ErrInternal`. `Login` deliberately collapses not-found /
-wrong-password / disabled / locked into a single `ErrInvalidCredentials` to avoid
-account enumeration; the specific reason is logged server-side only.
+`ErrPasswordTooWeak`, `ErrSecretEncryptionKeyMissing`, `ErrNotFound`, and
+`ErrInternal`. `ErrPasswordTooWeak` covers strength failures (too short, too long,
+or a missing character class) from `ChangePassword`/`ValidatePasswordStrength`/
+`HashPassword`; `ErrSecretEncryptionKeyMissing` is returned by `SecretService`
+operations when no valid encryption key was configured. `Login` deliberately
+collapses not-found / wrong-password / disabled / locked into a single
+`ErrInvalidCredentials` to avoid account enumeration; the specific reason is
+logged server-side only.
 
 **Do not render `err.Error()` to end users** — wrapped errors may carry internal
 context. Map to a status with `errors.Is`, and log the raw error server-side.

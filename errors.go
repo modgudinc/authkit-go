@@ -9,20 +9,22 @@ import "github.com/modgudinc/authkit-go/model"
 // can write errors.Is(err, authkit.ErrInvalidCredentials). These are the same
 // values the services return (model.Err*), so matching against either works.
 var (
-	ErrNotFound            = model.ErrNotFound
-	ErrInvalidCredentials  = model.ErrInvalidCredentials
-	ErrAccountDisabled     = model.ErrAccountDisabled
-	ErrAccountLocked       = model.ErrAccountLocked
-	ErrInvalidToken        = model.ErrInvalidToken
-	ErrTokenRevoked        = model.ErrTokenRevoked
-	ErrInvalidRefreshToken = model.ErrInvalidRefreshToken
-	ErrRefreshTokenReuse   = model.ErrRefreshTokenReuse
-	ErrInvalidOTP          = model.ErrInvalidOTP
-	ErrOTPLockedOut        = model.ErrOTPLockedOut
-	ErrOTPRateLimited      = model.ErrOTPRateLimited
-	ErrInvalidAPIKey       = model.ErrInvalidAPIKey
-	ErrIncorrectPassword   = model.ErrIncorrectPassword
-	ErrInvitationInvalid   = model.ErrInvitationInvalid
-	ErrUserExists          = model.ErrUserExists
-	ErrInternal            = model.ErrInternal
+	ErrNotFound                   = model.ErrNotFound
+	ErrInvalidCredentials         = model.ErrInvalidCredentials
+	ErrAccountDisabled            = model.ErrAccountDisabled
+	ErrAccountLocked              = model.ErrAccountLocked
+	ErrInvalidToken               = model.ErrInvalidToken
+	ErrTokenRevoked               = model.ErrTokenRevoked
+	ErrInvalidRefreshToken        = model.ErrInvalidRefreshToken
+	ErrRefreshTokenReuse          = model.ErrRefreshTokenReuse
+	ErrInvalidOTP                 = model.ErrInvalidOTP
+	ErrOTPLockedOut               = model.ErrOTPLockedOut
+	ErrOTPRateLimited             = model.ErrOTPRateLimited
+	ErrInvalidAPIKey              = model.ErrInvalidAPIKey
+	ErrIncorrectPassword          = model.ErrIncorrectPassword
+	ErrInvitationInvalid          = model.ErrInvitationInvalid
+	ErrUserExists                 = model.ErrUserExists
+	ErrPasswordTooWeak            = model.ErrPasswordTooWeak
+	ErrSecretEncryptionKeyMissing = model.ErrSecretEncryptionKeyMissing
+	ErrInternal                   = model.ErrInternal
 )

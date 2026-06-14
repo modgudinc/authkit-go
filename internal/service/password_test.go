@@ -4,6 +4,7 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -60,6 +61,38 @@ func TestPasswordStrengthValidation(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("expected error to contain %q, got %q", want, err.Error())
 		}
+	}
+	// A strength failure must be matchable with errors.Is so callers can map it to
+	// a 400 instead of treating it as an opaque internal error.
+	if !errors.Is(err, model.ErrPasswordTooWeak) {
+		t.Fatalf("expected weak-password error to wrap ErrPasswordTooWeak, got %v", err)
+	}
+}
+
+// TestPasswordStrengthRejectsOverLong verifies the bcrypt 72-byte cap is enforced
+// as a clean strength failure (default requirements) rather than surfacing later
+// as an opaque hashing error.
+func TestPasswordStrengthRejectsOverLong(t *testing.T) {
+	service := NewPasswordService(bcrypt.MinCost, nil)
+
+	long := strings.Repeat("A1a!", 20) // 80 bytes > 72
+	err := service.ValidatePasswordStrength(long, model.DefaultPasswordRequirements())
+	if err == nil {
+		t.Fatal("expected an over-72-byte password to fail validation")
+	}
+	if !errors.Is(err, model.ErrPasswordTooWeak) {
+		t.Fatalf("expected over-long error to wrap ErrPasswordTooWeak, got %v", err)
+	}
+}
+
+// TestHashPasswordOverLongReturnsSentinel verifies callers that bypass
+// ValidatePasswordStrength (e.g. the invitation flow) still get a matchable
+// ErrPasswordTooWeak instead of a generic "failed to hash password" error.
+func TestHashPasswordOverLongReturnsSentinel(t *testing.T) {
+	service := NewPasswordService(bcrypt.MinCost, nil)
+
+	if _, err := service.HashPassword(strings.Repeat("x", 100)); !errors.Is(err, model.ErrPasswordTooWeak) {
+		t.Fatalf("expected over-long HashPassword to wrap ErrPasswordTooWeak, got %v", err)
 	}
 }
 

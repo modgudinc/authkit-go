@@ -384,7 +384,7 @@ func (r *Repository) DeleteByTokenHash(ctx context.Context, tokenHash string) er
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("refresh token not found")
+		return fmt.Errorf("refresh token not found: %w", model.ErrNotFound)
 	}
 
 	return nil

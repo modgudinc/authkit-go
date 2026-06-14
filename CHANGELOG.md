@@ -8,6 +8,64 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-14
+
+Correctness, security, and error-contract hardening from a full library review.
+The error-handling changes make more failure modes matchable with `errors.Is`.
+Some behavior changes (noted below) are breaking, as acceptable pre-1.0, but no
+exported `authkit` function signatures changed and no migration is required.
+
+### Security
+
+- **Encrypted secrets no longer accept an unauthenticated ciphertext format.**
+  `decrypt` now requires the `v1:` marker and always authenticates against the
+  `(tenant_id, key)` AAD; the legacy prefix-less path is removed. Previously an
+  attacker who could write the secrets column could strip the marker to bypass
+  the context binding and relocate a value to another row. There are no released
+  consumers, so no legacy ciphertext exists to migrate.
+
+### Fixed
+
+- **Status-change audit attribution is explicit, not inferred.** The
+  `changed_by_type` of a `user_status_changes` row is now set from the operation's
+  provenance — `system` only for the automatic failed-login lockout
+  (`RegisterFailedLogin`), `admin` for every explicit admin mutation. Previously
+  it was inferred from `failed_login_count >= 5`, so an admin locking a user who
+  already had several failed attempts was mis-recorded as `system`.
+- **`ValidateInvitation` no longer returns an error for a normally-invalid
+  invitation.** An unknown, expired, or exhausted invitation is reported as
+  `(false, nil)`; the error is reserved for genuine storage faults (sanitized). A
+  caller branching on `err != nil` no longer treats an expired invite as a 500.
+- **`errors.Is(err, ErrNotFound)` now matches the id/name-scoped mutators.**
+  `Update`, `SetPassword`, `IncrementTokenVersion`, `IncrementFailedLoginCount`,
+  `UpdateLastLogin`, `UpdateRolesByTenant`, API-key/secret/tenant/invitation/
+  refresh-token deletes, and the OTP delete now wrap `model.ErrNotFound` instead
+  of returning a bare string.
+
+### Changed (breaking)
+
+- **Admin `Lock` no longer increments `failed_login_count`.** An explicit admin
+  lock is now identical to `LockByTenant`: it sets the locked state without
+  touching the failed-login counter (which tracks authentication attempts, not
+  admin actions).
+- **`AddAllowedDomain` is now idempotent.** Adding a domain that is already
+  present succeeds (and touches `updated_at`) instead of returning an error; a
+  zero-row result now unambiguously means the tenant does not exist
+  (`ErrNotFound`).
+
+### Added
+
+- `ErrPasswordTooWeak` — strength failures (too short, too long, missing a
+  required character class) are now matchable. `PasswordStrengthRequirements`
+  gains a `MaxLength` (default 72, bcrypt's input cap); over-cap passwords are
+  rejected as a clean validation error, including via `HashPassword` for callers
+  that bypass `ValidatePasswordStrength`.
+- `ErrSecretEncryptionKeyMissing` — a missing/invalid `SecretConfig.EncryptionKey`
+  now surfaces from the first `SecretService` operation as a matchable sentinel
+  instead of an opaque internal error.
+- `CreateInvitation` maps the (astronomically rare) server-minted-code collision
+  to `ErrInternal` instead of leaking the raw constraint string.
+
 ## [0.5.0] - 2026-06-14
 
 Identifier-generation overhaul and a migration consolidation. Because no released
@@ -389,7 +447,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/modgudinc/authkit-go/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/modgudinc/authkit-go/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/modgudinc/authkit-go/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/modgudinc/authkit-go/compare/v0.3.0...v0.4.0

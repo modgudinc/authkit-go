@@ -263,7 +263,7 @@ func (r *Repository) DeleteVerificationCode(ctx context.Context, tenantID, email
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("verification code not found")
+		return fmt.Errorf("verification code not found: %w", model.ErrNotFound)
 	}
 
 	return nil

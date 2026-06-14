@@ -72,6 +72,18 @@ var (
 	// when accepting an invitation for an email that already has an account.
 	ErrUserExists = errors.New("authkit: user already exists")
 
+	// ErrPasswordTooWeak is returned (wrapped) when a password fails the strength
+	// policy — too short, too long (bcrypt caps input at 72 bytes), or missing a
+	// required character class. The specific reason is included as wrapping
+	// context; callers branch on the sentinel with errors.Is.
+	ErrPasswordTooWeak = errors.New("authkit: password does not meet strength requirements")
+
+	// ErrSecretEncryptionKeyMissing is returned by SecretService operations when no
+	// (or an invalid-length) secret encryption key was configured. It surfaces a
+	// construction-time misconfiguration as a matchable sentinel instead of an
+	// opaque internal error.
+	ErrSecretEncryptionKeyMissing = errors.New("authkit: secret encryption key not configured")
+
 	// ErrInternal is returned (wrapped) when an unexpected internal/storage error
 	// occurs. The underlying cause is logged server-side; callers receive this
 	// generic error so driver/schema details do not leak across the API boundary.

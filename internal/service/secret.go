@@ -19,12 +19,11 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
-// secretCipherV1Prefix marks ciphertext encrypted with context-binding AAD (the
-// (tenant_id, key) pair). It is prepended to the base64 blob; base64 never
-// contains ':', so its presence unambiguously distinguishes v1 ciphertext from
-// legacy blobs (which are bare base64, encrypted without AAD). This lets the
-// AAD hardening roll out without a re-encryption migration: legacy values still
-// decrypt, and every new write is v1.
+// secretCipherV1Prefix is the ciphertext format marker. It is prepended to the
+// base64 blob; base64 never contains ':', so its presence unambiguously tags the
+// format and leaves room for future schemes (v2, …) without ambiguity. Every
+// stored value must carry it: ciphertext is always authenticated against the
+// (tenant_id, key) AAD — there is no unauthenticated legacy path.
 const secretCipherV1Prefix = "v1:"
 
 // secretAAD binds a ciphertext to the row it belongs to, so a value copied to a
@@ -79,7 +78,7 @@ func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequ
 
 	// Validate encryption key
 	if len(s.encryptionKey) != 32 {
-		return nil, fmt.Errorf("encryption key not configured or invalid length")
+		return nil, fmt.Errorf("save secret: %w", model.ErrSecretEncryptionKeyMissing)
 	}
 
 	// Encrypt the plaintext value, binding it to its (tenant, key) context.
@@ -126,7 +125,7 @@ func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequ
 func (s *SecretService) GetSecret(ctx context.Context, tenantID, key string) (string, error) {
 	// Validate encryption key
 	if len(s.encryptionKey) != 32 {
-		return "", fmt.Errorf("encryption key not configured or invalid length")
+		return "", fmt.Errorf("get secret: %w", model.ErrSecretEncryptionKeyMissing)
 	}
 
 	// Get encrypted value from repository
@@ -230,18 +229,20 @@ func (s *SecretService) encrypt(plaintext, tenantID, key string) (string, error)
 	return secretCipherV1Prefix + base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// decrypt decrypts ciphertext using AES-256-GCM. v1 ciphertext (the
-// secretCipherV1Prefix marker) is authenticated against the (tenantID, key) AAD;
-// legacy ciphertext (bare base64, written before AAD binding) is decrypted
-// without AAD for backward compatibility.
+// decrypt decrypts ciphertext using AES-256-GCM, authenticating it against its
+// (tenantID, key) context via the GCM additional authenticated data. The
+// ciphertext must carry the secretCipherV1Prefix marker; anything else is
+// rejected as malformed. There is deliberately no unauthenticated fallback: an
+// attacker who can write the column must not be able to strip the marker to
+// bypass the context binding.
 func (s *SecretService) decrypt(ciphertext, tenantID, key string) (string, error) {
-	var aad []byte
-	if rest, ok := strings.CutPrefix(ciphertext, secretCipherV1Prefix); ok {
-		ciphertext = rest
-		aad = secretAAD(tenantID, key)
+	rest, ok := strings.CutPrefix(ciphertext, secretCipherV1Prefix)
+	if !ok {
+		return "", fmt.Errorf("unrecognized secret ciphertext format")
 	}
+	aad := secretAAD(tenantID, key)
 
-	data, err := base64.StdEncoding.DecodeString(ciphertext)
+	data, err := base64.StdEncoding.DecodeString(rest)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode base64: %w", err)
 	}

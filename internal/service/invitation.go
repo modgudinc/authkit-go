@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -190,18 +191,23 @@ func (s *InvitationService) GetInvitation(ctx context.Context, code string) (*mo
 	return invitation, nil
 }
 
-// ValidateInvitation validates an invitation for use
+// ValidateInvitation reports whether an invitation is currently usable.
 //
 // Flow:
 // 1. Retrieve invitation by code
 // 2. Check expiration
 // 3. Check usage limits
 //
+// The boolean is the answer; the error is reserved for genuine system faults.
+// A code that is unknown, expired, or exhausted is a normal "not usable" outcome
+// and is returned as (false, nil) — callers should branch on the bool, not on
+// err. Only a real storage/driver failure yields a non-nil (sanitized) error.
+//
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
 //   - code: Invitation code
 //
-// Returns true if valid, false otherwise with error message
+// Returns (true, nil) if usable, (false, nil) if not usable, (false, err) on fault.
 func (s *InvitationService) ValidateInvitation(ctx context.Context, code string) (bool, error) {
 	if s.logger != nil {
 		s.logger.Info("Validating invitation",
@@ -209,28 +215,35 @@ func (s *InvitationService) ValidateInvitation(ctx context.Context, code string)
 		)
 	}
 
-	// Get invitation
+	// Get invitation. An unknown code is simply not usable, not a fault.
 	invitation, err := s.repo.GetInvitation(ctx, code)
 	if err != nil {
+		if errors.Is(err, model.ErrNotFound) {
+			return false, nil
+		}
 		if s.logger != nil {
-			s.logger.Error("Invitation not found for validation",
+			s.logger.Error("Failed to load invitation for validation",
 				"code", maskCode(code),
 				"error", err.Error(),
 			)
 		}
-		return false, err
+		return false, sanitizeError(s.logger, "validate invitation", err)
 	}
 
-	// Validate using repository logic
+	// Validate using repository logic. Expired/exhausted is a known not-usable
+	// outcome surfaced via the bool, not the error.
 	valid, err := s.repo.IsValid(invitation)
 	if err != nil {
+		if errors.Is(err, model.ErrInvitationInvalid) {
+			return false, nil
+		}
 		if s.logger != nil {
 			s.logger.Error("Invitation validation failed",
 				"code", maskCode(code),
 				"error", err.Error(),
 			)
 		}
-		return false, err
+		return false, sanitizeError(s.logger, "validate invitation", err)
 	}
 
 	if s.logger != nil {

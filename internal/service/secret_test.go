@@ -4,13 +4,17 @@
 package service
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/modgudinc/authkit-go/model"
 )
 
 const (
@@ -59,14 +63,15 @@ func TestSecretServiceDecryptRejectsWrongContext(t *testing.T) {
 	}
 }
 
-// TestSecretServiceDecryptsLegacyCiphertext verifies backward compatibility:
-// ciphertext written before AAD binding (bare base64, no v1 prefix, no AAD) still
-// decrypts under the new code.
-func TestSecretServiceDecryptsLegacyCiphertext(t *testing.T) {
+// TestSecretServiceRejectsPrefixlessCiphertext verifies the anti-downgrade
+// hardening: a prefix-less blob (the old "legacy" format, encrypted without AAD)
+// is rejected rather than decrypted. Otherwise an attacker who could write the
+// column could strip the v1 marker to bypass the (tenant, key) context binding.
+func TestSecretServiceRejectsPrefixlessCiphertext(t *testing.T) {
 	key := []byte(testSecretKey)
 	svc := NewSecretService(nil, key, nil)
 
-	// Hand-roll a legacy blob: nonce || Seal(..., nil AAD), bare base64, no prefix.
+	// Hand-roll a prefix-less blob: nonce || Seal(..., nil AAD), bare base64.
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		t.Fatalf("cipher: %v", err)
@@ -79,14 +84,10 @@ func TestSecretServiceDecryptsLegacyCiphertext(t *testing.T) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		t.Fatalf("nonce: %v", err)
 	}
-	legacy := base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte("legacy-secret"), nil))
+	prefixless := base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte("legacy-secret"), nil))
 
-	plain, err := svc.decrypt(legacy, testTenant, testKeyName)
-	if err != nil {
-		t.Fatalf("decrypt legacy: %v", err)
-	}
-	if plain != "legacy-secret" {
-		t.Fatalf("plain = %q, want legacy-secret", plain)
+	if _, err := svc.decrypt(prefixless, testTenant, testKeyName); err == nil {
+		t.Fatal("expected prefix-less ciphertext to be rejected")
 	}
 }
 
@@ -124,6 +125,24 @@ func TestSecretServiceRejectsInvalidKeyLength(t *testing.T) {
 	}
 	if _, err := svc.decrypt("c2hvcnQ=", testTenant, testKeyName); err == nil {
 		t.Fatal("expected invalid key length to fail decrypt")
+	}
+}
+
+// TestSecretServiceMissingKeyReturnsSentinel verifies a misconfigured (or absent)
+// encryption key surfaces as a matchable ErrSecretEncryptionKeyMissing at the
+// first secret operation, not as an opaque internal error.
+func TestSecretServiceMissingKeyReturnsSentinel(t *testing.T) {
+	ctx := context.Background()
+	svc := NewSecretService(nil, []byte("too-short"), nil) // not 32 bytes
+
+	_, saveErr := svc.SaveSecret(ctx, model.SaveSecretRequest{TenantID: testTenant, Key: testKeyName, PlainValue: "v"})
+	if !errors.Is(saveErr, model.ErrSecretEncryptionKeyMissing) {
+		t.Fatalf("SaveSecret: expected ErrSecretEncryptionKeyMissing, got %v", saveErr)
+	}
+
+	_, getErr := svc.GetSecret(ctx, testTenant, testKeyName)
+	if !errors.Is(getErr, model.ErrSecretEncryptionKeyMissing) {
+		t.Fatalf("GetSecret: expected ErrSecretEncryptionKeyMissing, got %v", getErr)
 	}
 }
 

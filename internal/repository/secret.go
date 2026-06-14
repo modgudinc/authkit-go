@@ -172,7 +172,7 @@ func (r *Repository) DeleteSecret(ctx context.Context, tenantID, key string) err
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("secret not found: %s", key)
+		return fmt.Errorf("secret %q not found: %w", key, model.ErrNotFound)
 	}
 
 	return nil
@@ -220,7 +220,7 @@ func (r *Repository) UpdateSecretVerified(ctx context.Context, tenantID, key str
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("secret not found: %s", key)
+		return fmt.Errorf("secret %q not found: %w", key, model.ErrNotFound)
 	}
 
 	return nil

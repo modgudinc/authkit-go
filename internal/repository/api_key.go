@@ -253,7 +253,7 @@ func (r *Repository) UpdateAPIKeyLastUsed(ctx context.Context, keyID, tenantID s
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("api key not found: %s", keyID)
+		return fmt.Errorf("api key %s not found: %w", keyID, model.ErrNotFound)
 	}
 
 	return nil
@@ -282,7 +282,7 @@ func (r *Repository) DeleteAPIKey(ctx context.Context, keyID, tenantID string) e
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("api key not found: %s", keyID)
+		return fmt.Errorf("api key %s not found: %w", keyID, model.ErrNotFound)
 	}
 
 	return nil

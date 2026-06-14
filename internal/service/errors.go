@@ -29,6 +29,8 @@ var publicSentinels = []error{
 	model.ErrIncorrectPassword,
 	model.ErrInvitationInvalid,
 	model.ErrUserExists,
+	model.ErrPasswordTooWeak,
+	model.ErrSecretEncryptionKeyMissing,
 }
 
 // sanitizeError generalizes a repository error before it crosses the public API

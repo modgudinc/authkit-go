@@ -531,3 +531,128 @@ func TestRegisterFailedLoginAuditsSystemLock(t *testing.T) {
 		t.Fatalf("got %d rows, status=%q changed_by_type=%q; want 1 lock/system", n, statusType, changedByType)
 	}
 }
+
+// TestAdminLockIsAdminAttributedAndKeepsFailedCount verifies the explicit admin
+// Lock path is attributed to 'admin' (never inferred to 'system' from the failed
+// count) and does not touch failed_login_count, matching LockByTenant.
+func TestAdminLockIsAdminAttributedAndKeepsFailedCount(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "adminlock.test"
+	userID := createTenantAndUser(t, ctx, &repo, tenantID)
+
+	// Pre-load a non-trivial failed-login count that already sits at/above the
+	// auto-lock threshold; the old code would have inferred this admin lock as
+	// 'system'. The explicit provenance must keep it 'admin'.
+	if _, err := db.Exec(`UPDATE authkit.users SET failed_login_count = 4 WHERE id = $1`, userID); err != nil {
+		t.Fatalf("seed failed_login_count: %v", err)
+	}
+
+	if err := repo.Lock(ctx, userID, nil); err != nil {
+		t.Fatalf("admin lock: %v", err)
+	}
+
+	var changedByType string
+	var failedCount int
+	if err := db.QueryRow(`
+		SELECT changed_by_type FROM authkit.user_status_changes
+		WHERE user_id = $1 AND status_type = 'lock'`, userID).Scan(&changedByType); err != nil {
+		t.Fatalf("read lock audit row: %v", err)
+	}
+	if changedByType != "admin" {
+		t.Fatalf("admin lock attributed to %q, want admin", changedByType)
+	}
+	if err := db.QueryRow(`SELECT failed_login_count FROM authkit.users WHERE id = $1`, userID).Scan(&failedCount); err != nil {
+		t.Fatalf("read failed_login_count: %v", err)
+	}
+	if failedCount != 4 {
+		t.Fatalf("admin Lock changed failed_login_count to %d, want it left at 4", failedCount)
+	}
+}
+
+// TestNotFoundMutatorsWrapErrNotFound verifies the id/name-scoped mutators that
+// previously returned bare strings now wrap model.ErrNotFound, so callers can map
+// a missing row to a 404 with errors.Is.
+func TestNotFoundMutatorsWrapErrNotFound(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	missingUser := uuid.Must(uuid.NewV7())
+
+	cases := map[string]error{
+		"Update":       repo.Update(ctx, missingUser, model.UpdateUserRequest{DisplayName: "x", Roles: []string{"r"}}),
+		"UpdateName":   repo.UpdateName(ctx, "no-such-tenant", "x"),
+		"DeleteAPIKey": repo.DeleteAPIKey(ctx, uuid.Must(uuid.NewV7()).String(), "no-such-tenant"),
+		"DeleteSecret": repo.DeleteSecret(ctx, "no-such-tenant", "no-such-key"),
+		"DeleteInvite": repo.DeleteInvitation(ctx, "NOSUCHCODE"),
+	}
+	for name, err := range cases {
+		if !errors.Is(err, model.ErrNotFound) {
+			t.Fatalf("%s on a missing record: got %v, want wrap of ErrNotFound", name, err)
+		}
+	}
+}
+
+// TestValidateInvitationKnownInvalidIsFalseNil verifies the corrected contract:
+// an unknown or exhausted invitation is a normal "not usable" outcome returned as
+// (false, nil), not a (false, error) that a caller would misread as a fault.
+func TestValidateInvitationKnownInvalidIsFalseNil(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "invite.test"
+	createdBy := createTenantAndUser(t, ctx, &repo, tenantID)
+	svc := service.NewInvitationService(&repo, nil)
+
+	// Unknown code: not usable, not a fault.
+	if valid, err := svc.ValidateInvitation(ctx, "DOESNOTEXISTCODE0001"); valid || err != nil {
+		t.Fatalf("unknown code: got (valid=%v, err=%v), want (false, nil)", valid, err)
+	}
+
+	// Exhausted code (single-use, already consumed): not usable, not a fault. (A
+	// past expiry can't be seeded — a CHECK constraint requires expires_at >
+	// created_at — so exhaustion exercises the same ErrInvitationInvalid branch.)
+	const code = "EXHAUSTEDCODE0000001"
+	if err := repo.CreateInvitation(ctx, model.CreateInvitationRequest{
+		Code:      code,
+		TenantID:  tenantID,
+		CreatedBy: createdBy,
+		Roles:     []string{"member"},
+		Email:     "invitee@" + tenantID,
+		ExpiresAt: time.Now().Add(time.Hour),
+		MaxUses:   1,
+	}); err != nil {
+		t.Fatalf("seed invitation: %v", err)
+	}
+	if err := repo.IncrementUseCount(ctx, code); err != nil {
+		t.Fatalf("exhaust invitation: %v", err)
+	}
+	if valid, err := svc.ValidateInvitation(ctx, code); valid || err != nil {
+		t.Fatalf("exhausted code: got (valid=%v, err=%v), want (false, nil)", valid, err)
+	}
+}
