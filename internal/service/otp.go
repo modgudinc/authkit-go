@@ -32,7 +32,7 @@ type OTPService struct {
 
 type otpRepository interface {
 	GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*model.VerificationCode, error)
-	UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest) error
+	UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest, rateLimit time.Duration) (bool, error)
 	ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (model.OTPConsumeResult, error)
 	DeleteVerificationCode(ctx context.Context, tenantID, email, purpose string) error
 	DeleteExpiredVerificationCodes(ctx context.Context) (int64, error)
@@ -125,7 +125,11 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 		ExpiresAt: expiresAt,
 	}
 
-	err = s.repo.UpsertVerificationCode(ctx, req)
+	// Authoritative, race-free rate-limit enforcement: the upsert only replaces an
+	// existing code older than rateLimitDuration. stored == false means a more
+	// recent code already exists (a concurrent request won the race past the
+	// fast-path check above), so report rate-limited rather than overwriting it.
+	stored, err := s.repo.UpsertVerificationCode(ctx, req, s.rateLimitDuration)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("failed to store OTP in database",
@@ -135,6 +139,15 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 			)
 		}
 		return nil, fmt.Errorf("failed to store OTP: %w", err)
+	}
+	if !stored {
+		if s.logger != nil {
+			s.logger.Warn("OTP generation rate limit exceeded (atomic guard)",
+				"email", maskEmail(email),
+				"purpose", purpose,
+			)
+		}
+		return nil, fmt.Errorf("please wait before requesting a new OTP: %w", model.ErrOTPRateLimited)
 	}
 
 	if s.logger != nil {

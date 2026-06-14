@@ -167,15 +167,15 @@ fmt.Printf("Key ID: %s\n", response.KeyID)
 ```go
 apiKey := "sk_live_abc123..." // From HTTP header or SDK
 
-context, err := apiKeyService.ValidateAPIKey(ctx, apiKey)
+keyCtx, err := apiKeyService.ValidateAPIKey(ctx, apiKey)
 if err != nil {
     // Invalid or expired key
     return err
 }
 
 // Use tenant context
-fmt.Printf("Tenant ID: %s\n", context.TenantID)
-fmt.Printf("Key ID: %s\n", context.KeyID)
+fmt.Printf("Tenant ID: %s\n", keyCtx.TenantID)
+fmt.Printf("Key ID: %s\n", keyCtx.KeyID)
 ```
 
 ### List API Keys
@@ -1382,17 +1382,37 @@ The library optimizes database access by separating read and write operations:
 
 ## Error Handling
 
-All service methods return descriptive errors:
+Service methods return **sentinel errors** (`authkit.Err*`), wrapped with `%w`
+for context, so branch on them with `errors.Is` rather than matching error
+strings. Map them to status codes — and treat anything you don't recognize
+(including `authkit.ErrInternal`) as a 500, **not** a 401:
 
 ```go
-response, err := apiKeyService.CreateAPIKey(ctx, req)
-if err != nil {
-    // Errors include context for debugging
-    // Example: "failed to create API key: invalid tenant_id"
-    log.Error("API key creation failed", zap.Error(err))
-    return err
+claims, err := authService.ValidateJWT(ctx, token)
+switch {
+case err == nil:
+    // authorized — use claims
+case errors.Is(err, authkit.ErrInvalidToken), errors.Is(err, authkit.ErrTokenRevoked):
+    http.Error(w, "unauthorized", http.StatusUnauthorized) // 401
+case errors.Is(err, authkit.ErrAccountDisabled), errors.Is(err, authkit.ErrAccountLocked):
+    http.Error(w, "forbidden", http.StatusForbidden) // 403
+default:
+    // ErrInternal or any unexpected fault: log server-side, do NOT leak err to the client
+    log.Error("jwt validation failed", zap.Error(err))
+    http.Error(w, "internal error", http.StatusInternalServerError) // 500
 }
 ```
+
+Exported sentinels include `ErrInvalidCredentials`, `ErrAccountDisabled`,
+`ErrAccountLocked`, `ErrInvalidToken`, `ErrTokenRevoked`, `ErrInvalidRefreshToken`,
+`ErrRefreshTokenReuse`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrOTPRateLimited`,
+`ErrInvalidAPIKey`, `ErrIncorrectPassword`, `ErrInvitationInvalid`, `ErrUserExists`,
+`ErrNotFound`, and `ErrInternal`. `Login` deliberately collapses not-found /
+wrong-password / disabled / locked into a single `ErrInvalidCredentials` to avoid
+account enumeration; the specific reason is logged server-side only.
+
+**Do not render `err.Error()` to end users** — wrapped errors may carry internal
+context. Map to a status with `errors.Is`, and log the raw error server-side.
 
 ## Performance Considerations
 

@@ -39,7 +39,7 @@ func (f *fakeOTPRepository) GetVerificationCode(ctx context.Context, tenantID, e
 	return f.code, nil
 }
 
-func (f *fakeOTPRepository) UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest) error {
+func (f *fakeOTPRepository) UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest, rateLimit time.Duration) (bool, error) {
 	f.upserted = &req
 	f.code = &model.VerificationCode{
 		TenantID:  req.TenantID,
@@ -48,7 +48,7 @@ func (f *fakeOTPRepository) UpsertVerificationCode(ctx context.Context, req mode
 		Purpose:   req.Purpose,
 		ExpiresAt: req.ExpiresAt,
 	}
-	return nil
+	return true, nil
 }
 
 func (f *fakeOTPRepository) ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (model.OTPConsumeResult, error) {

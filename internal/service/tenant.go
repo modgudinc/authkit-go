@@ -122,6 +122,13 @@ func (s *TenantService) CreateTenant(ctx context.Context, req model.CreateTenant
 		)
 	}
 
+	// A tenant must have at least one allowed domain (the schema enforces this with
+	// a NOT NULL + non-empty CHECK; reject up front with a clear error instead of
+	// surfacing a raw constraint violation).
+	if len(req.AllowedDomains) == 0 {
+		return nil, fmt.Errorf("at least one allowed_domain is required")
+	}
+
 	// Validate and normalize all allowed_domains. Domains are lowercased on write
 	// so the (already-lowercased) lookups in ValidateDomainAccess and
 	// GetTenantByDomain match — fulfilling the documented case-insensitive
@@ -275,6 +282,13 @@ func (s *TenantService) SetAllowedDomains(ctx context.Context, tenantID string, 
 			"tenant_id", tenantID,
 			"domains", strings.Join(domains, ","),
 		)
+	}
+
+	// A tenant must keep at least one allowed domain (NOT NULL + non-empty CHECK in
+	// the schema); reject an empty list up front rather than emitting a raw
+	// constraint violation.
+	if len(domains) == 0 {
+		return fmt.Errorf("at least one allowed_domain is required")
 	}
 
 	// Validate and normalize all domains (lowercased on write; see CreateTenant).

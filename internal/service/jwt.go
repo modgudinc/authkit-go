@@ -232,12 +232,12 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 // Returns a base64-encoded random token string (32 bytes = 44 characters)
 //
 // Note: Refresh tokens are NOT JWTs. They are random tokens stored in the database
-// with a SHA256 hash. This enables single-use refresh tokens and rotation.
+// with an HMAC-SHA256 hash. This enables single-use refresh tokens and rotation.
 //
 // Flow:
 //  1. Generate 32 random bytes using crypto/rand
 //  2. Encode to base64 for safe transmission
-//  3. Store SHA256 hash in database (not the plaintext token)
+//  3. Store the HMAC-SHA256 hash in database (not the plaintext token)
 //  4. Return plaintext token to client (only time it's visible)
 //
 // Example:
@@ -246,7 +246,7 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 //	if err != nil {
 //	    return fmt.Errorf("failed to generate refresh token: %w", err)
 //	}
-//	// Store SHA256(refreshToken) in database
+//	// Store HMAC-SHA256(refreshToken) in database (via TokenService)
 //	// Return refreshToken to client
 func (s *JWTService) GenerateRefreshToken() (string, error) {
 	if s.logger != nil {

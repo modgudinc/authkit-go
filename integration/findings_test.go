@@ -208,13 +208,13 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 	createTenantAndUser(t, ctx, &repo, tenantID)
 	email := "expired@" + tenantID
 
-	if err := repo.UpsertVerificationCode(ctx, model.CreateVerificationCodeRequest{
+	if _, err := repo.UpsertVerificationCode(ctx, model.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
 		Code:      "123456",
 		Purpose:   "signup",
 		ExpiresAt: time.Now().Add(-time.Minute),
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("upsert expired code: %v", err)
 	}
 
@@ -280,5 +280,174 @@ func TestMigration000002UUIDConsistency(t *testing.T) {
 		if !strings.Contains(def, "uuid_generate_v7") {
 			t.Fatalf("%s.id default = %q, want authkit.uuid_generate_v7()", tbl, def)
 		}
+	}
+}
+
+// TestRefreshTokenIPRoundTrip is the regression test for reading the INET
+// ip_address column under the pgx driver. The hot rotation path does not SELECT
+// ip_address, so a refresh token stored WITH a client IP is only ever read back
+// by GetByTokenHash / GetByUserID — paths no other test exercises with a non-nil
+// IP. This asserts the INET value round-trips into the model's *string field.
+func TestRefreshTokenIPRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "ip.test"
+	userID := createTenantAndUser(t, ctx, &repo, tenantID)
+
+	ip, ua, dev := "127.0.0.1", "integration-agent", "test-device"
+	if _, err := repo.CreateRefreshToken(ctx, model.CreateRefreshTokenRequest{
+		UserID:     userID,
+		TokenHash:  "ip-roundtrip-hash",
+		IPAddress:  &ip,
+		UserAgent:  &ua,
+		DeviceName: &dev,
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("create refresh token with IP: %v", err)
+	}
+
+	// GetByTokenHash scans ip_address (INET) into *string.
+	got, err := repo.GetByTokenHash(ctx, "ip-roundtrip-hash")
+	if err != nil {
+		t.Fatalf("GetByTokenHash with non-nil IP: %v", err)
+	}
+	if got.IPAddress == nil || *got.IPAddress != ip {
+		t.Fatalf("GetByTokenHash ip_address = %v, want %q", got.IPAddress, ip)
+	}
+
+	// GetByUserID also scans ip_address.
+	list, err := repo.GetByUserID(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetByUserID with non-nil IP: %v", err)
+	}
+	if len(list) != 1 || list[0].IPAddress == nil || *list[0].IPAddress != ip {
+		t.Fatalf("GetByUserID ip_address = %+v, want %q", list, ip)
+	}
+}
+
+// TestAPIKeyUUIDKeyIDRoundTripAndIndex covers two previously-untested things on
+// the api_keys table after the 000002 (key_id -> UUID) and 000003 (drop the
+// redundant key_hash index) migrations: that an API key with a UUID key_id
+// inserts and reads back cleanly, and that 000003 leaves exactly the UNIQUE index
+// on key_hash (the redundant idx_api_keys_key_hash is gone).
+func TestAPIKeyUUIDKeyIDRoundTripAndIndex(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyMigration(t, db, "000002_uuid_consistency.up.sql")
+	applyMigration(t, db, "000003_drop_redundant_api_key_hash_index.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "apikey.test"
+	createdBy := createTenantAndUser(t, ctx, &repo, tenantID)
+
+	keyID, err := uuid.NewV7()
+	if err != nil {
+		t.Fatalf("new key id: %v", err)
+	}
+	if err := repo.CreateAPIKey(ctx, repository.InsertAPIKeyParams{
+		KeyID:     keyID.String(),
+		KeyHash:   "test-key-hash",
+		TenantID:  tenantID,
+		Name:      "test key",
+		CreatedBy: createdBy,
+	}); err != nil {
+		t.Fatalf("create api key with UUID key_id: %v", err)
+	}
+
+	got, err := repo.GetAPIKey(ctx, keyID.String(), tenantID)
+	if err != nil {
+		t.Fatalf("get api key: %v", err)
+	}
+	if _, err := uuid.Parse(got.KeyID); err != nil {
+		t.Fatalf("returned key_id %q is not a UUID: %v", got.KeyID, err)
+	}
+	if got.KeyID != keyID.String() {
+		t.Fatalf("key_id = %q, want %q", got.KeyID, keyID.String())
+	}
+
+	// 000003: the redundant plain index is gone, the UNIQUE index remains.
+	indexCount := func(name string) int {
+		var n int
+		if err := db.QueryRow(`
+			SELECT count(*) FROM pg_indexes
+			WHERE schemaname = 'authkit' AND tablename = 'api_keys' AND indexname = $1
+		`, name).Scan(&n); err != nil {
+			t.Fatalf("query index %s: %v", name, err)
+		}
+		return n
+	}
+	if indexCount("idx_api_keys_key_hash") != 0 {
+		t.Fatal("expected redundant idx_api_keys_key_hash to be dropped by 000003")
+	}
+	if indexCount("api_keys_key_hash_key") != 1 {
+		t.Fatal("expected the UNIQUE key_hash index (api_keys_key_hash_key) to remain")
+	}
+}
+
+// TestUpsertVerificationCodeAtomicRateLimit verifies the rate limit is enforced
+// inside the upsert (no check-then-write TOCTOU): a second issuance within the
+// window does not overwrite the active code (stored=false), while rateLimit<=0
+// always stores.
+func TestUpsertVerificationCodeAtomicRateLimit(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "otp.rl.test"
+	createTenantAndUser(t, ctx, &repo, tenantID)
+
+	req := model.CreateVerificationCodeRequest{
+		TenantID:  tenantID,
+		Email:     "u@" + tenantID,
+		Code:      "111111",
+		Purpose:   "signup",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	// First issuance: no existing code, always stores.
+	stored, err := repo.UpsertVerificationCode(ctx, req, time.Minute)
+	if err != nil || !stored {
+		t.Fatalf("first upsert: stored=%v err=%v, want stored=true", stored, err)
+	}
+
+	// Second issuance within the window: the active code is too recent, so the
+	// conditional update affects no rows — rate-limited, code unchanged.
+	req2 := req
+	req2.Code = "222222"
+	stored, err = repo.UpsertVerificationCode(ctx, req2, time.Minute)
+	if err != nil {
+		t.Fatalf("second upsert err: %v", err)
+	}
+	if stored {
+		t.Fatal("second upsert within window stored=true, want false (rate-limited)")
+	}
+
+	// rateLimit <= 0 disables the limit and always stores.
+	stored, err = repo.UpsertVerificationCode(ctx, req2, 0)
+	if err != nil || !stored {
+		t.Fatalf("upsert with rateLimit=0: stored=%v err=%v, want stored=true", stored, err)
 	}
 }

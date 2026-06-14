@@ -180,6 +180,11 @@ func (r *Repository) SetPassword(ctx context.Context, userID uuid.UUID, hashedPa
 // VerifyPassword - Retrieves the stored password hash for verification
 // IMPORTANT: Returns the HASHED password for comparison at service layer
 // Password verification (hash comparison) must be done at service/controller layer
+//
+// Reads from the PRIMARY (rw), not a read replica: this hash backs a
+// security-sensitive auth gate (e.g. ChangePassword's old-password check), and a
+// lagging replica could return a stale hash right after a password change. This
+// matches the read-write split's rule that validation paths use the primary.
 // ============================================================================
 func (r *Repository) VerifyPassword(ctx context.Context, userID uuid.UUID) (string, error) {
 	query := `
@@ -189,7 +194,7 @@ func (r *Repository) VerifyPassword(ctx context.Context, userID uuid.UUID) (stri
 	`
 
 	var hashedPassword string
-	err := r.ro.QueryRowContext(ctx, r.q(query), userID).Scan(&hashedPassword)
+	err := r.rw.QueryRowContext(ctx, r.q(query), userID).Scan(&hashedPassword)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", fmt.Errorf("user not found: %w", model.ErrNotFound)

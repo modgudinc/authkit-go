@@ -27,6 +27,29 @@ func NewUserService(repo *repository.Repository, logger logger.Logger) *UserServ
 	}
 }
 
+const (
+	// defaultListLimit is used when a caller passes a non-positive page size.
+	defaultListLimit = 50
+	// maxListLimit caps a caller-supplied page size to avoid unbounded scans.
+	maxListLimit = 1000
+)
+
+// clampPagination bounds caller-supplied paging to a safe range: a non-positive
+// limit becomes defaultListLimit, an oversized one is capped at maxListLimit, and
+// a negative offset becomes 0 (a negative SQL LIMIT/OFFSET is otherwise an error).
+func clampPagination(limit, offset int) (int, int) {
+	switch {
+	case limit <= 0:
+		limit = defaultListLimit
+	case limit > maxListLimit:
+		limit = maxListLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
 // ============================================================================
 // User Creation & Management
 // ============================================================================
@@ -86,8 +109,11 @@ func (s *UserService) Exists(ctx context.Context, email, tenantID string) (bool,
 	return s.repo.Exists(ctx, normalizeEmail(email), tenantID)
 }
 
-// List retrieves users within a specific tenant with pagination
+// List retrieves users within a specific tenant with pagination. limit/offset are
+// clamped (see clampPagination) so caller-supplied values can't request an
+// unbounded scan or produce an invalid SQL LIMIT.
 func (s *UserService) List(ctx context.Context, tenantID string, limit, offset int) ([]*model.User, error) {
+	limit, offset = clampPagination(limit, offset)
 	users, err := s.repo.List(ctx, tenantID, limit, offset)
 	return users, sanitizeError(s.logger, "list users", err)
 }

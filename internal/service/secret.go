@@ -11,12 +11,28 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
 )
+
+// secretCipherV1Prefix marks ciphertext encrypted with context-binding AAD (the
+// (tenant_id, key) pair). It is prepended to the base64 blob; base64 never
+// contains ':', so its presence unambiguously distinguishes v1 ciphertext from
+// legacy blobs (which are bare base64, encrypted without AAD). This lets the
+// AAD hardening roll out without a re-encryption migration: legacy values still
+// decrypt, and every new write is v1.
+const secretCipherV1Prefix = "v1:"
+
+// secretAAD binds a ciphertext to the row it belongs to, so a value copied to a
+// different (tenant_id, key) — e.g. by DB tampering under the shared key — fails
+// authentication instead of decrypting as another tenant's secret.
+func secretAAD(tenantID, key string) []byte {
+	return []byte(tenantID + "\x00" + key)
+}
 
 // SecretService handles encrypted secret management including
 // creation, retrieval, and deletion of tenant-scoped secrets.
@@ -66,8 +82,8 @@ func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequ
 		return nil, fmt.Errorf("encryption key not configured or invalid length")
 	}
 
-	// Encrypt the plaintext value
-	encryptedValue, err := s.encrypt(req.PlainValue)
+	// Encrypt the plaintext value, binding it to its (tenant, key) context.
+	encryptedValue, err := s.encrypt(req.PlainValue, req.TenantID, req.Key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt secret: %w", err)
 	}
@@ -78,7 +94,7 @@ func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequ
 	// Save to repository
 	secret, err := s.repo.SaveSecret(ctx, req.TenantID, req.Key, encryptedValue, maskedValue, req.CreatedBy)
 	if err != nil {
-		return nil, fmt.Errorf("failed to save secret: %w", err)
+		return nil, sanitizeError(s.logger, "save secret", err)
 	}
 
 	if s.logger != nil {
@@ -119,8 +135,8 @@ func (s *SecretService) GetSecret(ctx context.Context, tenantID, key string) (st
 		return "", sanitizeError(s.logger, "get secret", err)
 	}
 
-	// Decrypt the value
-	plainValue, err := s.decrypt(encryptedValue)
+	// Decrypt the value, authenticating it against its (tenant, key) context.
+	plainValue, err := s.decrypt(encryptedValue, tenantID, key)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("Failed to decrypt secret",
@@ -140,7 +156,8 @@ func (s *SecretService) GetSecret(ctx context.Context, tenantID, key string) (st
 // Returns masked values only (not decrypted)
 // Ordered by key ASC
 func (s *SecretService) ListSecrets(ctx context.Context, tenantID string) ([]*model.Secret, error) {
-	return s.repo.ListSecrets(ctx, tenantID)
+	secrets, err := s.repo.ListSecrets(ctx, tenantID)
+	return secrets, sanitizeError(s.logger, "list secrets", err)
 }
 
 // DeleteSecret removes a secret
@@ -156,7 +173,7 @@ func (s *SecretService) DeleteSecret(ctx context.Context, tenantID, key string) 
 
 	err := s.repo.DeleteSecret(ctx, tenantID, key)
 	if err != nil {
-		return err
+		return sanitizeError(s.logger, "delete secret", err)
 	}
 
 	if s.logger != nil {
@@ -174,23 +191,24 @@ func (s *SecretService) DeleteSecret(ctx context.Context, tenantID, key string) 
 // Called after successful secret verification (e.g., API key test)
 // Also sets is_valid = true
 func (s *SecretService) MarkVerified(ctx context.Context, tenantID, key string) error {
-	return s.repo.UpdateSecretVerified(ctx, tenantID, key)
+	return sanitizeError(s.logger, "mark secret verified", s.repo.UpdateSecretVerified(ctx, tenantID, key))
 }
 
 // CountByTenant returns the count of secrets for a tenant
 func (s *SecretService) CountByTenant(ctx context.Context, tenantID string) (int, error) {
-	return s.repo.CountSecretsByTenant(ctx, tenantID)
+	n, err := s.repo.CountSecretsByTenant(ctx, tenantID)
+	return n, sanitizeError(s.logger, "count secrets", err)
 }
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
 
-// encrypt encrypts plaintext using AES-256-GCM
+// encrypt encrypts plaintext using AES-256-GCM, binding the ciphertext to its
+// (tenantID, key) context via the GCM additional authenticated data.
 //
-// The ciphertext format is: nonce (12 bytes) + encrypted data + auth tag (16 bytes)
-// Output is base64 encoded for storage
-func (s *SecretService) encrypt(plaintext string) (string, error) {
+// Output is "v1:" + base64(nonce (12 bytes) + encrypted data + auth tag (16 bytes)).
+func (s *SecretService) encrypt(plaintext, tenantID, key string) (string, error) {
 	block, err := aes.NewCipher(s.encryptionKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to create cipher: %w", err)
@@ -207,15 +225,22 @@ func (s *SecretService) encrypt(plaintext string) (string, error) {
 		return "", fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	// Encrypt and prepend nonce to ciphertext
-	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
+	// Encrypt with context-binding AAD and prepend nonce to ciphertext.
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), secretAAD(tenantID, key))
+	return secretCipherV1Prefix + base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// decrypt decrypts ciphertext using AES-256-GCM
-//
-// Expects base64 encoded input with format: nonce (12 bytes) + encrypted data + auth tag (16 bytes)
-func (s *SecretService) decrypt(ciphertext string) (string, error) {
+// decrypt decrypts ciphertext using AES-256-GCM. v1 ciphertext (the
+// secretCipherV1Prefix marker) is authenticated against the (tenantID, key) AAD;
+// legacy ciphertext (bare base64, written before AAD binding) is decrypted
+// without AAD for backward compatibility.
+func (s *SecretService) decrypt(ciphertext, tenantID, key string) (string, error) {
+	var aad []byte
+	if rest, ok := strings.CutPrefix(ciphertext, secretCipherV1Prefix); ok {
+		ciphertext = rest
+		aad = secretAAD(tenantID, key)
+	}
+
 	data, err := base64.StdEncoding.DecodeString(ciphertext)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode base64: %w", err)
@@ -237,7 +262,7 @@ func (s *SecretService) decrypt(ciphertext string) (string, error) {
 	}
 
 	nonce, ciphertextBytes := data[:nonceSize], data[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertextBytes, nil)
+	plaintext, err := gcm.Open(nil, nonce, ciphertextBytes, aad)
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt: %w", err)
 	}
@@ -251,9 +276,12 @@ func (s *SecretService) decrypt(ciphertext string) (string, error) {
 // Example: "cur_1234567890abcdef" -> "cur_************cdef"
 // Example: "sk-abc123def456" -> "sk-************f456"
 //
-// For short values (< 8 chars), returns "************"
+// For short values (< 12 chars) the whole value is masked: revealing a known
+// prefix plus the last 4 characters of, say, an 8-character secret would expose
+// most of it, so partial reveal is reserved for values long enough that it
+// leaks only a small fraction.
 func maskValue(value string) string {
-	if len(value) < 8 {
+	if len(value) < 12 {
 		return "************"
 	}
 

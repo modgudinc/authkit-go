@@ -460,13 +460,13 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 
 	email := "verify@" + tenantID
 
-	if err := repo.UpsertVerificationCode(ctx, model.CreateVerificationCodeRequest{
+	if _, err := repo.UpsertVerificationCode(ctx, model.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
 		Code:      "123456",
 		Purpose:   "signup",
 		ExpiresAt: time.Now().Add(time.Hour),
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("upsert verification code: %v", err)
 	}
 

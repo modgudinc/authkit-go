@@ -39,7 +39,15 @@ func RequireJWT(identity authkit.AuthKit, next http.Handler) http.Handler {
 
 		claims, err := identity.AuthService().ValidateJWT(r.Context(), token)
 		if err != nil {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			switch {
+			case errors.Is(err, authkit.ErrAccountDisabled), errors.Is(err, authkit.ErrAccountLocked):
+				http.Error(w, "forbidden", http.StatusForbidden) // 403
+			case errors.Is(err, authkit.ErrInvalidToken), errors.Is(err, authkit.ErrTokenRevoked):
+				http.Error(w, "unauthorized", http.StatusUnauthorized) // 401
+			default:
+				// ErrInternal or unexpected: log server-side, return 500 — not 401
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			}
 			return
 		}
 

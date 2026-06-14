@@ -34,7 +34,13 @@ import (
 // Uses UPSERT to replace any existing code for the same key and resets the
 // failed-attempt counter so a freshly issued code starts with a full budget.
 // ============================================================================
-func (r *Repository) UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest) error {
+// UpsertVerificationCode atomically issues a code for (tenant, email, purpose),
+// enforcing the generation rate limit in the same statement to avoid a
+// check-then-write TOCTOU. The ON CONFLICT update only replaces an existing code
+// once it is older than rateLimit; if a more recent code exists the update
+// affects zero rows and stored is false (rate-limited). A fresh insert (no
+// existing code) always stores. rateLimit <= 0 disables the limit.
+func (r *Repository) UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest, rateLimit time.Duration) (stored bool, err error) {
 	query := `
 		INSERT INTO {{schema}}.verification_codes (
 			tenant_id, email, code, purpose, attempts, expires_at, created_at
@@ -46,22 +52,30 @@ func (r *Repository) UpsertVerificationCode(ctx context.Context, req model.Creat
 			attempts = 0,
 			expires_at = EXCLUDED.expires_at,
 			created_at = EXCLUDED.created_at
+		WHERE verification_codes.created_at <= $7
 	`
 
 	now := time.Now()
-	_, err := r.rw.ExecContext(ctx, r.q(query),
+	cutoff := now.Add(-rateLimit) // existing code must be at least this old to be replaced
+	result, err := r.rw.ExecContext(ctx, r.q(query),
 		req.TenantID,
 		req.Email,
 		req.Code,
 		req.Purpose,
 		req.ExpiresAt,
 		now,
+		cutoff,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to upsert verification code: %w", err)
+		return false, fmt.Errorf("failed to upsert verification code: %w", err)
 	}
 
-	return nil
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	return rowsAffected > 0, nil
 }
 
 // ============================================================================

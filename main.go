@@ -29,6 +29,7 @@ import (
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/internal/service"
 	"github.com/modgudinc/authkit-go/logger"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -132,10 +133,15 @@ func New(config Config) (*AuthKit, error) {
 		refreshTokenExpiry = config.JWTConfig.RefreshExpiry
 	}
 
-	// Set bcrypt cost (default to service.DefaultBcryptCost if not specified or invalid)
+	// Bcrypt cost: 0 means "unset" and uses the default. A non-zero value outside
+	// bcrypt's supported range is rejected (fail fast at construction) rather than
+	// silently coerced, so a misconfigured cost surfaces immediately.
 	passwordBcryptCost := config.PasswordConfig.BcryptCost
-	if passwordBcryptCost <= 0 {
+	switch {
+	case passwordBcryptCost == 0:
 		passwordBcryptCost = service.DefaultBcryptCost
+	case passwordBcryptCost < bcrypt.MinCost || passwordBcryptCost > bcrypt.MaxCost:
+		return nil, fmt.Errorf("password bcrypt cost must be between %d and %d", bcrypt.MinCost, bcrypt.MaxCost)
 	}
 
 	// Set OTP rate limit duration (default to DefaultOTPRateLimitPeriod if not specified)

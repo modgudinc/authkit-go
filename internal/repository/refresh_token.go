@@ -129,15 +129,12 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 
 	now := time.Now()
 
-	// Expired: consume it and reject.
+	// Expired but never consumed: reject as expired. We deliberately do NOT set
+	// revoked_at here — leaving it NULL means a later re-presentation is treated as
+	// "expired" again rather than tripping the reuse/theft path above (which is
+	// reserved for genuinely consumed/rotated tokens). The deferred rollback
+	// releases the row lock with no changes; DeleteExpired removes the row.
 	if now.After(expiresAt) {
-		if _, err := tx.ExecContext(ctx, r.q(`UPDATE {{schema}}.refresh_tokens SET revoked_at = $1 WHERE token_hash = $2`), now, oldTokenHash); err != nil {
-			return nil, uuid.Nil, fmt.Errorf("failed to revoke expired refresh token: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, uuid.Nil, fmt.Errorf("failed to commit: %w", err)
-		}
-		committed = true
 		return nil, uuid.Nil, fmt.Errorf("refresh token expired: %w", model.ErrInvalidRefreshToken)
 	}
 

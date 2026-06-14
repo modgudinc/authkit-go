@@ -20,6 +20,47 @@ import (
 // timestamp updates so a detached goroutine can never hang on a stuck connection.
 const lastUsedUpdateTimeout = 5 * time.Second
 
+// maxConcurrentLastUsedUpdates caps how many best-effort "last used" updates may
+// be in flight at once. Without a bound, a burst of token/API-key validations
+// would fan out one detached goroutine each, all contending on the rw pool.
+const maxConcurrentLastUsedUpdates = 64
+
+// lastUsedUpdateSlots is the semaphore enforcing maxConcurrentLastUsedUpdates,
+// shared across the service package's validation paths.
+var lastUsedUpdateSlots = make(chan struct{}, maxConcurrentLastUsedUpdates)
+
+// runBoundedLastUsedUpdate runs a best-effort "last used" write in a background
+// goroutine that outlives the request (the request context's cancellation is
+// detached with WithoutCancel, its values preserved) but is bounded two ways:
+// by lastUsedUpdateSlots (when full, the update is skipped — the next validation
+// will refresh the timestamp) and by lastUsedUpdateTimeout (so it can't hang).
+// Any panic is recovered so a background failure can never crash the host.
+func runBoundedLastUsedUpdate(parent context.Context, log logger.Logger, what string, fn func(context.Context) error) {
+	select {
+	case lastUsedUpdateSlots <- struct{}{}:
+	default:
+		if log != nil {
+			log.Warn("skipping last_used_at update: too many in flight", "what", what)
+		}
+		return
+	}
+
+	bgCtx := context.WithoutCancel(parent)
+	go func() {
+		defer func() { <-lastUsedUpdateSlots }()
+		defer func() {
+			if rec := recover(); rec != nil && log != nil {
+				log.Error("panic updating last_used_at", "what", what, "panic", rec)
+			}
+		}()
+		uctx, cancel := context.WithTimeout(bgCtx, lastUsedUpdateTimeout)
+		defer cancel()
+		if err := fn(uctx); err != nil && log != nil {
+			log.Warn("failed to update last_used_at", "what", what, "error", err.Error())
+		}
+	}()
+}
+
 // TokenService handles both JWT and refresh token management
 // Combines JWT generation/validation with refresh token storage and rotation
 type TokenService struct {
@@ -225,29 +266,13 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 		return nil, fmt.Errorf("account is not active: %w", model.ErrInvalidRefreshToken)
 	}
 
-	// 4. Update last_used_at asynchronously (non-blocking). The update must outlive
-	// the request, so we detach the request's cancellation with WithoutCancel
-	// (preserving its values, e.g. trace IDs) rather than tying it to ctx, and bound
-	// it with a timeout so it can't hang. Recover from any panic so a background
-	// failure can never crash the host process.
-	bgCtx := context.WithoutCancel(ctx)
-	go func() {
-		defer func() {
-			if rec := recover(); rec != nil && s.logger != nil {
-				s.logger.Error("panic updating refresh token last_used_at", "panic", rec)
-			}
-		}()
-		uctx, cancel := context.WithTimeout(bgCtx, lastUsedUpdateTimeout)
-		defer cancel()
-		if err := s.repo.UpdateLastUsed(uctx, storedToken.ID); err != nil {
-			if s.logger != nil {
-				s.logger.Warn("Failed to update refresh token last_used_at",
-					"token_id", storedToken.ID.String(),
-					"error", err.Error(),
-				)
-			}
-		}
-	}()
+	// 4. Update last_used_at as a bounded, best-effort background write (see
+	// runBoundedLastUsedUpdate): detached from the request, timeout-bounded, and
+	// capped in concurrency so a burst of validations can't fan out unbounded.
+	tokenID := storedToken.ID
+	runBoundedLastUsedUpdate(ctx, s.logger, "refresh token", func(uctx context.Context) error {
+		return s.repo.UpdateLastUsed(uctx, tokenID)
+	})
 
 	if s.logger != nil {
 		s.logger.Info("Refresh token validated successfully",

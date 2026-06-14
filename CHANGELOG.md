@@ -8,6 +8,66 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-13
+
+Bug-fix and hardening release on top of v0.4.0. No public API or behavior
+changes for correctly-configured callers; backward-compatible (the AES-GCM AAD
+change still decrypts existing ciphertext). Includes one new, safe migration.
+
+### Security
+
+- **Secret encryption is now context-bound.** AES-256-GCM ciphertext is
+  authenticated against its `(tenant_id, key)` via the GCM additional
+  authenticated data, so a value relocated to another row (e.g. by DB tampering
+  under the shared key) fails authentication instead of decrypting as another
+  tenant's secret. Backward-compatible: legacy ciphertext (written before this
+  change) still decrypts; new writes carry a `v1:` marker. No re-encryption
+  migration is required.
+- **OTP generation rate limit is now enforced atomically** inside the upsert (a
+  conditional `ON CONFLICT … WHERE created_at <= cutoff`), closing the
+  check-then-write TOCTOU where two concurrent requests could each issue a code.
+- **`ChangePassword` reads the current password hash from the primary**, not a
+  read replica, removing a read-after-write window in the old-password auth gate.
+- **`maskValue` fully masks values shorter than 12 characters** (was 8), so a
+  short secret can't expose most of itself via the prefix + last-4 reveal.
+- **Background "last used" updates are bounded** by a semaphore (max 64 in
+  flight); a burst of token/API-key validations can no longer fan out unbounded
+  goroutines contending on the write pool.
+
+### Fixed
+
+- **Refresh rotation no longer flags an expired token as reuse/theft.** An
+  expired-but-never-consumed refresh token is no longer marked revoked, so
+  re-presenting it reports "expired" rather than tripping family-wide reuse
+  revocation (which stays reserved for genuinely consumed/rotated tokens).
+- **`New()` rejects an out-of-range bcrypt cost** (outside 4–31) instead of
+  silently coercing it to the default — a misconfigured cost now fails fast.
+- **`UserService.List` clamps `limit`/`offset`** (non-positive limit → default
+  50, capped at 1000, negative offset → 0) so caller-supplied paging can't
+  request an unbounded scan or an invalid SQL `LIMIT`.
+- **Secret `Save`/`List`/`Delete`/`MarkVerified`/`CountByTenant` sanitize errors**
+  through the same `ErrInternal` boundary as the read paths, so a genuine DB
+  fault no longer surfaces raw driver text.
+- **`TenantService.CreateTenant` / `SetAllowedDomains` reject an empty
+  `allowed_domains` list** up front instead of surfacing a raw NOT NULL / CHECK
+  violation.
+- Doc/comment fixes: the `ValidateAPIKey` README example no longer shadows the
+  `context` package; `GenerateRefreshToken` godoc says HMAC-SHA256 (not SHA256).
+
+### Added
+
+- **Migration `000003_drop_redundant_api_key_hash_index`**: drops the redundant
+  `idx_api_keys_key_hash` index (`api_keys.key_hash` is already `UNIQUE`-indexed).
+- Tests: INET `ip_address` round-trip, `api_keys` UUID `key_id` round-trip + the
+  000003 index state, OTP atomic rate-limit, and AES-GCM AAD (wrong-context
+  fails, legacy ciphertext decrypts).
+
+### Documentation
+
+- The README "Error Handling" section and the `patterns.md` JWT middleware now
+  document the sentinel-error contract: branch with `errors.Is`, map account
+  states to 403 and `ErrInternal`/unexpected errors to 500 (not a blanket 401).
+
 ## [0.4.0] - 2026-06-13
 
 Database-driver release: the library now runs on **pgx**
@@ -293,7 +353,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/modgudinc/authkit-go/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/modgudinc/authkit-go/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/modgudinc/authkit-go/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/modgudinc/authkit-go/compare/v0.2.0...v0.2.1
