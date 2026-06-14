@@ -48,6 +48,154 @@ import (
 // - IncrementTokenVersion - Invalidates all existing JWTs for the user
 
 // ============================================================================
+// User status-change audit.
+//
+// The schema has no DB trigger; the repository writes user_status_changes rows in
+// Go, in the same transaction as the status update, so the audit-row id is a
+// Go-minted UUIDv7 like every other id. A row is recorded only on an actual
+// is_enabled or is_locked transition, with the status_type, changed_by_type, and
+// metadata described below. changed_by is left NULL.
+// ============================================================================
+
+// systemLockThreshold mirrors the failed-login count at which the login flow
+// auto-locks an account (service.MaxFailedLoginAttempts). A lock recorded at or
+// above it is attributed to 'system' rather than 'admin', matching the former
+// trigger's `NEW.failed_login_count >= 5` test.
+const systemLockThreshold = 5
+
+// userStatusSnapshot captures the user fields needed to detect an enable/disable
+// or lock/unlock transition and build the audit metadata.
+type userStatusSnapshot struct {
+	IsEnabled        bool
+	IsLocked         bool
+	LockedUntil      *time.Time
+	FailedLoginCount int
+	LastFailedLogin  *time.Time
+	DisabledAt       *time.Time
+}
+
+// readUserStatusForUpdate locks the user row and returns its current status
+// snapshot, or model.ErrNotFound if no matching (id[, tenant]) row exists.
+func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx *sql.Tx, userID uuid.UUID, tenantID *string) (userStatusSnapshot, error) {
+	var s userStatusSnapshot
+	var (
+		query string
+		args  []any
+	)
+	if tenantID != nil {
+		query = `
+			SELECT is_enabled, is_locked, locked_until, failed_login_count, last_failed_login, disabled_at
+			FROM {{schema}}.users WHERE id = $1 AND tenant_id = $2 FOR UPDATE`
+		args = []any{userID, *tenantID}
+	} else {
+		query = `
+			SELECT is_enabled, is_locked, locked_until, failed_login_count, last_failed_login, disabled_at
+			FROM {{schema}}.users WHERE id = $1 FOR UPDATE`
+		args = []any{userID}
+	}
+	err := tx.QueryRowContext(ctx, r.q(query), args...).Scan(
+		&s.IsEnabled, &s.IsLocked, &s.LockedUntil, &s.FailedLoginCount, &s.LastFailedLogin, &s.DisabledAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return s, fmt.Errorf("user not found: %w", model.ErrNotFound)
+		}
+		return s, fmt.Errorf("failed to read user status: %w", err)
+	}
+	return s, nil
+}
+
+// recordStatusChange inserts a user_status_changes row for any is_enabled /
+// is_locked transition between old and new (mirroring record_status_change()).
+func (r *Repository) recordStatusChange(ctx context.Context, tx *sql.Tx, userID uuid.UUID, old, current userStatusSnapshot) error {
+	if old.IsEnabled != current.IsEnabled {
+		statusType := "disable"
+		if current.IsEnabled {
+			statusType = "enable"
+		}
+		if err := r.insertUserStatusChange(ctx, tx, userID, statusType, "admin", map[string]any{
+			"previous_state": old.IsEnabled,
+			"new_state":      current.IsEnabled,
+			"disabled_at":    current.DisabledAt,
+		}); err != nil {
+			return err
+		}
+	}
+	if old.IsLocked != current.IsLocked {
+		statusType := "unlock"
+		if current.IsLocked {
+			statusType = "lock"
+		}
+		changedByType := "admin"
+		if current.FailedLoginCount >= systemLockThreshold {
+			changedByType = "system"
+		}
+		if err := r.insertUserStatusChange(ctx, tx, userID, statusType, changedByType, map[string]any{
+			"previous_state":    old.IsLocked,
+			"new_state":         current.IsLocked,
+			"locked_until":      current.LockedUntil,
+			"failed_attempts":   current.FailedLoginCount,
+			"last_failed_login": current.LastFailedLogin,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) insertUserStatusChange(ctx context.Context, tx *sql.Tx, userID uuid.UUID, statusType, changedByType string, metadata map[string]any) error {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("could not generate id for status change: %w", err)
+	}
+	metaJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status change metadata: %w", err)
+	}
+	const insert = `
+		INSERT INTO {{schema}}.user_status_changes (id, user_id, status_type, changed_by_type, metadata, changed_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())`
+	if _, err := tx.ExecContext(ctx, r.q(insert), id, userID, statusType, changedByType, metaJSON); err != nil {
+		return fmt.Errorf("failed to record status change: %w", err)
+	}
+	return nil
+}
+
+// withUserStatusAudit runs a status-changing user UPDATE and its audit row(s) in
+// one transaction: it locks the target row (model.ErrNotFound if absent / wrong
+// tenant), calls apply (which performs the UPDATE and returns the resulting
+// snapshot), records any transition, and commits.
+func (r *Repository) withUserStatusAudit(ctx context.Context, userID uuid.UUID, tenantID *string, apply func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error)) error {
+	tx, err := r.rw.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin user status update: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	old, err := r.readUserStatusForUpdate(ctx, tx, userID, tenantID)
+	if err != nil {
+		return err
+	}
+	current, err := apply(ctx, tx, old)
+	if err != nil {
+		return err
+	}
+	if err := r.recordStatusChange(ctx, tx, userID, old, current); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit user status update: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// ============================================================================
 // Create - Creates a new user with default status (enabled, unlocked)
 // ============================================================================
 func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (uuid.UUID, error) {
@@ -210,31 +358,18 @@ func (r *Repository) VerifyPassword(ctx context.Context, userID uuid.UUID) (stri
 // This preserves user data for audit trails while preventing authentication
 // ============================================================================
 func (r *Repository) Delete(ctx context.Context, userID uuid.UUID) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			is_enabled = false,
-			disabled_at = $1,
-			updated_at = $1
-		WHERE id = $2
-	`
-
-	now := time.Now()
-	result, err := r.rw.ExecContext(ctx, r.q(query), now, userID)
-	if err != nil {
-		return fmt.Errorf("failed to soft delete user: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user not found: %s", userID)
-	}
-
-	return nil
+	return r.withUserStatusAudit(ctx, userID, nil, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		now := time.Now()
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users SET is_enabled = false, disabled_at = $1, updated_at = $1 WHERE id = $2
+		`), now, userID); err != nil {
+			return old, fmt.Errorf("failed to soft delete user: %w", err)
+		}
+		current := old
+		current.IsEnabled = false
+		current.DisabledAt = &now
+		return current, nil
+	})
 }
 
 // ============================================================================
@@ -540,30 +675,17 @@ func (r *Repository) IncrementTokenVersion(ctx context.Context, userID uuid.UUID
 // Clears the disabled_at timestamp and sets is_enabled to true
 // ============================================================================
 func (r *Repository) Enable(ctx context.Context, userID uuid.UUID) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			is_enabled = true,
-			disabled_at = NULL,
-			updated_at = $1
-		WHERE id = $2
-	`
-
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID)
-	if err != nil {
-		return fmt.Errorf("failed to enable user: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user not found: %s", userID)
-	}
-
-	return nil
+	return r.withUserStatusAudit(ctx, userID, nil, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users SET is_enabled = true, disabled_at = NULL, updated_at = $1 WHERE id = $2
+		`), time.Now(), userID); err != nil {
+			return old, fmt.Errorf("failed to enable user: %w", err)
+		}
+		current := old
+		current.IsEnabled = true
+		current.DisabledAt = nil
+		return current, nil
+	})
 }
 
 // ============================================================================
@@ -572,31 +694,18 @@ func (r *Repository) Enable(ctx context.Context, userID uuid.UUID) error {
 // Unlike soft delete, this is a reversible admin action
 // ============================================================================
 func (r *Repository) Disable(ctx context.Context, userID uuid.UUID) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			is_enabled = false,
-			disabled_at = $1,
-			updated_at = $1
-		WHERE id = $2
-	`
-
-	now := time.Now()
-	result, err := r.rw.ExecContext(ctx, r.q(query), now, userID)
-	if err != nil {
-		return fmt.Errorf("failed to disable user: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user not found: %s", userID)
-	}
-
-	return nil
+	return r.withUserStatusAudit(ctx, userID, nil, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		now := time.Now()
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users SET is_enabled = false, disabled_at = $1, updated_at = $1 WHERE id = $2
+		`), now, userID); err != nil {
+			return old, fmt.Errorf("failed to disable user: %w", err)
+		}
+		current := old
+		current.IsEnabled = false
+		current.DisabledAt = &now
+		return current, nil
+	})
 }
 
 // ============================================================================
@@ -641,9 +750,29 @@ func (r *Repository) IncrementFailedLoginCount(ctx context.Context, userID uuid.
 // clears an existing lock.
 // ============================================================================
 func (r *Repository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error) {
+	tx, err := r.rw.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to begin failed-login registration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Lock the row and capture the pre-update status so a lock transition can be
+	// audited (the failed-login lockout was the trigger's 'system' lock case).
+	old, err := r.readUserStatusForUpdate(ctx, tx, userID, nil)
+	if err != nil {
+		return 0, false, err
+	}
+
 	now := time.Now()
 	lockedUntil := now.Add(lockDuration)
-	query := `
+	var count int
+	var locked bool
+	err = tx.QueryRowContext(ctx, r.q(`
 		UPDATE {{schema}}.users
 		SET
 			failed_login_count = failed_login_count + 1,
@@ -653,18 +782,26 @@ func (r *Repository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, 
 			locked_until = CASE WHEN $2 > 0 AND failed_login_count + 1 >= $2 THEN $3 ELSE locked_until END
 		WHERE id = $4
 		RETURNING failed_login_count, is_locked
-	`
-
-	var count int
-	var locked bool
-	err := r.rw.QueryRowContext(ctx, r.q(query), now, maxAttempts, lockedUntil, userID).Scan(&count, &locked)
+	`), now, maxAttempts, lockedUntil, userID).Scan(&count, &locked)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, false, fmt.Errorf("user not found: %w", model.ErrNotFound)
-		}
 		return 0, false, fmt.Errorf("failed to register failed login: %w", err)
 	}
 
+	current := old
+	current.FailedLoginCount = count
+	current.LastFailedLogin = &now
+	current.IsLocked = locked
+	if locked && !old.IsLocked {
+		current.LockedUntil = &lockedUntil
+	}
+	if err := r.recordStatusChange(ctx, tx, userID, old, current); err != nil {
+		return 0, false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("failed to commit failed-login registration: %w", err)
+	}
+	committed = true
 	return count, locked, nil
 }
 
@@ -675,32 +812,22 @@ func (r *Repository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, 
 // If lockedUntil is nil, the account is locked indefinitely (until admin unlock)
 // ============================================================================
 func (r *Repository) Lock(ctx context.Context, userID uuid.UUID, lockedUntil *time.Time) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			is_locked = true,
-			locked_until = $1,
-			failed_login_count = failed_login_count + 1,
-			last_failed_login = $2,
-			updated_at = $2
-		WHERE id = $3
-	`
-
-	result, err := r.rw.ExecContext(ctx, r.q(query), lockedUntil, time.Now(), userID)
-	if err != nil {
-		return fmt.Errorf("failed to lock user: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user not found: %s", userID)
-	}
-
-	return nil
+	return r.withUserStatusAudit(ctx, userID, nil, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		now := time.Now()
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users
+			SET is_locked = true, locked_until = $1, failed_login_count = failed_login_count + 1, last_failed_login = $2, updated_at = $2
+			WHERE id = $3
+		`), lockedUntil, now, userID); err != nil {
+			return old, fmt.Errorf("failed to lock user: %w", err)
+		}
+		current := old
+		current.IsLocked = true
+		current.LockedUntil = lockedUntil
+		current.FailedLoginCount = old.FailedLoginCount + 1
+		current.LastFailedLogin = &now
+		return current, nil
+	})
 }
 
 // ============================================================================
@@ -708,31 +835,18 @@ func (r *Repository) Lock(ctx context.Context, userID uuid.UUID, lockedUntil *ti
 // Clears the locked status, locked_until timestamp, and resets failed login count
 // ============================================================================
 func (r *Repository) Unlock(ctx context.Context, userID uuid.UUID) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			is_locked = false,
-			locked_until = NULL,
-			failed_login_count = 0,
-			updated_at = $1
-		WHERE id = $2
-	`
-
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID)
-	if err != nil {
-		return fmt.Errorf("failed to unlock user: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user not found: %s", userID)
-	}
-
-	return nil
+	return r.withUserStatusAudit(ctx, userID, nil, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users SET is_locked = false, locked_until = NULL, failed_login_count = 0, updated_at = $1 WHERE id = $2
+		`), time.Now(), userID); err != nil {
+			return old, fmt.Errorf("failed to unlock user: %w", err)
+		}
+		current := old
+		current.IsLocked = false
+		current.LockedUntil = nil
+		current.FailedLoginCount = 0
+		return current, nil
+	})
 }
 
 // ============================================================================
@@ -894,30 +1008,17 @@ func (r *Repository) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, 
 // Validates tenant ownership before enabling
 // ============================================================================
 func (r *Repository) EnableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			is_enabled = true,
-			disabled_at = NULL,
-			updated_at = $1
-		WHERE id = $2 AND tenant_id = $3
-	`
-
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to enable user: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user not found or does not belong to tenant: %w", model.ErrNotFound)
-	}
-
-	return nil
+	return r.withUserStatusAudit(ctx, userID, &tenantID, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users SET is_enabled = true, disabled_at = NULL, updated_at = $1 WHERE id = $2 AND tenant_id = $3
+		`), time.Now(), userID, tenantID); err != nil {
+			return old, fmt.Errorf("failed to enable user: %w", err)
+		}
+		current := old
+		current.IsEnabled = true
+		current.DisabledAt = nil
+		return current, nil
+	})
 }
 
 // ============================================================================
@@ -964,49 +1065,53 @@ func (r *Repository) SetPasswordByTenant(ctx context.Context, userID uuid.UUID, 
 // DeleteByTenant - Soft deletes a user with tenant isolation
 // ============================================================================
 func (r *Repository) DeleteByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET is_enabled = false, disabled_at = $1, updated_at = $1
-		WHERE id = $2 AND tenant_id = $3
-	`
-	now := time.Now()
-	result, err := r.rw.ExecContext(ctx, r.q(query), now, userID, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to soft delete user: %w", err)
-	}
-	return rowsAffectedOrNotFound(result)
+	return r.withUserStatusAudit(ctx, userID, &tenantID, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		now := time.Now()
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users SET is_enabled = false, disabled_at = $1, updated_at = $1 WHERE id = $2 AND tenant_id = $3
+		`), now, userID, tenantID); err != nil {
+			return old, fmt.Errorf("failed to soft delete user: %w", err)
+		}
+		current := old
+		current.IsEnabled = false
+		current.DisabledAt = &now
+		return current, nil
+	})
 }
 
 // ============================================================================
 // LockByTenant - Locks a user account with tenant isolation
 // ============================================================================
 func (r *Repository) LockByTenant(ctx context.Context, userID uuid.UUID, tenantID string, lockedUntil *time.Time) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET is_locked = true, locked_until = $1, updated_at = $2
-		WHERE id = $3 AND tenant_id = $4
-	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), lockedUntil, time.Now(), userID, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to lock user: %w", err)
-	}
-	return rowsAffectedOrNotFound(result)
+	return r.withUserStatusAudit(ctx, userID, &tenantID, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users SET is_locked = true, locked_until = $1, updated_at = $2 WHERE id = $3 AND tenant_id = $4
+		`), lockedUntil, time.Now(), userID, tenantID); err != nil {
+			return old, fmt.Errorf("failed to lock user: %w", err)
+		}
+		current := old
+		current.IsLocked = true
+		current.LockedUntil = lockedUntil
+		return current, nil
+	})
 }
 
 // ============================================================================
 // UnlockByTenant - Unlocks a user account with tenant isolation
 // ============================================================================
 func (r *Repository) UnlockByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET is_locked = false, locked_until = NULL, failed_login_count = 0, updated_at = $1
-		WHERE id = $2 AND tenant_id = $3
-	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to unlock user: %w", err)
-	}
-	return rowsAffectedOrNotFound(result)
+	return r.withUserStatusAudit(ctx, userID, &tenantID, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users SET is_locked = false, locked_until = NULL, failed_login_count = 0, updated_at = $1 WHERE id = $2 AND tenant_id = $3
+		`), time.Now(), userID, tenantID); err != nil {
+			return old, fmt.Errorf("failed to unlock user: %w", err)
+		}
+		current := old
+		current.IsLocked = false
+		current.LockedUntil = nil
+		current.FailedLoginCount = 0
+		return current, nil
+	})
 }
 
 // ============================================================================
@@ -1043,30 +1148,18 @@ func rowsAffectedOrNotFound(result sql.Result) error {
 // Validates tenant ownership and increments token_version to invalidate JWTs
 // ============================================================================
 func (r *Repository) DisableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			is_enabled = false,
-			disabled_at = $1,
-			token_version = token_version + 1,
-			updated_at = $1
-		WHERE id = $2 AND tenant_id = $3
-	`
-
-	now := time.Now()
-	result, err := r.rw.ExecContext(ctx, r.q(query), now, userID, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to disable user: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user not found or does not belong to tenant")
-	}
-
-	return nil
+	return r.withUserStatusAudit(ctx, userID, &tenantID, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+		now := time.Now()
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users
+			SET is_enabled = false, disabled_at = $1, token_version = token_version + 1, updated_at = $1
+			WHERE id = $2 AND tenant_id = $3
+		`), now, userID, tenantID); err != nil {
+			return old, fmt.Errorf("failed to disable user: %w", err)
+		}
+		current := old
+		current.IsEnabled = false
+		current.DisabledAt = &now
+		return current, nil
+	})
 }

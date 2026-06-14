@@ -21,8 +21,12 @@ Core tables:
 - `invitations`: Invitation codes, target email, roles, expiry, and usage limits.
 - `verification_codes`: OTP codes, purpose, expiry, and creation time.
 - `provider_keys`: Tenant-scoped encrypted secrets.
-- `user_status_changes`: Audit-style account status changes.
-- `auth_events`: Authentication event log table reserved for application use.
+- `user_status_changes`: Audit trail of account enable/disable and lock/unlock
+  transitions. Written by the library in Go, in the same transaction as the
+  status change (there is no DB trigger).
+
+All identifiers are UUIDv7 minted in Go (`uuid.NewV7()`); the schema has no
+SQL-side UUID generation.
 
 ## Connection Model
 

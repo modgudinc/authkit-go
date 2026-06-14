@@ -8,6 +8,42 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-14
+
+Identifier-generation overhaul and a migration consolidation. Because no released
+version has a consumer yet, the migration set is collapsed to a single
+`000001_identity_schema` that represents the final schema — **apply it to a fresh
+database** (this is the baseline schema, not an in-place upgrade from an earlier
+0.x). Breaking, as acceptable pre-1.0.
+
+### Changed (breaking)
+
+- **UUIDv7 is minted in Go for every id; the schema has no SQL-side UUID
+  generation.** All `id`/`family_id` column defaults, the `uuid_generate_v7()`
+  generator, and the now-unused `pgcrypto` extension are removed. The application
+  supplies every id with `uuid.NewV7()`.
+- **Account status-change audit is written by the application, not a DB trigger.**
+  The `record_status_change` trigger is gone; the repository writes
+  `user_status_changes` rows in Go, in the same transaction as the status change.
+  Semantics are preserved exactly (one row per real `is_enabled`/`is_locked`
+  transition; same `status_type`, `changed_by_type`, and metadata; `changed_by`
+  NULL). The status mutators (`Enable`/`Disable`/`Delete`/`Lock`/`Unlock` and their
+  `*ByTenant` variants, plus the failed-login lockout) are now transactional.
+- **Migrations consolidated to one file.** The 000002/000003/000004 migrations are
+  folded into `000001_identity_schema`; the standalone files are removed.
+
+### Removed
+
+- The `auth_events` table (never written or read by the library).
+- `uuid_generate_v7()`, the status-change trigger + function, all UUID column
+  defaults, and the `pgcrypto` extension.
+
+### Upgrading
+
+Apply the single `000001_identity_schema.up.sql` to a fresh database. There are no
+released consumers; anyone who applied an earlier 0.x schema should recreate it
+from the new 000001.
+
 ## [0.4.1] - 2026-06-13
 
 Bug-fix and hardening release on top of v0.4.0. No public API or behavior
@@ -353,7 +389,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/modgudinc/authkit-go/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/modgudinc/authkit-go/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/modgudinc/authkit-go/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/modgudinc/authkit-go/compare/v0.2.1...v0.3.0

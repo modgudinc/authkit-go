@@ -253,7 +253,6 @@ func assertTablesExist(t *testing.T, db *sql.DB) {
 		"refresh_tokens",
 		"verification_codes",
 		"user_status_changes",
-		"auth_events",
 	}
 
 	assertTablesExistInSchema(t, db, "authkit", expected...)
@@ -272,7 +271,6 @@ func assertTablesExistInSchema(t *testing.T, db *sql.DB, schema string, tables .
 			"refresh_tokens",
 			"verification_codes",
 			"user_status_changes",
-			"auth_events",
 		}
 	}
 

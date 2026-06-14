@@ -1,10 +1,13 @@
--- Identity schema for authkit-go.
+-- Identity schema for authkit-go (consolidated).
 --
--- This migration creates the default schema used by the library. Applications
--- that configure a non-default schema should copy this migration and replace
--- "authkit" with the configured schema name.
-
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- The complete schema in a single migration. All identifiers are UUIDv7 minted
+-- by the application (uuid.NewV7()); columns carry no SQL-side UUID default and
+-- there is no DB-side UUID generator. Account status-change audit rows
+-- (user_status_changes) are written by the library in Go (in the same
+-- transaction as the status change), not by a database trigger.
+--
+-- Applications that configure a non-default schema should copy this migration
+-- and replace "authkit" with the configured schema name.
 
 CREATE SCHEMA IF NOT EXISTS authkit;
 
@@ -36,7 +39,7 @@ CREATE TRIGGER trigger_tenants_updated_at
     EXECUTE FUNCTION authkit.update_updated_at();
 
 CREATE TABLE IF NOT EXISTS authkit.users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     email VARCHAR(255) NOT NULL,
     display_name VARCHAR(255) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
@@ -88,8 +91,11 @@ CREATE INDEX IF NOT EXISTS idx_invitations_expires_at ON authkit.invitations (ex
 CREATE INDEX IF NOT EXISTS idx_invitations_created_by ON authkit.invitations (created_by);
 CREATE INDEX IF NOT EXISTS idx_invitations_created_at ON authkit.invitations (created_at DESC);
 
+-- key_id holds an application-minted UUIDv7. key_hash is UNIQUE, which already
+-- provides the index used by the hash lookup in ValidateAPIKey (no separate
+-- key_hash index).
 CREATE TABLE IF NOT EXISTS authkit.api_keys (
-    key_id VARCHAR(255) PRIMARY KEY,
+    key_id UUID PRIMARY KEY,
     key_hash VARCHAR(512) NOT NULL UNIQUE,
     tenant_id VARCHAR(255) NOT NULL REFERENCES authkit.tenants(tenant_id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
@@ -100,7 +106,6 @@ CREATE TABLE IF NOT EXISTS authkit.api_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_id ON authkit.api_keys (tenant_id);
-CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON authkit.api_keys (key_hash);
 CREATE INDEX IF NOT EXISTS idx_api_keys_created_by ON authkit.api_keys (created_by);
 CREATE INDEX IF NOT EXISTS idx_api_keys_created_at ON authkit.api_keys (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON authkit.api_keys (expires_at) WHERE expires_at IS NOT NULL;
@@ -134,10 +139,10 @@ CREATE TRIGGER trigger_provider_keys_updated_at
 -- presentation of an already-consumed token can be detected as reuse/theft, at
 -- which point the whole family is revoked. Rows are cleaned up after expiry.
 CREATE TABLE IF NOT EXISTS authkit.refresh_tokens (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
     token_hash VARCHAR(255) UNIQUE NOT NULL,
-    family_id UUID NOT NULL DEFAULT gen_random_uuid(),
+    family_id UUID NOT NULL,
     ip_address INET,
     user_agent TEXT,
     device_name VARCHAR(255),
@@ -176,8 +181,10 @@ CREATE INDEX IF NOT EXISTS idx_verification_codes_tenant_email ON authkit.verifi
 CREATE INDEX IF NOT EXISTS idx_verification_codes_expires_at ON authkit.verification_codes(expires_at);
 CREATE INDEX IF NOT EXISTS idx_verification_codes_purpose ON authkit.verification_codes(purpose);
 
+-- Account status-change audit trail. Written by the application in Go (id is a
+-- uuid.NewV7()) on every is_enabled/is_locked transition; there is no DB trigger.
 CREATE TABLE IF NOT EXISTS authkit.user_status_changes (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
     status_type VARCHAR(50) NOT NULL,
     changed_by UUID REFERENCES authkit.users(id),
@@ -191,82 +198,6 @@ CREATE INDEX IF NOT EXISTS idx_user_status_changes_user_id ON authkit.user_statu
 CREATE INDEX IF NOT EXISTS idx_user_status_changes_status_type ON authkit.user_status_changes(status_type, changed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_status_changes_changed_by ON authkit.user_status_changes(changed_by);
 CREATE INDEX IF NOT EXISTS idx_user_status_changes_changed_at ON authkit.user_status_changes(changed_at DESC);
-
-CREATE OR REPLACE FUNCTION authkit.record_status_change()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF NEW.is_enabled != OLD.is_enabled THEN
-        INSERT INTO authkit.user_status_changes (
-            user_id,
-            status_type,
-            changed_by_type,
-            metadata
-        ) VALUES (
-            NEW.id,
-            CASE WHEN NEW.is_enabled THEN 'enable' ELSE 'disable' END,
-            'admin',
-            jsonb_build_object(
-                'previous_state', OLD.is_enabled,
-                'new_state', NEW.is_enabled,
-                'disabled_at', NEW.disabled_at
-            )
-        );
-    END IF;
-
-    IF NEW.is_locked != OLD.is_locked THEN
-        INSERT INTO authkit.user_status_changes (
-            user_id,
-            status_type,
-            changed_by_type,
-            metadata
-        ) VALUES (
-            NEW.id,
-            CASE WHEN NEW.is_locked THEN 'lock' ELSE 'unlock' END,
-            CASE WHEN NEW.failed_login_count >= 5 THEN 'system' ELSE 'admin' END,
-            jsonb_build_object(
-                'previous_state', OLD.is_locked,
-                'new_state', NEW.is_locked,
-                'locked_until', NEW.locked_until,
-                'failed_attempts', NEW.failed_login_count,
-                'last_failed_login', NEW.last_failed_login
-            )
-        );
-    END IF;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS track_user_status_changes ON authkit.users;
-CREATE TRIGGER track_user_status_changes
-    AFTER UPDATE ON authkit.users
-    FOR EACH ROW
-    EXECUTE FUNCTION authkit.record_status_change();
-
-CREATE TABLE IF NOT EXISTS authkit.auth_events (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID REFERENCES authkit.users(id) ON DELETE SET NULL,
-    email VARCHAR(255) NOT NULL,
-    tenant_id VARCHAR(255),
-    event_type VARCHAR(50) NOT NULL,
-    success BOOLEAN NOT NULL DEFAULT true,
-    error_message TEXT,
-    ip_address INET NOT NULL,
-    user_agent TEXT,
-    device_name VARCHAR(255),
-    session_id UUID,
-    metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_auth_events_user_id_created_at ON authkit.auth_events(user_id, created_at DESC) WHERE user_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_auth_events_email_created_at ON authkit.auth_events(email, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_auth_events_event_type ON authkit.auth_events(event_type, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_auth_events_success ON authkit.auth_events(success, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_auth_events_ip_address ON authkit.auth_events(ip_address, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_auth_events_created_at ON authkit.auth_events(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_auth_events_tenant_id ON authkit.auth_events(tenant_id, created_at DESC) WHERE tenant_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_auth_events_session_id ON authkit.auth_events(session_id) WHERE session_id IS NOT NULL;
 
 DO $$
 BEGIN

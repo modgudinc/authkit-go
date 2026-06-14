@@ -8,7 +8,6 @@ package integration
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -231,58 +230,6 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 	}
 }
 
-// TestMigration000002UUIDConsistency verifies the forward migration: api_keys.key_id
-// becomes a UUID column, and the v7 generator + switched id defaults are in place.
-func TestMigration000002UUIDConsistency(t *testing.T) {
-	db := openTestDB(t)
-	defer func() {
-		applyMigration(t, db, "000001_identity_schema.down.sql")
-		_ = db.Close()
-	}()
-
-	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
-	applyMigration(t, db, "000002_uuid_consistency.up.sql")
-
-	// key_id is now typed UUID (was VARCHAR).
-	var dataType string
-	if err := db.QueryRow(`
-		SELECT data_type FROM information_schema.columns
-		WHERE table_schema = 'authkit' AND table_name = 'api_keys' AND column_name = 'key_id'
-	`).Scan(&dataType); err != nil {
-		t.Fatalf("query key_id type: %v", err)
-	}
-	if dataType != "uuid" {
-		t.Fatalf("api_keys.key_id type = %q, want uuid", dataType)
-	}
-
-	// The generator yields genuine version-7, RFC-4122-variant UUIDs.
-	var v7 uuid.UUID
-	if err := db.QueryRow(`SELECT authkit.uuid_generate_v7()`).Scan(&v7); err != nil {
-		t.Fatalf("uuid_generate_v7: %v", err)
-	}
-	if v7.Version() != 7 {
-		t.Fatalf("generated uuid version = %d, want 7", v7.Version())
-	}
-	if v7.Variant() != uuid.RFC4122 {
-		t.Fatalf("generated uuid variant = %v, want RFC4122", v7.Variant())
-	}
-
-	// DB-side id defaults (including the trigger-populated tables) now use v7.
-	for _, tbl := range []string{"users", "refresh_tokens", "user_status_changes", "auth_events"} {
-		var def string
-		if err := db.QueryRow(`
-			SELECT column_default FROM information_schema.columns
-			WHERE table_schema = 'authkit' AND table_name = $1 AND column_name = 'id'
-		`, tbl).Scan(&def); err != nil {
-			t.Fatalf("query %s.id default: %v", tbl, err)
-		}
-		if !strings.Contains(def, "uuid_generate_v7") {
-			t.Fatalf("%s.id default = %q, want authkit.uuid_generate_v7()", tbl, def)
-		}
-	}
-}
-
 // TestRefreshTokenIPRoundTrip is the regression test for reading the INET
 // ip_address column under the pgx driver. The hot rotation path does not SELECT
 // ip_address, so a refresh token stored WITH a client IP is only ever read back
@@ -334,11 +281,10 @@ func TestRefreshTokenIPRoundTrip(t *testing.T) {
 	}
 }
 
-// TestAPIKeyUUIDKeyIDRoundTripAndIndex covers two previously-untested things on
-// the api_keys table after the 000002 (key_id -> UUID) and 000003 (drop the
-// redundant key_hash index) migrations: that an API key with a UUID key_id
-// inserts and reads back cleanly, and that 000003 leaves exactly the UNIQUE index
-// on key_hash (the redundant idx_api_keys_key_hash is gone).
+// TestAPIKeyUUIDKeyIDRoundTripAndIndex covers two things on the api_keys table in
+// the consolidated schema: that an API key with a UUID key_id inserts and reads
+// back cleanly, and that key_hash is indexed only by its UNIQUE constraint (no
+// separate, redundant idx_api_keys_key_hash).
 func TestAPIKeyUUIDKeyIDRoundTripAndIndex(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -349,8 +295,6 @@ func TestAPIKeyUUIDKeyIDRoundTripAndIndex(t *testing.T) {
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
 	applyMigration(t, db, "000001_identity_schema.up.sql")
-	applyMigration(t, db, "000002_uuid_consistency.up.sql")
-	applyMigration(t, db, "000003_drop_redundant_api_key_hash_index.up.sql")
 
 	repo := repository.New(db, db)
 	tenantID := "apikey.test"
@@ -381,7 +325,7 @@ func TestAPIKeyUUIDKeyIDRoundTripAndIndex(t *testing.T) {
 		t.Fatalf("key_id = %q, want %q", got.KeyID, keyID.String())
 	}
 
-	// 000003: the redundant plain index is gone, the UNIQUE index remains.
+	// Only the UNIQUE index on key_hash exists (no redundant plain index).
 	indexCount := func(name string) int {
 		var n int
 		if err := db.QueryRow(`
@@ -393,7 +337,7 @@ func TestAPIKeyUUIDKeyIDRoundTripAndIndex(t *testing.T) {
 		return n
 	}
 	if indexCount("idx_api_keys_key_hash") != 0 {
-		t.Fatal("expected redundant idx_api_keys_key_hash to be dropped by 000003")
+		t.Fatal("expected no redundant idx_api_keys_key_hash (key_hash is UNIQUE-indexed)")
 	}
 	if indexCount("api_keys_key_hash_key") != 1 {
 		t.Fatal("expected the UNIQUE key_hash index (api_keys_key_hash_key) to remain")
@@ -449,5 +393,141 @@ func TestUpsertVerificationCodeAtomicRateLimit(t *testing.T) {
 	stored, err = repo.UpsertVerificationCode(ctx, req2, 0)
 	if err != nil || !stored {
 		t.Fatalf("upsert with rateLimit=0: stored=%v err=%v, want stored=true", stored, err)
+	}
+}
+
+// TestUserStatusAuditWrittenInGo verifies the consolidated schema's end state and
+// that the repository writes user_status_changes rows in Go (no DB trigger):
+// exactly one row per real transition, with Go-minted UUID ids and the
+// status_type / changed_by_type / metadata the former trigger used.
+func TestUserStatusAuditWrittenInGo(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	// Consolidated schema: no SQL-side UUID generation, no trigger, no auth_events.
+	mustBeTrue := func(what, q string, args ...any) {
+		var ok bool
+		if err := db.QueryRow(q, args...).Scan(&ok); err != nil {
+			t.Fatalf("query %s: %v", what, err)
+		}
+		if !ok {
+			t.Fatalf("expected %s", what)
+		}
+	}
+	mustBeTrue("auth_events dropped", `SELECT NOT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='authkit' AND table_name='auth_events')`)
+	mustBeTrue("uuid_generate_v7 dropped", `SELECT NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='authkit' AND p.proname='uuid_generate_v7')`)
+	mustBeTrue("status trigger dropped", `SELECT NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='track_user_status_changes' AND NOT tgisinternal)`)
+	mustBeTrue("users.id has no default", `SELECT column_default IS NULL FROM information_schema.columns WHERE table_schema='authkit' AND table_name='users' AND column_name='id'`)
+	mustBeTrue("user_status_changes kept", `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='authkit' AND table_name='user_status_changes')`)
+
+	repo := repository.New(db, db)
+	tenantID := "audit.test"
+	userID := createTenantAndUser(t, ctx, &repo, tenantID)
+
+	type change struct {
+		id, statusType, changedByType, prev, next string
+		changedByNull                             bool
+	}
+	listChanges := func() []change {
+		rows, err := db.Query(`
+			SELECT id::text, status_type, changed_by_type, changed_by IS NULL,
+			       metadata->>'previous_state', metadata->>'new_state'
+			FROM authkit.user_status_changes WHERE user_id = $1 ORDER BY changed_at`, userID)
+		if err != nil {
+			t.Fatalf("list status changes: %v", err)
+		}
+		defer rows.Close()
+		var out []change
+		for rows.Next() {
+			var c change
+			if err := rows.Scan(&c.id, &c.statusType, &c.changedByType, &c.changedByNull, &c.prev, &c.next); err != nil {
+				t.Fatalf("scan status change: %v", err)
+			}
+			out = append(out, c)
+		}
+		return out
+	}
+
+	// Disable: exactly one 'disable'/'admin' row with a Go-minted UUID id and the
+	// trigger's metadata shape.
+	if err := repo.DisableByTenant(ctx, userID, tenantID); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	changes := listChanges()
+	if len(changes) != 1 {
+		t.Fatalf("after disable: %d audit rows, want 1", len(changes))
+	}
+	c := changes[0]
+	if c.statusType != "disable" || c.changedByType != "admin" || !c.changedByNull || c.prev != "true" || c.next != "false" {
+		t.Fatalf("disable audit row = %+v", c)
+	}
+	if _, err := uuid.Parse(c.id); err != nil {
+		t.Fatalf("audit id %q is not a UUID: %v", c.id, err)
+	}
+
+	// Disabling an already-disabled user is a no-op transition: no new row.
+	if err := repo.DisableByTenant(ctx, userID, tenantID); err != nil {
+		t.Fatalf("re-disable: %v", err)
+	}
+	if got := len(listChanges()); got != 1 {
+		t.Fatalf("re-disabling an already-disabled user added rows: %d, want 1", got)
+	}
+
+	// Admin lock (low failed-login count) is attributed to 'admin'.
+	if err := repo.LockByTenant(ctx, userID, tenantID, nil); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	changes = listChanges()
+	if len(changes) != 2 || changes[1].statusType != "lock" || changes[1].changedByType != "admin" {
+		t.Fatalf("after admin lock, changes = %+v", changes)
+	}
+}
+
+// TestRegisterFailedLoginAuditsSystemLock verifies the failed-login lockout path
+// records a single 'lock' row attributed to 'system' when the threshold is hit.
+func TestRegisterFailedLoginAuditsSystemLock(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "lock.test"
+	userID := createTenantAndUser(t, ctx, &repo, tenantID)
+
+	// First four failures stay under the threshold: no lock, no audit row.
+	for i := 0; i < 4; i++ {
+		_, locked, err := repo.RegisterFailedLogin(ctx, userID, 5, time.Minute)
+		if err != nil || locked {
+			t.Fatalf("attempt %d: locked=%v err=%v, want not locked", i+1, locked, err)
+		}
+	}
+	// Fifth failure crosses the threshold and locks.
+	count, locked, err := repo.RegisterFailedLogin(ctx, userID, 5, time.Minute)
+	if err != nil || !locked || count != 5 {
+		t.Fatalf("fifth attempt: count=%d locked=%v err=%v, want count=5 locked=true", count, locked, err)
+	}
+
+	var n int
+	var statusType, changedByType string
+	if err := db.QueryRow(`
+		SELECT count(*), coalesce(max(status_type), ''), coalesce(max(changed_by_type), '')
+		FROM authkit.user_status_changes WHERE user_id = $1`, userID).Scan(&n, &statusType, &changedByType); err != nil {
+		t.Fatalf("query status changes: %v", err)
+	}
+	if n != 1 || statusType != "lock" || changedByType != "system" {
+		t.Fatalf("got %d rows, status=%q changed_by_type=%q; want 1 lock/system", n, statusType, changedByType)
 	}
 }
