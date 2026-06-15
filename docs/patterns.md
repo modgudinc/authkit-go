@@ -28,7 +28,7 @@ Security-sensitive validation paths use `IdentityRWDB` internally to avoid accep
 ## HTTP Bearer JWT Middleware
 
 ```go
-func RequireJWT(identity authkit.AuthKit, next http.Handler) http.Handler {
+func RequireJWT(identity *authkit.AuthKit, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(header, "Bearer ")
@@ -60,7 +60,7 @@ func RequireJWT(identity authkit.AuthKit, next http.Handler) http.Handler {
 ## API Key Middleware
 
 ```go
-func RequireAPIKey(identity authkit.AuthKit, next http.Handler) http.Handler {
+func RequireAPIKey(identity *authkit.AuthKit, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiKey := r.Header.Get("X-API-Key")
 		keyContext, err := identity.APIKeyService().ValidateAPIKey(r.Context(), apiKey)

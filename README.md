@@ -2,7 +2,7 @@
 
 A Go library for multi-tenant identity and authentication management with support for API key authentication, invitation-based user onboarding, and OTP verification.
 
-[![Go Version](https://img.shields.io/badge/go-1.24-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.25-blue.svg)](https://golang.org/dl/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
 ## Features
@@ -93,6 +93,21 @@ func main() {
     // ... use services
 }
 ```
+
+Each accessor (`AuthService()`, `UserService()`, `APIKeyService()`, …) returns a
+named **interface** from package `authkit`, so you can store it on a struct, pass
+it to a function, or mock it in a test:
+
+```go
+type Handlers struct {
+    auth authkit.AuthService // a named type you can hold and mock
+}
+
+h := Handlers{auth: identity.AuthService()}
+```
+
+The returned services are cheap to construct (they wrap the shared connection
+pool and config), so calling an accessor per use or caching one is equally fine.
 
 ### 2. Custom Logger Implementation
 

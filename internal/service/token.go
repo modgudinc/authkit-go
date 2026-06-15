@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
@@ -468,18 +469,12 @@ func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString strin
 //	if err != nil {
 //	    return fmt.Errorf("failed to revoke all tokens: %w", err)
 //	}
-func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID string) error {
+func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID uuid.UUID) error {
 	if s.logger != nil {
 		s.logger.Info("Revoking all refresh tokens for user", "user_id", userID)
 	}
 
-	// Parse userID string to UUID
-	userUUID, err := parseUserID(userID)
-	if err != nil {
-		return fmt.Errorf("invalid user ID: %w", err)
-	}
-
-	if err := s.repo.DeleteByUserID(ctx, userUUID); err != nil {
+	if err := s.repo.DeleteByUserID(ctx, userID); err != nil {
 		if s.logger != nil {
 			s.logger.Error("Failed to revoke all user tokens", "error", err.Error())
 		}

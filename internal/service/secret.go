@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
@@ -107,10 +106,10 @@ func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequ
 		TenantID:    secret.TenantID,
 		Key:         secret.Key,
 		MaskedValue: secret.MaskedValue,
-		CreatedBy:   secret.CreatedBy.String(),
+		CreatedBy:   secret.CreatedBy,
 		IsValid:     secret.IsValid,
-		CreatedAt:   secret.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:   secret.UpdatedAt.Format(time.RFC3339),
+		CreatedAt:   secret.CreatedAt,
+		UpdatedAt:   secret.UpdatedAt,
 	}, nil
 }
 

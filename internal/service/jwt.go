@@ -116,7 +116,7 @@ func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
 	expiresAt := now.Add(s.accessExpiry)
 
 	claims := model.JWTClaims{
-		UserID:       user.ID.String(),
+		UserID:       user.ID,
 		Email:        user.Email,
 		TenantID:     user.TenantID,
 		Roles:        user.Roles,

@@ -192,89 +192,106 @@ func New(config Config) (*AuthKit, error) {
 	}, nil
 }
 
-// APIKeyService returns a configured API key service instance
-// for managing tenant-scoped API keys (creation, validation, revocation)
-func (c *AuthKit) APIKeyService() *service.APIKeyService {
-	repo := c.repository()
-	return service.NewAPIKeyService(&repo, c.apiKeyHMACSecret, c.logger)
+// The accessors below each return a service interface. The returned values are
+// cheap to construct — they wrap the shared connection pool and configuration and
+// open no new resources — so callers may call an accessor per use or cache the
+// result; either is fine.
+
+// APIKeyService returns the API key service
+// for managing tenant-scoped API keys (creation, validation, revocation).
+func (k *AuthKit) APIKeyService() APIKeyService {
+	repo := k.repository()
+	return service.NewAPIKeyService(&repo, k.apiKeyHMACSecret, k.logger)
 }
 
-// PasswordService returns a configured password service instance
-// for password hashing and verification using bcrypt
-func (c *AuthKit) PasswordService() *service.PasswordService {
-	return service.NewPasswordService(c.passwordBcryptCost, c.logger)
+// PasswordService returns the password service
+// for password hashing and verification using bcrypt.
+func (k *AuthKit) PasswordService() PasswordService {
+	return k.newPasswordService()
 }
 
-// JWTService returns a configured JWT service instance
-// for generating and validating JWT access tokens and refresh tokens
-func (c *AuthKit) JWTService() *service.JWTService {
+// JWTService returns the JWT service
+// for generating and validating JWT access tokens and refresh tokens.
+func (k *AuthKit) JWTService() JWTService {
+	return k.newJWTService()
+}
+
+// TokenService returns the token service
+// for combined JWT and refresh token management with token rotation.
+func (k *AuthKit) TokenService() TokenService {
+	return k.newTokenService()
+}
+
+// AuthService returns the authentication service
+// for complete authentication flows (login, logout, token refresh, JWT validation).
+func (k *AuthKit) AuthService() AuthService {
+	repo := k.repository()
+	return service.NewAuthService(&repo, k.newPasswordService(), k.newTokenService(), k.newJWTService(), k.logger)
+}
+
+// newPasswordService / newJWTService / newTokenService return the concrete
+// services for internal composition. The public accessors above expose them as
+// interfaces; the internal constructors still wire concrete types together.
+func (k *AuthKit) newPasswordService() *service.PasswordService {
+	return service.NewPasswordService(k.passwordBcryptCost, k.logger)
+}
+
+func (k *AuthKit) newJWTService() *service.JWTService {
 	return service.NewJWTService(
-		c.accessTokenSecret,
-		c.refreshTokenSecret,
-		c.accessTokenExpiry,
-		c.refreshTokenExpiry,
-		c.logger,
-		service.WithIssuer(c.jwtIssuer),
-		service.WithAudience(c.jwtAudience),
+		k.accessTokenSecret,
+		k.refreshTokenSecret,
+		k.accessTokenExpiry,
+		k.refreshTokenExpiry,
+		k.logger,
+		service.WithIssuer(k.jwtIssuer),
+		service.WithAudience(k.jwtAudience),
 	)
 }
 
-// TokenService returns a configured token service instance
-// for combined JWT and refresh token management with token rotation
-func (c *AuthKit) TokenService() *service.TokenService {
-	repo := c.repository()
-	jwtService := c.JWTService()
-	return service.NewTokenService(&repo, jwtService, c.refreshTokenExpiry, c.refreshTokenHMACSecret, c.logger)
+func (k *AuthKit) newTokenService() *service.TokenService {
+	repo := k.repository()
+	return service.NewTokenService(&repo, k.newJWTService(), k.refreshTokenExpiry, k.refreshTokenHMACSecret, k.logger)
 }
 
-// AuthService returns a configured authentication service instance
-// for complete authentication flows (login, logout, token refresh, JWT validation)
-func (c *AuthKit) AuthService() *service.AuthService {
-	repo := c.repository()
-	passwordService := c.PasswordService()
-	tokenService := c.TokenService()
-	jwtService := c.JWTService()
-	return service.NewAuthService(&repo, passwordService, tokenService, jwtService, c.logger)
+// OTPService returns the OTP service
+// for OTP generation, validation, and lifecycle management with rate limiting.
+func (k *AuthKit) OTPService() OTPService {
+	repo := k.repository()
+	return service.NewOTPService(&repo, k.otpRateLimitDuration, k.logger)
 }
 
-// OTPService returns a configured OTP service instance
-// for OTP generation, validation, and lifecycle management with rate limiting
-func (c *AuthKit) OTPService() *service.OTPService {
-	repo := c.repository()
-	return service.NewOTPService(&repo, c.otpRateLimitDuration, c.logger)
+// TenantService returns the tenant service
+// for tenant management, settings, and domain validation.
+func (k *AuthKit) TenantService() TenantService {
+	repo := k.repository()
+	return service.NewTenantService(&repo, k.logger)
 }
 
-// TenantService returns a configured tenant service instance
-// for tenant management, settings, and domain validation
-func (c *AuthKit) TenantService() *service.TenantService {
-	repo := c.repository()
-	return service.NewTenantService(&repo, c.logger)
+// InvitationService returns the invitation service
+// for invitation management, validation, and lifecycle operations.
+func (k *AuthKit) InvitationService() InvitationService {
+	repo := k.repository()
+	return service.NewInvitationService(&repo, k.logger)
 }
 
-// InvitationService returns a configured invitation service instance
-// for invitation management, validation, and lifecycle operations
-func (c *AuthKit) InvitationService() *service.InvitationService {
-	repo := c.repository()
-	return service.NewInvitationService(&repo, c.logger)
-}
-
-// SecretService returns a configured secret service instance
-// for managing encrypted secrets (provider API keys, etc.)
+// SecretService returns the secret service
+// for managing encrypted secrets (provider API keys, etc.).
 //
 // IMPORTANT: SecretConfig.EncryptionKey must be configured for this service to work.
-// The encryption key must be a base64-encoded 32-byte (256-bit) key.
-func (c *AuthKit) SecretService() *service.SecretService {
-	repo := c.repository()
-	return service.NewSecretService(&repo, c.secretEncryptionKey, c.logger)
+// The encryption key must be a base64-encoded 32-byte (256-bit) key. Operations
+// return ErrSecretEncryptionKeyMissing if it is absent or the wrong length.
+func (k *AuthKit) SecretService() SecretService {
+	repo := k.repository()
+	return service.NewSecretService(&repo, k.secretEncryptionKey, k.logger)
 }
 
-// UserService returns a configured user service instance
-// for user management, queries, and account status operations
-func (c *AuthKit) UserService() *service.UserService {
-	repo := c.repository()
-	return service.NewUserService(&repo, c.logger)
+// UserService returns the user service
+// for user management, queries, and account status operations.
+func (k *AuthKit) UserService() UserService {
+	repo := k.repository()
+	return service.NewUserService(&repo, k.logger)
 }
 
-func (c *AuthKit) repository() repository.Repository {
-	return repository.NewWithSchema(c.rwConnection, c.roConnection, c.identitySchema)
+func (k *AuthKit) repository() repository.Repository {
+	return repository.NewWithSchema(k.rwConnection, k.roConnection, k.identitySchema)
 }

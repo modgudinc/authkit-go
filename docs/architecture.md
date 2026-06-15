@@ -5,8 +5,8 @@
 ## Layers
 
 - `model/`: Public request, response, and database entity structs.
-- `repository/`: PostgreSQL data access. Queries are schema-qualified with `authkit.` and rewritten when `DatabaseConnection.IdentitySchema` is configured.
-- `service/`: Business logic for tokens, passwords, API keys, invitations, tenants, OTPs, and encrypted secrets.
+- `internal/repository/`: PostgreSQL data access (not importable by consumers). Queries are schema-qualified with `authkit.` and rewritten when `DatabaseConnection.IdentitySchema` is configured.
+- `internal/service/`: Business logic for tokens, passwords, API keys, invitations, tenants, OTPs, and encrypted secrets (not importable by consumers; the public contracts are the service interfaces in package `authkit`).
 - `migrations/`: PostgreSQL schema used by the default `authkit` schema.
 - `integration/`: Docker-backed tests that apply migrations and exercise repository/service behavior against real PostgreSQL.
 

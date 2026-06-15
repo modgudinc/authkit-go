@@ -31,12 +31,12 @@ type CreateAPIKeyRequest struct {
 
 // CreateAPIKeyResponse represents the service response from creating an API key
 type CreateAPIKeyResponse struct {
-	KeyID     string  `json:"key_id"`               // UUID v7
-	APIKey    string  `json:"api_key"`              // Plaintext key (ONLY returned once)
-	Name      string  `json:"name"`                 // User-friendly name
-	TenantID  string  `json:"tenant_id"`            // Tenant identifier
-	ExpiresAt *string `json:"expires_at,omitempty"` // Expiration timestamp
-	CreatedAt string  `json:"created_at"`           // Creation timestamp
+	KeyID     string     `json:"key_id"`               // UUID v7
+	APIKey    string     `json:"api_key"`              // Plaintext key (ONLY returned once)
+	Name      string     `json:"name"`                 // User-friendly name
+	TenantID  string     `json:"tenant_id"`            // Tenant identifier
+	ExpiresAt *time.Time `json:"expires_at,omitempty"` // Expiration timestamp (nil = never)
+	CreatedAt time.Time  `json:"created_at"`           // Creation timestamp
 }
 
 // APIKeyContext represents the context extracted from a valid API key

@@ -91,7 +91,7 @@ func TestAuthServiceFlows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refresh token: %v", err)
 	}
-	if refreshed.UserID != loginUserID.String() || refreshed.RefreshToken == "" || refreshed.RefreshToken == login.RefreshToken {
+	if refreshed.UserID != loginUserID || refreshed.RefreshToken == "" || refreshed.RefreshToken == login.RefreshToken {
 		t.Fatalf("unexpected refresh response: %+v", refreshed)
 	}
 
@@ -114,7 +114,7 @@ func TestAuthServiceFlows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second login: %v", err)
 	}
-	if err := authService.LogoutAll(ctx, loginUserID.String()); err != nil {
+	if err := authService.LogoutAll(ctx, loginUserID); err != nil {
 		t.Fatalf("logout all: %v", err)
 	}
 	if _, err := authService.ValidateJWT(ctx, secondLogin.AccessToken); err == nil {

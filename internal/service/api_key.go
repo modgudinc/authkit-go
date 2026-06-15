@@ -102,12 +102,8 @@ func (s *APIKeyService) CreateAPIKey(ctx context.Context, req model.CreateAPIKey
 		APIKey:    apiKey, // Plaintext key - ONLY returned once
 		Name:      req.Name,
 		TenantID:  req.TenantID,
-		CreatedAt: time.Now().Format(time.RFC3339),
-	}
-
-	if expiresAt != nil {
-		expiresAtStr := expiresAt.Format(time.RFC3339)
-		response.ExpiresAt = &expiresAtStr
+		ExpiresAt: expiresAt, // nil = never expires
+		CreatedAt: time.Now(),
 	}
 
 	if s.logger != nil {

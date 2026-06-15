@@ -34,7 +34,7 @@ func TestJWTServiceGenerateAndValidateAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate access token: %v", err)
 	}
-	if claims.UserID != userID.String() {
+	if claims.UserID != userID {
 		t.Fatalf("user id = %s, want %s", claims.UserID, userID)
 	}
 	if claims.Email != "user@example.com" || claims.TenantID != "tenant-a" || claims.TokenVersion != 7 {
@@ -101,7 +101,7 @@ func TestJWTServiceGenerateRefreshToken(t *testing.T) {
 func TestJWTServiceRejectsAlgorithmConfusion(t *testing.T) {
 	service := NewJWTService("access-secret", "refresh-secret", time.Minute, time.Hour, nil)
 	claims := model.JWTClaims{
-		UserID:   uuid.Must(uuid.NewV7()).String(),
+		UserID:   uuid.Must(uuid.NewV7()),
 		TenantID: "tenant-a",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
@@ -158,7 +158,7 @@ func TestJWTServiceRequiresExpiration(t *testing.T) {
 
 	// Hand-craft a token with no exp claim, signed with the right secret.
 	claims := model.JWTClaims{
-		UserID:   uuid.Must(uuid.NewV7()).String(),
+		UserID:   uuid.Must(uuid.NewV7()),
 		TenantID: "t",
 	}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("access-secret"))

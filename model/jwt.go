@@ -3,7 +3,10 @@
 
 package model
 
-import "github.com/golang-jwt/jwt/v5"
+import (
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+)
 
 // JWTClaims represents the custom claims embedded in JWT access tokens.
 //
@@ -14,10 +17,10 @@ import "github.com/golang-jwt/jwt/v5"
 // be released as a breaking change. Standard fields are accessed via the embed,
 // e.g. claims.Subject, claims.ExpiresAt, claims.ID (jti).
 type JWTClaims struct {
-	UserID       string   `json:"user_id"`       // User identifier (UUID v7)
-	Email        string   `json:"email"`         // User email address
-	TenantID     string   `json:"tenant_id"`     // Tenant identifier
-	Roles        []string `json:"roles"`         // User roles (Admin, Member, Viewer)
-	TokenVersion int      `json:"token_version"` // For invalidating all tokens
+	UserID       uuid.UUID `json:"user_id"`       // User identifier (UUID v7)
+	Email        string    `json:"email"`         // User email address
+	TenantID     string    `json:"tenant_id"`     // Tenant identifier
+	Roles        []string  `json:"roles"`         // User roles (Admin, Member, Viewer)
+	TokenVersion int       `json:"token_version"` // For invalidating all tokens
 	jwt.RegisteredClaims
 }

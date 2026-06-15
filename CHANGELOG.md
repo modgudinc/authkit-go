@@ -8,6 +8,55 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-14
+
+API-ergonomics release. Consumers can now name the service types they're handed,
+and user IDs and timestamps have one representation each at the API boundary.
+Breaking (Go types only), as acceptable pre-1.0: the JSON wire format is
+unchanged — `uuid.UUID` and `time.Time` marshal to the same string/RFC3339 they
+did before. No schema change.
+
+### Added
+
+- **Public service interfaces in package `authkit`** (`AuthService`,
+  `UserService`, `APIKeyService`, `TokenService`, `JWTService`, `OTPService`,
+  `PasswordService`, `SecretService`, `TenantService`, `InvitationService`). The
+  accessors return these, so a consumer can store a service on a struct field,
+  pass it to a function, or mock it in a test — none of which the previous
+  `internal`-package concrete return types allowed.
+
+### Changed (breaking)
+
+- **Accessors return interfaces** instead of `*service.X` (the concrete types live
+  in an internal package and could never be named by consumers anyway).
+- **User IDs are `uuid.UUID` at the API boundary.** `model.JWTClaims.UserID`,
+  `model.ChangePasswordRequest.UserID`, and `model.RefreshResponse.UserID` are now
+  `uuid.UUID` (were `string`); `AuthService.LogoutAll` and
+  `TokenService.RevokeAllUserTokens` now take `uuid.UUID`. This matches the `User`
+  entity and every `UserService` method, removing the string⇄UUID conversions
+  consumers had to do. (JSON unchanged: `uuid.UUID` marshals to the same string.)
+- **Response timestamps are `time.Time`.** `CreateAPIKeyResponse.CreatedAt`/
+  `ExpiresAt` and `SaveSecretResponse.CreatedAt`/`UpdatedAt` are now `time.Time` /
+  `*time.Time` (were pre-formatted RFC3339 strings); `SaveSecretResponse.CreatedBy`
+  is now `uuid.UUID`. Callers can do time math without re-parsing; JSON output is
+  unchanged.
+
+`CreateAPIKeyRequest.ExpiresIn` stays `*string` — it accepts calendar units
+(`"6M"`, `"1y"`) that `time.Duration` cannot represent.
+
+### Security
+
+- **Bumped `golang.org/x/crypto` to v0.52.0**, clearing the `golang.org/x/crypto/ssh`
+  advisories Dependabot flagged (including a critical SSH auth-bypass). authkit-go
+  only uses `golang.org/x/crypto/bcrypt`, so none were reachable
+  (`govulncheck` reports 0 affected call paths), but the bump removes the alerts.
+  The remaining advisories are Go standard-library ones — cleared by building with
+  Go 1.25.10+ / 1.25.11+ rather than by any module change.
+
+### Changed
+
+- **Minimum Go is now 1.25** (required by `golang.org/x/crypto` v0.52.0).
+
 ## [0.6.0] - 2026-06-14
 
 Correctness, security, and error-contract hardening from a full library review.
@@ -447,7 +496,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/modgudinc/authkit-go/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/modgudinc/authkit-go/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/modgudinc/authkit-go/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/modgudinc/authkit-go/compare/v0.4.0...v0.4.1

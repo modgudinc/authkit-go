@@ -33,11 +33,11 @@ type SaveSecretRequest struct {
 
 // SaveSecretResponse is returned after saving a secret
 type SaveSecretResponse struct {
-	TenantID    string `json:"tenant_id"`
-	Key         string `json:"key"`
-	MaskedValue string `json:"masked_value"`
-	CreatedBy   string `json:"created_by"`
-	IsValid     bool   `json:"is_valid"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	TenantID    string    `json:"tenant_id"`
+	Key         string    `json:"key"`
+	MaskedValue string    `json:"masked_value"`
+	CreatedBy   uuid.UUID `json:"created_by"`
+	IsValid     bool      `json:"is_valid"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }

@@ -325,15 +325,9 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 //	if err != nil {
 //	    return fmt.Errorf("logout all failed: %w", err)
 //	}
-func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
+func (s *AuthService) LogoutAll(ctx context.Context, userID uuid.UUID) error {
 	if s.logger != nil {
 		s.logger.Info("Logout from all devices", "user_id", userID)
-	}
-
-	// Parse userID
-	userUUID, err := parseUserID(userID)
-	if err != nil {
-		return fmt.Errorf("invalid user ID: %w", err)
 	}
 
 	// 1. Revoke all refresh tokens
@@ -345,7 +339,7 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
 	}
 
 	// 2. Increment token version (invalidates all JWTs)
-	if err := s.repo.IncrementTokenVersion(ctx, userUUID); err != nil {
+	if err := s.repo.IncrementTokenVersion(ctx, userID); err != nil {
 		if s.logger != nil {
 			s.logger.Error("Failed to increment token version", "error", err.Error())
 		}
@@ -453,13 +447,9 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 		return nil, fmt.Errorf("invalid token: %w", model.ErrInvalidToken)
 	}
 
-	// 2. Get user from database
-	userUUID, err := parseUserID(claims.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid user ID in token: %w", model.ErrInvalidToken)
-	}
-
-	user, err := s.repo.GetByID(ctx, userUUID, claims.TenantID)
+	// 2. Get user from database (claims.UserID is a uuid.UUID; a malformed token
+	// id would already have failed JWT claim parsing above).
+	user, err := s.repo.GetByID(ctx, claims.UserID, claims.TenantID)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("User not found for JWT", "user_id", claims.UserID, "error", err.Error())
@@ -547,14 +537,8 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		s.logger.Info("Changing password", "user_id", req.UserID)
 	}
 
-	// 1. Parse and get user
-	userUUID, err := parseUserID(req.UserID)
-	if err != nil {
-		return fmt.Errorf("invalid user ID: %w", err)
-	}
-
-	// Get current password hash
-	currentHash, err := s.repo.VerifyPassword(ctx, userUUID)
+	// 1. Get current password hash (req.UserID is a uuid.UUID).
+	currentHash, err := s.repo.VerifyPassword(ctx, req.UserID)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("Failed to get current password hash", "error", err.Error())
@@ -591,7 +575,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 	}
 
 	// 5. Update password in database
-	if err := s.repo.SetPassword(ctx, userUUID, newHash); err != nil {
+	if err := s.repo.SetPassword(ctx, req.UserID, newHash); err != nil {
 		if s.logger != nil {
 			s.logger.Error("Failed to update password", "error", err.Error())
 		}
@@ -617,17 +601,4 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 	}
 
 	return nil
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-// parseUserID parses a user ID string to UUID
-func parseUserID(userID string) (uuid.UUID, error) {
-	userUUID, err := uuid.Parse(userID)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("invalid UUID format: %w", err)
-	}
-	return userUUID, nil
 }
