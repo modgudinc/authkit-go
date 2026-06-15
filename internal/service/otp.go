@@ -79,7 +79,7 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 				"error", err,
 			)
 		}
-		return nil, fmt.Errorf("failed to check OTP rate limit: %w", err)
+		return nil, sanitizeError(nil, "check otp rate limit", err)
 	}
 
 	// Enforce rate limiting if OTP exists and was created recently
@@ -110,7 +110,7 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 				"error", err,
 			)
 		}
-		return nil, fmt.Errorf("failed to generate OTP: %w", err)
+		return nil, sanitizeError(nil, "generate otp", err)
 	}
 
 	// Calculate expiration timestamp
@@ -138,7 +138,7 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 				"error", err,
 			)
 		}
-		return nil, fmt.Errorf("failed to store OTP: %w", err)
+		return nil, sanitizeError(nil, "store otp", err)
 	}
 	if !stored {
 		if s.logger != nil {
@@ -199,7 +199,7 @@ func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpos
 				"error", err,
 			)
 		}
-		return fmt.Errorf("failed to validate OTP: %w", err)
+		return sanitizeError(nil, "validate otp", err)
 	}
 
 	switch result {
@@ -248,7 +248,7 @@ func (s *OTPService) Delete(ctx context.Context, tenantID, email, purpose string
 				"error", err,
 			)
 		}
-		return fmt.Errorf("failed to delete OTP: %w", err)
+		return sanitizeError(nil, "delete otp", err)
 	}
 
 	if s.logger != nil {
@@ -275,7 +275,7 @@ func (s *OTPService) CleanupExpired(ctx context.Context) (int64, error) {
 				"error", err,
 			)
 		}
-		return 0, fmt.Errorf("failed to cleanup expired OTPs: %w", err)
+		return 0, sanitizeError(nil, "cleanup expired otps", err)
 	}
 
 	if s.logger != nil {

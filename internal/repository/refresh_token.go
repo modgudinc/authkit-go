@@ -19,7 +19,7 @@ import (
 //
 // Token Management:
 // - CreateRefreshToken  - Stores a new refresh token with session metadata
-// - GetByTokenHash      - Retrieves a refresh token by its SHA256 hash
+// - GetByTokenHash      - Retrieves a refresh token by its HMAC-SHA256 hash
 // - GetByUserID         - Lists all refresh tokens for a specific user
 // - UpdateLastUsed      - Updates the last_used_at timestamp (async operation)
 //

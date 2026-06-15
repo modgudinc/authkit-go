@@ -48,11 +48,12 @@ func (r *Repository) SaveSecret(
 
 	var secret model.Secret
 	var lastVerifiedAt sql.NullTime
+	var maskedKey sql.NullString // masked_key is a nullable column (match ListSecrets)
 
 	err := r.rw.QueryRowContext(ctx, r.q(query), tenantID, key, encryptedValue, maskedValue, createdBy).Scan(
 		&secret.TenantID,
 		&secret.Key,
-		&secret.MaskedValue,
+		&maskedKey,
 		&secret.CreatedBy,
 		&lastVerifiedAt,
 		&secret.IsValid,
@@ -63,6 +64,7 @@ func (r *Repository) SaveSecret(
 		return nil, fmt.Errorf("failed to save secret: %w", err)
 	}
 
+	secret.MaskedValue = maskedKey.String
 	if lastVerifiedAt.Valid {
 		secret.LastVerifiedAt = &lastVerifiedAt.Time
 	}

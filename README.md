@@ -1274,13 +1274,15 @@ if err != nil {
 - **`SecretConfig.EncryptionKey`**: Base64-encoded 32-byte AES-256 key for `SecretService`
 - **`Logger`**: Logger implementation (default: nil, no logging)
 
-### Expiration Duration Format
+### Expiration Duration
 
-Supported formats for API key expiration:
+`CreateAPIKeyRequest.ExpiresIn` is a `*time.Duration` (nil means the key never
+expires). The key expires at `time.Now().Add(*ExpiresIn)`. Express longer spans as
+plain durations:
 
-- `"30d"` - 30 days
-- `"6M"` - 6 months (approximate: 30 days per month)
-- `"1y"` - 1 year (approximate: 365 days)
+- `30 * 24 * time.Hour` - 30 days
+- `6 * 30 * 24 * time.Hour` - ~6 months (30 days per month)
+- `365 * 24 * time.Hour` - ~1 year
 
 ## Database Schema
 

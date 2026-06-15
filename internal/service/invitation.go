@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -91,7 +90,7 @@ func (s *InvitationService) CreateInvitation(ctx context.Context, tenantID strin
 				"error", err.Error(),
 			)
 		}
-		return nil, fmt.Errorf("failed to generate invitation code: %w", err)
+		return nil, sanitizeError(nil, "generate invitation code", err)
 	}
 
 	// Set max uses (default 1)
@@ -113,7 +112,7 @@ func (s *InvitationService) CreateInvitation(ctx context.Context, tenantID strin
 		TenantID:  tenantID,
 		CreatedBy: createdBy,
 		Roles:     roles,
-		Email:     strings.ToLower(strings.TrimSpace(email)),
+		Email:     normalizeEmail(email),
 		ExpiresAt: expiresAt,
 		MaxUses:   uses,
 	}
@@ -128,7 +127,7 @@ func (s *InvitationService) CreateInvitation(ctx context.Context, tenantID strin
 				"error", err.Error(),
 			)
 		}
-		return nil, err
+		return nil, sanitizeError(nil, "create invitation", err)
 	}
 
 	// Retrieve created invitation
@@ -140,7 +139,7 @@ func (s *InvitationService) CreateInvitation(ctx context.Context, tenantID strin
 				"error", err.Error(),
 			)
 		}
-		return nil, fmt.Errorf("invitation created but failed to retrieve: %w", err)
+		return nil, sanitizeError(nil, "retrieve created invitation", err)
 	}
 
 	if s.logger != nil {
@@ -178,7 +177,7 @@ func (s *InvitationService) GetInvitation(ctx context.Context, code string) (*mo
 				"error", err.Error(),
 			)
 		}
-		return nil, err
+		return nil, sanitizeError(nil, "get invitation", err)
 	}
 
 	if s.logger != nil {
@@ -295,7 +294,7 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, code, email, d
 				"error", err.Error(),
 			)
 		}
-		return uuid.Nil, err
+		return uuid.Nil, sanitizeError(nil, "accept invitation", err)
 	}
 
 	if s.logger != nil {
@@ -330,7 +329,7 @@ func (s *InvitationService) ListInvitations(ctx context.Context, tenantID string
 				"error", err.Error(),
 			)
 		}
-		return nil, err
+		return nil, sanitizeError(nil, "list invitations", err)
 	}
 
 	if s.logger != nil {
@@ -365,7 +364,7 @@ func (s *InvitationService) ListActiveInvitations(ctx context.Context, tenantID 
 				"error", err.Error(),
 			)
 		}
-		return nil, err
+		return nil, sanitizeError(nil, "list active invitations", err)
 	}
 
 	if s.logger != nil {
@@ -404,7 +403,7 @@ func (s *InvitationService) RevokeInvitation(ctx context.Context, code string) e
 				"error", err.Error(),
 			)
 		}
-		return err
+		return sanitizeError(nil, "revoke invitation", err)
 	}
 
 	if s.logger != nil {
@@ -438,7 +437,7 @@ func (s *InvitationService) DeleteInvitation(ctx context.Context, code string) e
 				"error", err.Error(),
 			)
 		}
-		return err
+		return sanitizeError(nil, "delete invitation", err)
 	}
 
 	if s.logger != nil {
@@ -476,7 +475,7 @@ func (s *InvitationService) IncrementUseCount(ctx context.Context, code string) 
 				"error", err.Error(),
 			)
 		}
-		return err
+		return sanitizeError(nil, "increment use count", err)
 	}
 
 	if s.logger != nil {
@@ -508,7 +507,7 @@ func (s *InvitationService) CleanupExpiredInvitations(ctx context.Context) (int6
 				"error", err.Error(),
 			)
 		}
-		return 0, err
+		return 0, sanitizeError(nil, "cleanup expired invitations", err)
 	}
 
 	if s.logger != nil {
@@ -531,7 +530,7 @@ func (s *InvitationService) CleanupExpiredInvitations(ctx context.Context) (int6
 //
 // Returns true if an active (not expired, not fully used) invitation exists
 func (s *InvitationService) HasPending(ctx context.Context, email, tenantID string) (bool, error) {
-	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
+	normalizedEmail := normalizeEmail(email)
 
 	hasPending, err := s.repo.HasPending(ctx, normalizedEmail, tenantID)
 	if err != nil {
@@ -542,7 +541,7 @@ func (s *InvitationService) HasPending(ctx context.Context, email, tenantID stri
 				"error", err.Error(),
 			)
 		}
-		return false, err
+		return false, sanitizeError(nil, "check pending invitation", err)
 	}
 
 	return hasPending, nil

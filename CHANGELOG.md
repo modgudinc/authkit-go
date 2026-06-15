@@ -8,6 +8,44 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-15
+
+Hardening and fixes from a full multi-dimensional review. No public API signatures
+change. Two behavior changes are noted under Fixed (both move toward the documented
+contract).
+
+### Security
+
+- **The error-sanitization boundary now actually holds.** `sanitizeError` (which
+  collapses non-sentinel errors to `ErrInternal` so driver/schema/SQL details never
+  reach callers) was only applied to a handful of read methods. It is now applied
+  across every public service method — `AuthService`, `OTPService`, `TokenService`,
+  `TenantService`, and all `UserService`/`InvitationService` mutators — so a genuine
+  DB fault no longer leaks raw pgx/constraint text. Sentinel errors (`ErrInvalidOTP`,
+  `ErrInvalidCredentials`, `ErrNotFound`, …) still pass through unchanged, so
+  `errors.Is` matching is unaffected.
+- **CI actions are pinned to commit SHAs.** The gosec job used `securego/gosec@master`
+  and `actions/checkout@v4` (mutable refs); both are now pinned to full SHAs, matching
+  the govulncheck job.
+
+### Fixed
+
+- **`Logout` / `RevokeRefreshToken` are now idempotent** — revoking an unknown or
+  already-revoked refresh token returns `nil` (success) instead of an error.
+- **README "Expiration Duration" section** no longer documents the removed
+  `"30d"`/`"6M"`/`"1y"` string format; it now shows `*time.Duration` (matching v0.8.0).
+- `SaveSecret` scans the nullable `masked_key` column via `sql.NullString` (consistent
+  with `ListSecrets`).
+- `SECURITY.md` supported-versions table updated to `0.8.x`; `CHANGELOG` 0.7.0 timestamp
+  types clarified.
+
+### Changed (internal)
+
+- Removed the unused `Lock` method from the internal `authRepository` interface.
+- `validateDomain` compiles its regexp once at package load instead of per call;
+  invitation email normalization reuses the shared `normalizeEmail` helper; a couple
+  of stale doc comments corrected.
+
 ## [0.8.0] - 2026-06-15
 
 Small follow-up: `CreateAPIKeyRequest.ExpiresIn` becomes a real `time.Duration`,
@@ -59,11 +97,11 @@ did before. No schema change.
   `TokenService.RevokeAllUserTokens` now take `uuid.UUID`. This matches the `User`
   entity and every `UserService` method, removing the string⇄UUID conversions
   consumers had to do. (JSON unchanged: `uuid.UUID` marshals to the same string.)
-- **Response timestamps are `time.Time`.** `CreateAPIKeyResponse.CreatedAt`/
-  `ExpiresAt` and `SaveSecretResponse.CreatedAt`/`UpdatedAt` are now `time.Time` /
-  `*time.Time` (were pre-formatted RFC3339 strings); `SaveSecretResponse.CreatedBy`
-  is now `uuid.UUID`. Callers can do time math without re-parsing; JSON output is
-  unchanged.
+- **Response timestamps are `time.Time`.** `CreateAPIKeyResponse.CreatedAt`,
+  `SaveSecretResponse.CreatedAt`, and `SaveSecretResponse.UpdatedAt` are now
+  `time.Time`, and `CreateAPIKeyResponse.ExpiresAt` is `*time.Time` (all were
+  pre-formatted RFC3339 strings); `SaveSecretResponse.CreatedBy` is now `uuid.UUID`.
+  Callers can do time math without re-parsing; JSON output is unchanged.
 
 `CreateAPIKeyRequest.ExpiresIn` stays `*string` — it accepts calendar units
 (`"6M"`, `"1y"`) that `time.Duration` cannot represent.
@@ -520,7 +558,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/modgudinc/authkit-go/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/modgudinc/authkit-go/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/modgudinc/authkit-go/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/modgudinc/authkit-go/compare/v0.5.0...v0.6.0

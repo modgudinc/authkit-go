@@ -52,7 +52,7 @@ func (s *TenantService) GetTenant(ctx context.Context, tenantID string) (*model.
 				"error", err.Error(),
 			)
 		}
-		return nil, err
+		return nil, sanitizeError(nil, "get tenant", err)
 	}
 
 	if s.logger != nil {
@@ -89,7 +89,7 @@ func (s *TenantService) GetTenantByDomain(ctx context.Context, domain string) (*
 				"error", err.Error(),
 			)
 		}
-		return nil, err
+		return nil, sanitizeError(nil, "get tenant by domain", err)
 	}
 
 	if s.logger != nil {
@@ -150,7 +150,7 @@ func (s *TenantService) CreateTenant(ctx context.Context, req model.CreateTenant
 				"error", err.Error(),
 			)
 		}
-		return nil, err
+		return nil, sanitizeError(nil, "create tenant", err)
 	}
 
 	// Retrieve the created tenant
@@ -162,7 +162,7 @@ func (s *TenantService) CreateTenant(ctx context.Context, req model.CreateTenant
 				"error", err.Error(),
 			)
 		}
-		return nil, fmt.Errorf("tenant created but failed to retrieve: %w", err)
+		return nil, sanitizeError(nil, "retrieve created tenant", err)
 	}
 
 	if s.logger != nil {
@@ -216,7 +216,7 @@ func (s *TenantService) UpdateSettings(ctx context.Context, tenantID string, set
 				"error", err.Error(),
 			)
 		}
-		return err
+		return sanitizeError(nil, "update tenant settings", err)
 	}
 
 	if s.logger != nil {
@@ -252,7 +252,7 @@ func (s *TenantService) UpdateName(ctx context.Context, tenantID, name string) e
 				"error", err.Error(),
 			)
 		}
-		return err
+		return sanitizeError(nil, "update tenant name", err)
 	}
 
 	if s.logger != nil {
@@ -315,7 +315,7 @@ func (s *TenantService) SetAllowedDomains(ctx context.Context, tenantID string, 
 				"error", err.Error(),
 			)
 		}
-		return err
+		return sanitizeError(nil, "set allowed domains", err)
 	}
 
 	if s.logger != nil {
@@ -372,7 +372,7 @@ func (s *TenantService) AddAllowedDomain(ctx context.Context, tenantID, domain s
 				"error", err.Error(),
 			)
 		}
-		return err
+		return sanitizeError(nil, "add allowed domain", err)
 	}
 
 	if s.logger != nil {
@@ -403,7 +403,7 @@ func (s *TenantService) ListTenants(ctx context.Context) ([]*model.Tenant, error
 				"error", err.Error(),
 			)
 		}
-		return nil, err
+		return nil, sanitizeError(nil, "list tenants", err)
 	}
 
 	if s.logger != nil {
@@ -431,7 +431,7 @@ func (s *TenantService) TenantExists(ctx context.Context, tenantID string) (bool
 				"error", err.Error(),
 			)
 		}
-		return false, err
+		return false, sanitizeError(nil, "check tenant existence", err)
 	}
 
 	return exists, nil
@@ -460,7 +460,7 @@ func (s *TenantService) ValidateDomainAccess(ctx context.Context, email, tenantI
 	// Get tenant
 	tenant, err := s.repo.GetTenant(ctx, tenantID)
 	if err != nil {
-		return fmt.Errorf("tenant not found: %w", err)
+		return sanitizeError(s.logger, "validate domain access", err)
 	}
 
 	// Check if domain is in allowed_domains
@@ -477,13 +477,14 @@ func (s *TenantService) ValidateDomainAccess(ctx context.Context, email, tenantI
 // Helper Functions
 // ============================================================================
 
+// domainRegex matches a valid domain name: at least one label + dot + TLD,
+// allowing subdomains (mail.example.com, api.v2.example.com). Compiled once at
+// package load rather than on every validateDomain call.
+var domainRegex = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
+
 // validateDomain validates that a string is a valid domain name
 // Validates format: domain.tld (e.g., "example.com", "mail.google.com")
 func (s *TenantService) validateDomain(domain string) error {
-	// Basic domain regex: at least one label + dot + TLD
-	// Allows subdomains: mail.example.com, api.v2.example.com, etc.
-	domainRegex := regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
-
 	if !domainRegex.MatchString(domain) {
 		return fmt.Errorf("invalid domain format: %s", domain)
 	}

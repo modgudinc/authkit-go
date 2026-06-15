@@ -58,7 +58,8 @@ func clampPagination(limit, offset int) (int, int) {
 // (trimmed and lowercased) so it can be matched consistently on later lookups.
 func (s *UserService) Create(ctx context.Context, req model.CreateUserRequest) (uuid.UUID, error) {
 	req.Email = normalizeEmail(req.Email)
-	return s.repo.Create(ctx, req)
+	id, err := s.repo.Create(ctx, req)
+	return id, sanitizeError(s.logger, "create user", err)
 }
 
 // Update updates a user's roles and display name within a tenant.
@@ -70,16 +71,16 @@ func (s *UserService) Create(ctx context.Context, req model.CreateUserRequest) (
 // the updated roles. The refresh token itself remains valid (the user is not
 // logged out), so the next refresh seamlessly issues correctly-scoped tokens.
 func (s *UserService) Update(ctx context.Context, userID uuid.UUID, tenantID string, req model.UpdateUserRequest) error {
-	return s.repo.UpdateByTenant(ctx, userID, tenantID, req)
+	return sanitizeError(s.logger, "update user", s.repo.UpdateByTenant(ctx, userID, tenantID, req))
 }
 
 // Delete soft-deletes a user (sets is_enabled=false) within a tenant and revokes
 // its refresh tokens. Scoped by tenantID to prevent cross-tenant deletion.
 func (s *UserService) Delete(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	if err := s.repo.DeleteByTenant(ctx, userID, tenantID); err != nil {
-		return err
+		return sanitizeError(s.logger, "delete user", err)
 	}
-	return s.revokeRefreshTokens(ctx, userID, "delete")
+	return sanitizeError(nil, "delete user", s.revokeRefreshTokens(ctx, userID, "delete"))
 }
 
 // ============================================================================
@@ -106,7 +107,8 @@ func (s *UserService) GetByEmail(ctx context.Context, email, tenantID string) (*
 
 // Exists checks if a user exists within a specific tenant
 func (s *UserService) Exists(ctx context.Context, email, tenantID string) (bool, error) {
-	return s.repo.Exists(ctx, normalizeEmail(email), tenantID)
+	ok, err := s.repo.Exists(ctx, normalizeEmail(email), tenantID)
+	return ok, sanitizeError(s.logger, "check user exists", err)
 }
 
 // List retrieves users within a specific tenant with pagination. limit/offset are
@@ -125,19 +127,22 @@ func (s *UserService) List(ctx context.Context, tenantID string, limit, offset i
 // ExistsActive checks if an active (enabled, unlocked) user exists
 // Useful when linking external actors to users
 func (s *UserService) ExistsActive(ctx context.Context, email, tenantID string) (bool, error) {
-	return s.repo.ExistsActive(ctx, normalizeEmail(email), tenantID)
+	ok, err := s.repo.ExistsActive(ctx, normalizeEmail(email), tenantID)
+	return ok, sanitizeError(s.logger, "check active user exists", err)
 }
 
 // GetDisplayName gets just the display name for a user
 // Useful when enriching responses with user names
 func (s *UserService) GetDisplayName(ctx context.Context, userID uuid.UUID) (string, error) {
-	return s.repo.GetDisplayName(ctx, userID)
+	name, err := s.repo.GetDisplayName(ctx, userID)
+	return name, sanitizeError(s.logger, "get display name", err)
 }
 
 // GetActiveUserIDByEmail gets user ID for an active (enabled, unlocked) user
 // Useful when linking external actors to users by email
 func (s *UserService) GetActiveUserIDByEmail(ctx context.Context, email, tenantID string) (uuid.UUID, error) {
-	return s.repo.GetActiveUserIDByEmail(ctx, normalizeEmail(email), tenantID)
+	id, err := s.repo.GetActiveUserIDByEmail(ctx, normalizeEmail(email), tenantID)
+	return id, sanitizeError(s.logger, "get active user id by email", err)
 }
 
 // ============================================================================
@@ -146,7 +151,7 @@ func (s *UserService) GetActiveUserIDByEmail(ctx context.Context, email, tenantI
 
 // Enable enables a user account within a tenant (scoped to prevent IDOR).
 func (s *UserService) Enable(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	return s.repo.EnableByTenant(ctx, userID, tenantID)
+	return sanitizeError(s.logger, "enable user", s.repo.EnableByTenant(ctx, userID, tenantID))
 }
 
 // Disable disables a user account within a tenant and revokes its refresh tokens.
@@ -166,14 +171,14 @@ func (s *UserService) Disable(ctx context.Context, userID uuid.UUID, tenantID st
 // continuing to mint access tokens through the refresh flow while locked.
 func (s *UserService) Lock(ctx context.Context, userID uuid.UUID, tenantID string, lockedUntil *time.Time) error {
 	if err := s.repo.LockByTenant(ctx, userID, tenantID, lockedUntil); err != nil {
-		return err
+		return sanitizeError(s.logger, "lock user", err)
 	}
-	return s.revokeRefreshTokens(ctx, userID, "lock")
+	return sanitizeError(nil, "lock user", s.revokeRefreshTokens(ctx, userID, "lock"))
 }
 
 // Unlock unlocks a user account within a tenant (scoped to prevent IDOR).
 func (s *UserService) Unlock(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	return s.repo.UnlockByTenant(ctx, userID, tenantID)
+	return sanitizeError(s.logger, "unlock user", s.repo.UnlockByTenant(ctx, userID, tenantID))
 }
 
 // ============================================================================
@@ -185,15 +190,16 @@ func (s *UserService) Unlock(ctx context.Context, userID uuid.UUID, tenantID str
 // The password must already be hashed. Scoped by tenantID to prevent IDOR.
 func (s *UserService) SetPassword(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error {
 	if err := s.repo.SetPasswordByTenant(ctx, userID, tenantID, hashedPassword); err != nil {
-		return err
+		return sanitizeError(s.logger, "set password", err)
 	}
-	return s.revokeRefreshTokens(ctx, userID, "set_password")
+	return sanitizeError(nil, "set password", s.revokeRefreshTokens(ctx, userID, "set_password"))
 }
 
 // VerifyPassword retrieves the password hash for verification
 // Returns the stored hash which should be compared using bcrypt
 func (s *UserService) VerifyPassword(ctx context.Context, userID uuid.UUID) (string, error) {
-	return s.repo.VerifyPassword(ctx, userID)
+	hash, err := s.repo.VerifyPassword(ctx, userID)
+	return hash, sanitizeError(s.logger, "verify password", err)
 }
 
 // ============================================================================
@@ -202,12 +208,12 @@ func (s *UserService) VerifyPassword(ctx context.Context, userID uuid.UUID) (str
 
 // UpdateLastLogin updates the last_login timestamp for a user
 func (s *UserService) UpdateLastLogin(ctx context.Context, userID uuid.UUID) error {
-	return s.repo.UpdateLastLogin(ctx, userID)
+	return sanitizeError(s.logger, "update last login", s.repo.UpdateLastLogin(ctx, userID))
 }
 
 // IncrementFailedLoginCount increments the failed login counter
 func (s *UserService) IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID) error {
-	return s.repo.IncrementFailedLoginCount(ctx, userID)
+	return sanitizeError(s.logger, "increment failed login count", s.repo.IncrementFailedLoginCount(ctx, userID))
 }
 
 // ============================================================================
@@ -223,9 +229,9 @@ func (s *UserService) IncrementFailedLoginCount(ctx context.Context, userID uuid
 // the new version and stamps it into a freshly minted, valid access token.
 func (s *UserService) IncrementTokenVersion(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	if err := s.repo.IncrementTokenVersionByTenant(ctx, userID, tenantID); err != nil {
-		return err
+		return sanitizeError(s.logger, "increment token version", err)
 	}
-	return s.revokeRefreshTokens(ctx, userID, "increment_token_version")
+	return sanitizeError(nil, "increment token version", s.revokeRefreshTokens(ctx, userID, "increment_token_version"))
 }
 
 // revokeRefreshTokens deletes all refresh tokens for a user. Used by the
@@ -250,7 +256,8 @@ func (s *UserService) revokeRefreshTokens(ctx context.Context, userID uuid.UUID,
 
 // CountByTenant returns the count of users in a tenant
 func (s *UserService) CountByTenant(ctx context.Context, tenantID string) (int, error) {
-	return s.repo.CountUsersByTenant(ctx, tenantID)
+	n, err := s.repo.CountUsersByTenant(ctx, tenantID)
+	return n, sanitizeError(s.logger, "count users by tenant", err)
 }
 
 // UpdateRolesByTenant updates user roles with tenant isolation.
@@ -258,13 +265,13 @@ func (s *UserService) CountByTenant(ctx context.Context, tenantID string) (int, 
 // user's token_version so outstanding access tokens (which carry roles) are
 // invalidated; the next refresh issues tokens with the updated roles.
 func (s *UserService) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, tenantID string, roles []string) error {
-	return s.repo.UpdateRolesByTenant(ctx, userID, tenantID, roles)
+	return sanitizeError(s.logger, "update roles by tenant", s.repo.UpdateRolesByTenant(ctx, userID, tenantID, roles))
 }
 
 // EnableByTenant enables a user account with tenant isolation
 // Validates tenant ownership before enabling
 func (s *UserService) EnableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	return s.repo.EnableByTenant(ctx, userID, tenantID)
+	return sanitizeError(s.logger, "enable user by tenant", s.repo.EnableByTenant(ctx, userID, tenantID))
 }
 
 // DisableByTenant disables a user account with tenant isolation and revokes its
@@ -276,7 +283,7 @@ func (s *UserService) EnableByTenant(ctx context.Context, userID uuid.UUID, tena
 // resume old sessions from refresh tokens that were never replayed.
 func (s *UserService) DisableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	if err := s.repo.DisableByTenant(ctx, userID, tenantID); err != nil {
-		return err
+		return sanitizeError(s.logger, "disable user by tenant", err)
 	}
-	return s.revokeRefreshTokens(ctx, userID, "disable")
+	return sanitizeError(nil, "disable user by tenant", s.revokeRefreshTokens(ctx, userID, "disable"))
 }

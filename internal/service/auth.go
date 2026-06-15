@@ -20,7 +20,6 @@ import (
 type authRepository interface {
 	GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error)
 	GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error)
-	Lock(ctx context.Context, userID uuid.UUID, lockedUntil *time.Time) error
 	Unlock(ctx context.Context, userID uuid.UUID) error
 	IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID) error
 	RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error)
@@ -141,7 +140,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		if s.logger != nil {
 			s.logger.Warn("Login failed: account disabled",
 				"user_id", user.ID.String(),
-				"email", maskEmail(req.Email),
+				"email", maskEmail(email),
 			)
 		}
 		return nil, model.ErrInvalidCredentials
@@ -163,7 +162,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 				// Refresh user data
 				user, err = s.repo.GetByID(ctx, user.ID, req.TenantID)
 				if err != nil {
-					return nil, fmt.Errorf("failed to refresh user data: %w", err)
+					return nil, sanitizeError(s.logger, "refresh user data", err)
 				}
 			}
 		} else {
@@ -187,7 +186,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		if s.logger != nil {
 			s.logger.Warn("Password verification failed",
 				"user_id", user.ID.String(),
-				"email", maskEmail(req.Email),
+				"email", maskEmail(email),
 			)
 		}
 
@@ -246,13 +245,13 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		if s.logger != nil {
 			s.logger.Error("Failed to generate token pair", "error", err.Error())
 		}
-		return nil, fmt.Errorf("failed to generate tokens: %w", err)
+		return nil, sanitizeError(nil, "generate tokens", err)
 	}
 
 	if s.logger != nil {
 		s.logger.Info("User login successful",
 			"user_id", user.ID.String(),
-			"email", maskEmail(req.Email),
+			"email", maskEmail(email),
 			"tenant_id", req.TenantID,
 		)
 	}
@@ -290,7 +289,7 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 		if s.logger != nil {
 			s.logger.Error("Failed to revoke refresh token", "error", err.Error())
 		}
-		return fmt.Errorf("logout failed: %w", err)
+		return sanitizeError(nil, "logout", err)
 	}
 
 	if s.logger != nil {
@@ -335,7 +334,7 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID uuid.UUID) error {
 		if s.logger != nil {
 			s.logger.Error("Failed to revoke all refresh tokens", "error", err.Error())
 		}
-		return fmt.Errorf("failed to revoke refresh tokens: %w", err)
+		return sanitizeError(nil, "revoke refresh tokens", err)
 	}
 
 	// 2. Increment token version (invalidates all JWTs)
@@ -343,7 +342,7 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID uuid.UUID) error {
 		if s.logger != nil {
 			s.logger.Error("Failed to increment token version", "error", err.Error())
 		}
-		return fmt.Errorf("failed to increment token version: %w", err)
+		return sanitizeError(nil, "increment token version", err)
 	}
 
 	if s.logger != nil {
@@ -389,7 +388,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest
 		if s.logger != nil {
 			s.logger.Error("Failed to refresh token pair", "error", err.Error())
 		}
-		return nil, fmt.Errorf("failed to refresh tokens: %w", err)
+		return nil, sanitizeError(nil, "refresh tokens", err)
 	}
 
 	// Get user ID from new access token
@@ -398,7 +397,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest
 		if s.logger != nil {
 			s.logger.Error("Failed to validate new access token", "error", err.Error())
 		}
-		return nil, fmt.Errorf("failed to validate new token: %w", err)
+		return nil, sanitizeError(nil, "validate new token", err)
 	}
 
 	if s.logger != nil {
@@ -543,7 +542,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		if s.logger != nil {
 			s.logger.Error("Failed to get current password hash", "error", err.Error())
 		}
-		return fmt.Errorf("failed to retrieve user password: %w", err)
+		return sanitizeError(nil, "retrieve user password", err)
 	}
 
 	// 2. Verify old password
@@ -562,7 +561,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		if s.logger != nil {
 			s.logger.Warn("New password validation failed", "error", err.Error())
 		}
-		return fmt.Errorf("password validation failed: %w", err)
+		return sanitizeError(nil, "validate password strength", err)
 	}
 
 	// 4. Hash new password
@@ -571,7 +570,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		if s.logger != nil {
 			s.logger.Error("Failed to hash new password", "error", err.Error())
 		}
-		return fmt.Errorf("failed to hash password: %w", err)
+		return sanitizeError(nil, "hash password", err)
 	}
 
 	// 5. Update password in database
@@ -579,7 +578,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		if s.logger != nil {
 			s.logger.Error("Failed to update password", "error", err.Error())
 		}
-		return fmt.Errorf("failed to update password: %w", err)
+		return sanitizeError(nil, "update password", err)
 	}
 
 	// 6. Invalidate all sessions (logout from all devices).
@@ -593,7 +592,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		if s.logger != nil {
 			s.logger.Error("Password updated but session revocation failed", "user_id", req.UserID, "error", err.Error())
 		}
-		return fmt.Errorf("password updated but failed to revoke existing sessions: %w", err)
+		return sanitizeError(nil, "revoke existing sessions", err)
 	}
 
 	if s.logger != nil {
