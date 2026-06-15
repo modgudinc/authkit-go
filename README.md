@@ -68,7 +68,6 @@ func main() {
         },
         JWTConfig: authkit.JWTConfig{
             AccessSecret:           os.Getenv("JWT_ACCESS_SECRET"),
-            RefreshSecret:          os.Getenv("JWT_REFRESH_SECRET"),
             RefreshTokenHMACSecret: os.Getenv("REFRESH_TOKEN_HMAC_SECRET"), // Required
             AccessExpiry:           time.Minute * 15,  // Optional, defaults to 15 minutes
             RefreshExpiry:          time.Hour * 168,   // Optional, defaults to 7 days
@@ -760,14 +759,14 @@ invitationService := identity.InvitationService()
 maxUses := 1
 expiresIn := 7 * 24 * time.Hour // 7 days
 
-invitation, err := invitationService.CreateInvitation(ctx,
-    "acme.com",             // Tenant ID
-    adminUserID,            // Created by: uuid.UUID of the admin (FK to users.id)
-    []string{"Member"},     // Roles (array of role names, validated by app layer)
-    "user@acme.com",        // Target email address
-    &maxUses,               // Optional max uses (nil = default 1)
-    &expiresIn,             // Optional expiration (nil = default 7 days)
-)
+invitation, err := invitationService.CreateInvitation(ctx, model.CreateInvitationRequest{
+    TenantID:  "acme.com",
+    CreatedBy: adminUserID,        // uuid.UUID of the admin (FK to users.id)
+    Email:     "user@acme.com",    // Target email address
+    Roles:     []string{"Member"}, // Validated by your app layer
+    MaxUses:   &maxUses,           // Optional (nil = default 1)
+    ExpiresIn: &expiresIn,         // Optional (nil = default 7 days)
+})
 if err != nil {
     log.Fatal(err)
 }
@@ -977,7 +976,12 @@ func AdminCreateInvitation(ctx context.Context, tenantID string, adminUserID uui
     }
 
     // Create invitation with defaults (1 use, 7 days expiration)
-    invitation, err := invitationService.CreateInvitation(ctx, tenantID, adminUserID, []string{"Member"}, inviteeEmail, nil, nil)
+    invitation, err := invitationService.CreateInvitation(ctx, model.CreateInvitationRequest{
+        TenantID:  tenantID,
+        CreatedBy: adminUserID,
+        Email:     inviteeEmail,
+        Roles:     []string{"Member"},
+    })
     if err != nil {
         return "", fmt.Errorf("failed to create invitation: %w", err)
     }
@@ -1229,7 +1233,6 @@ identity, err := authkit.New(authkit.Config{
     },
     JWTConfig: authkit.JWTConfig{
         AccessSecret:           os.Getenv("JWT_ACCESS_SECRET"),          // Required
-        RefreshSecret:          os.Getenv("JWT_REFRESH_SECRET"),         // Required
         RefreshTokenHMACSecret: os.Getenv("REFRESH_TOKEN_HMAC_SECRET"),  // Required
         AccessExpiry:           15 * time.Minute,                        // Optional: defaults to 15 minutes
         RefreshExpiry:          7 * 24 * time.Hour,                      // Optional: defaults to 7 days
@@ -1260,7 +1263,6 @@ if err != nil {
 - **`IdentityRWDB`**: Database connection for write operations (required)
 - **`IdentityRODB`**: Database connection for read operations (required)
 - **`JWTConfig.AccessSecret`**: Secret for access token signing (required)
-- **`JWTConfig.RefreshSecret`**: Secret for refresh token signing (required)
 - **`JWTConfig.RefreshTokenHMACSecret`**: Secret for HMAC-SHA256 hashing of refresh tokens in storage (required)
 - **`APIKeyConfig.HMACSecret`**: Secret for API key hashing (required)
 

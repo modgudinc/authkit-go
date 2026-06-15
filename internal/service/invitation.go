@@ -64,21 +64,17 @@ func NewInvitationService(repo *repository.Repository, logger logger.Logger) *In
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
-//   - tenantID: Tenant identifier
-//   - createdBy: User UUID of admin/manager creating the invitation
-//   - roles: Roles to assign (validated by application layer)
-//   - email: Target email address for the invitation (required)
-//   - maxUses: Optional maximum uses (defaults to 1 if nil or 0)
-//   - expiresIn: Optional expiration duration (defaults to 7 days if nil)
+//   - req: Invitation details (TenantID, CreatedBy, Email, Roles are required;
+//     MaxUses defaults to 1, ExpiresIn defaults to 7 days)
 //
 // Returns the created invitation or error
-func (s *InvitationService) CreateInvitation(ctx context.Context, tenantID string, createdBy uuid.UUID, roles []string, email string, maxUses *int, expiresIn *time.Duration) (*model.Invitation, error) {
+func (s *InvitationService) CreateInvitation(ctx context.Context, req model.CreateInvitationRequest) (*model.Invitation, error) {
 	if s.logger != nil {
 		s.logger.Info("Creating invitation",
-			"tenant_id", tenantID,
-			"created_by", createdBy,
-			"roles", roles,
-			"email", maskEmail(email),
+			"tenant_id", req.TenantID,
+			"created_by", req.CreatedBy,
+			"roles", req.Roles,
+			"email", maskEmail(req.Email),
 		)
 	}
 
@@ -95,35 +91,32 @@ func (s *InvitationService) CreateInvitation(ctx context.Context, tenantID strin
 
 	// Set max uses (default 1)
 	uses := DefaultMaxUses
-	if maxUses != nil && *maxUses > 0 {
-		uses = *maxUses
+	if req.MaxUses != nil && *req.MaxUses > 0 {
+		uses = *req.MaxUses
 	}
 
 	// Set expiration (default 7 days)
 	expiry := DefaultInvitationExpiry
-	if expiresIn != nil && *expiresIn > 0 {
-		expiry = *expiresIn
+	if req.ExpiresIn != nil && *req.ExpiresIn > 0 {
+		expiry = *req.ExpiresIn
 	}
 	expiresAt := time.Now().Add(expiry)
 
-	// Create invitation request
-	req := model.CreateInvitationRequest{
+	// Create invitation in database
+	err = s.repo.CreateInvitation(ctx, repository.InsertInvitationParams{
 		Code:      code,
-		TenantID:  tenantID,
-		CreatedBy: createdBy,
-		Roles:     roles,
-		Email:     normalizeEmail(email),
+		TenantID:  req.TenantID,
+		CreatedBy: req.CreatedBy,
+		Roles:     req.Roles,
+		Email:     normalizeEmail(req.Email),
 		ExpiresAt: expiresAt,
 		MaxUses:   uses,
-	}
-
-	// Create invitation in database
-	err = s.repo.CreateInvitation(ctx, req)
+	})
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("Failed to create invitation",
-				"tenant_id", tenantID,
-				"roles", roles,
+				"tenant_id", req.TenantID,
+				"roles", req.Roles,
 				"error", err.Error(),
 			)
 		}
@@ -145,8 +138,8 @@ func (s *InvitationService) CreateInvitation(ctx context.Context, tenantID strin
 	if s.logger != nil {
 		s.logger.Info("Invitation created successfully",
 			"code", maskCode(code),
-			"tenant_id", tenantID,
-			"roles", roles,
+			"tenant_id", req.TenantID,
+			"roles", req.Roles,
 			"max_uses", uses,
 			"expires_at", expiresAt.Format(time.RFC3339),
 		)

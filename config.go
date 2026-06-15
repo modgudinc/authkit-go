@@ -32,13 +32,16 @@ type DatabaseConnection struct {
 	IdentitySchema string  // Optional PostgreSQL schema name (defaults to authkit)
 }
 
-// JWTConfig configures access/refresh token signing. AccessSecret, RefreshSecret,
-// and RefreshTokenHMACSecret are required and must each be at least
+// JWTConfig configures access-token signing and refresh-token hashing.
+// AccessSecret and RefreshTokenHMACSecret are required and must each be at least
 // MinSecretLength bytes of high-entropy random data. Expiries default to
 // DefaultAccessExpiry / DefaultRefreshExpiry when zero.
+//
+// Note: refresh tokens are opaque random strings, not JWTs — they are not signed,
+// only HMAC-hashed (with RefreshTokenHMACSecret) for storage. There is therefore
+// no separate refresh-token signing secret.
 type JWTConfig struct {
 	AccessSecret           string
-	RefreshSecret          string
 	RefreshTokenHMACSecret string // Secret for HMAC-SHA256 hashing of refresh tokens in storage
 	AccessExpiry           time.Duration
 	RefreshExpiry          time.Duration

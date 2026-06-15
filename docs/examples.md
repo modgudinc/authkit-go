@@ -118,15 +118,12 @@ _ = keyContext
 ```go
 invitationService := identity.InvitationService()
 
-invitation, err := invitationService.CreateInvitation(
-	ctx,
-	"acme.com",
-	userID,
-	[]string{"Member"},
-	"invitee@acme.com",
-	nil,
-	nil,
-)
+invitation, err := invitationService.CreateInvitation(ctx, model.CreateInvitationRequest{
+	TenantID:  "acme.com",
+	CreatedBy: userID,
+	Email:     "invitee@acme.com",
+	Roles:     []string{"Member"},
+})
 if err != nil {
 	return err
 }

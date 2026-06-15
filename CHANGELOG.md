@@ -8,6 +8,44 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-15
+
+API-ergonomics release addressing the breaking findings from the review. Several
+public types and signatures change; no schema migration is required.
+
+### Removed
+
+- **`JWTConfig.RefreshSecret`** — it was required at construction but never used
+  for anything (refresh tokens are opaque random strings, hashed with
+  `RefreshTokenHMACSecret`, not signed). Delete it from your config; nothing else
+  changes. The internal `NewJWTService` signature drops its unused `refreshSecret`
+  parameter accordingly.
+- The dead non-tenant repository mutators (`Update`/`Delete`/`Enable`/`Disable`/
+  `Lock`) — every public path already used the tenant-scoped variants.
+
+### Changed (breaking)
+
+- **`InvitationService.CreateInvitation` now takes a `model.CreateInvitationRequest`**
+  instead of seven positional parameters:
+  `CreateInvitation(ctx, model.CreateInvitationRequest{TenantID, CreatedBy, Email, Roles, MaxUses, ExpiresIn})`.
+  `MaxUses` (`*int`) and `ExpiresIn` (`*time.Duration`) are optional (default 1 use /
+  7 days).
+- **`model.UpdateUserRequest` fields are now pointers** (`DisplayName *string`,
+  `Roles *[]string`): a nil field leaves that column unchanged, enabling partial
+  updates. `token_version` is now bumped **only when roles change** — a
+  display-name-only update no longer invalidates the user's sessions.
+- **`model.Tenant.Settings` is now `map[string]any`** (was a raw JSON `string`),
+  symmetric with `TenantService.UpdateSettings`, so a read-modify-write round-trip
+  needs no manual JSON (un)marshaling.
+
+### Changed (internal — not part of the public API)
+
+- Moved the repository plumbing types `VerificationCode`,
+  `CreateVerificationCodeRequest`, `OTPConsumeResult`, `RefreshToken`, and
+  `CreateRefreshTokenRequest` out of the public `model` package into
+  `internal/repository` (they were never consumer-facing). `model.GenerateResponse`
+  and `model.SessionInfo` remain public.
+
 ## [0.8.1] - 2026-06-15
 
 Hardening and fixes from a full multi-dimensional review. No public API signatures
@@ -558,7 +596,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/modgudinc/authkit-go/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/modgudinc/authkit-go/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/modgudinc/authkit-go/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/modgudinc/authkit-go/compare/v0.6.0...v0.7.0

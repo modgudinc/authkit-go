@@ -254,47 +254,6 @@ func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (
 }
 
 // ============================================================================
-// Update - Updates user's roles and display_name only
-// Security-critical fields (email, password, status) must use dedicated methods
-// ============================================================================
-func (r *Repository) Update(ctx context.Context, userID uuid.UUID, req model.UpdateUserRequest) error {
-	rolesJSON, err := json.Marshal(req.Roles)
-	if err != nil {
-		return fmt.Errorf("failed to marshal roles: %w", err)
-	}
-
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			display_name = $1,
-			roles = $2,
-			updated_at = $3
-		WHERE id = $4
-	`
-
-	result, err := r.rw.ExecContext(ctx, r.q(query),
-		req.DisplayName,
-		rolesJSON,
-		time.Now(),
-		userID,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to update user: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user %s not found: %w", userID, model.ErrNotFound)
-	}
-
-	return nil
-}
-
-// ============================================================================
 // SetPassword - Sets the password hash for a user (low-level operation)
 // IMPORTANT: This method accepts a HASHED password, not plaintext
 // Password hashing must be done at the service/controller layer
@@ -356,25 +315,6 @@ func (r *Repository) VerifyPassword(ctx context.Context, userID uuid.UUID) (stri
 	}
 
 	return hashedPassword, nil
-}
-
-// ============================================================================
-// Delete - Soft deletes a user by setting is_enabled=false and disabled_at
-// This preserves user data for audit trails while preventing authentication
-// ============================================================================
-func (r *Repository) Delete(ctx context.Context, userID uuid.UUID) error {
-	return r.withUserStatusAudit(ctx, userID, nil, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
-		now := time.Now()
-		if _, err := tx.ExecContext(ctx, r.q(`
-			UPDATE {{schema}}.users SET is_enabled = false, disabled_at = $1, updated_at = $1 WHERE id = $2
-		`), now, userID); err != nil {
-			return old, fmt.Errorf("failed to soft delete user: %w", err)
-		}
-		current := old
-		current.IsEnabled = false
-		current.DisabledAt = &now
-		return current, nil
-	})
 }
 
 // ============================================================================
@@ -676,44 +616,6 @@ func (r *Repository) IncrementTokenVersion(ctx context.Context, userID uuid.UUID
 }
 
 // ============================================================================
-// Enable - Enables a disabled user account (admin control)
-// Clears the disabled_at timestamp and sets is_enabled to true
-// ============================================================================
-func (r *Repository) Enable(ctx context.Context, userID uuid.UUID) error {
-	return r.withUserStatusAudit(ctx, userID, nil, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
-		if _, err := tx.ExecContext(ctx, r.q(`
-			UPDATE {{schema}}.users SET is_enabled = true, disabled_at = NULL, updated_at = $1 WHERE id = $2
-		`), time.Now(), userID); err != nil {
-			return old, fmt.Errorf("failed to enable user: %w", err)
-		}
-		current := old
-		current.IsEnabled = true
-		current.DisabledAt = nil
-		return current, nil
-	})
-}
-
-// ============================================================================
-// Disable - Disables a user account (admin control)
-// Sets is_enabled to false and records the disabled_at timestamp
-// Unlike soft delete, this is a reversible admin action
-// ============================================================================
-func (r *Repository) Disable(ctx context.Context, userID uuid.UUID) error {
-	return r.withUserStatusAudit(ctx, userID, nil, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
-		now := time.Now()
-		if _, err := tx.ExecContext(ctx, r.q(`
-			UPDATE {{schema}}.users SET is_enabled = false, disabled_at = $1, updated_at = $1 WHERE id = $2
-		`), now, userID); err != nil {
-			return old, fmt.Errorf("failed to disable user: %w", err)
-		}
-		current := old
-		current.IsEnabled = false
-		current.DisabledAt = &now
-		return current, nil
-	})
-}
-
-// ============================================================================
 // IncrementFailedLoginCount - Increments failed login count and updates last failed login timestamp
 // Used for tracking failed login attempts before account lockout
 // ============================================================================
@@ -811,30 +713,6 @@ func (r *Repository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, 
 	}
 	committed = true
 	return count, locked, nil
-}
-
-// ============================================================================
-// Lock - Locks a user account (security control)
-// Sets is_locked to true and optionally sets locked_until for auto-unlock.
-// This is an explicit admin lock and does NOT touch failed_login_count (the
-// automatic failed-login lockout is RegisterFailedLogin's job); its behavior
-// matches LockByTenant.
-// If lockedUntil is nil, the account is locked indefinitely (until admin unlock)
-// ============================================================================
-func (r *Repository) Lock(ctx context.Context, userID uuid.UUID, lockedUntil *time.Time) error {
-	return r.withUserStatusAudit(ctx, userID, nil, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
-		if _, err := tx.ExecContext(ctx, r.q(`
-			UPDATE {{schema}}.users
-			SET is_locked = true, locked_until = $1, updated_at = $2
-			WHERE id = $3
-		`), lockedUntil, time.Now(), userID); err != nil {
-			return old, fmt.Errorf("failed to lock user: %w", err)
-		}
-		current := old
-		current.IsLocked = true
-		current.LockedUntil = lockedUntil
-		return current, nil
-	})
 }
 
 // ============================================================================
@@ -1035,17 +913,31 @@ func (r *Repository) EnableByTenant(ctx context.Context, userID uuid.UUID, tenan
 // keeps a role change from leaving stale roles in a live access token.
 // ============================================================================
 func (r *Repository) UpdateByTenant(ctx context.Context, userID uuid.UUID, tenantID string, req model.UpdateUserRequest) error {
-	rolesJSON, err := json.Marshal(req.Roles)
-	if err != nil {
-		return fmt.Errorf("failed to marshal roles: %w", err)
+	// A nil Roles is passed as SQL NULL so COALESCE leaves the column untouched; a
+	// non-nil Roles is marshaled to JSON text and cast to jsonb.
+	var rolesParam *string
+	if req.Roles != nil {
+		b, err := json.Marshal(*req.Roles)
+		if err != nil {
+			return fmt.Errorf("failed to marshal roles: %w", err)
+		}
+		s := string(b)
+		rolesParam = &s
 	}
 
+	// COALESCE leaves each column unchanged when its parameter is NULL (nil
+	// pointer), enabling partial updates. token_version is bumped only when roles
+	// actually change — roles drive authorization, so changing them must invalidate
+	// existing JWTs, but a display-name-only edit must not log the user out.
 	query := `
 		UPDATE {{schema}}.users
-		SET display_name = $1, roles = $2, token_version = token_version + 1, updated_at = $3
+		SET display_name = COALESCE($1, display_name),
+		    roles = COALESCE($2::jsonb, roles),
+		    token_version = token_version + CASE WHEN $2::jsonb IS NULL THEN 0 ELSE 1 END,
+		    updated_at = $3
 		WHERE id = $4 AND tenant_id = $5
 	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), req.DisplayName, rolesJSON, time.Now(), userID, tenantID)
+	result, err := r.rw.ExecContext(ctx, r.q(query), req.DisplayName, rolesParam, time.Now(), userID, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to update user: %w", err)
 	}

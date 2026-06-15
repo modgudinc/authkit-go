@@ -10,15 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/model"
 )
 
 const testTenantID = "acme.test"
 
 type fakeOTPRepository struct {
-	code       *model.VerificationCode
+	code       *repository.VerificationCode
 	deleted    bool
-	upserted   *model.CreateVerificationCodeRequest
+	upserted   *repository.CreateVerificationCodeRequest
 	cleanupErr error
 }
 
@@ -29,7 +30,7 @@ func (f *fakeOTPRepository) matches(tenantID, email, purpose string) bool {
 		f.code.Purpose == purpose
 }
 
-func (f *fakeOTPRepository) GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*model.VerificationCode, error) {
+func (f *fakeOTPRepository) GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*repository.VerificationCode, error) {
 	if !f.matches(tenantID, email, purpose) {
 		// Mirror the real repository: not-found is reported as model.ErrNotFound
 		// (the rate-limit check treats only ErrNotFound as "no active code" and
@@ -39,9 +40,9 @@ func (f *fakeOTPRepository) GetVerificationCode(ctx context.Context, tenantID, e
 	return f.code, nil
 }
 
-func (f *fakeOTPRepository) UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest, rateLimit time.Duration) (bool, error) {
+func (f *fakeOTPRepository) UpsertVerificationCode(ctx context.Context, req repository.CreateVerificationCodeRequest, rateLimit time.Duration) (bool, error) {
 	f.upserted = &req
-	f.code = &model.VerificationCode{
+	f.code = &repository.VerificationCode{
 		TenantID:  req.TenantID,
 		Email:     req.Email,
 		Code:      req.Code,
@@ -51,27 +52,27 @@ func (f *fakeOTPRepository) UpsertVerificationCode(ctx context.Context, req mode
 	return true, nil
 }
 
-func (f *fakeOTPRepository) ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (model.OTPConsumeResult, error) {
+func (f *fakeOTPRepository) ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (repository.OTPConsumeResult, error) {
 	if !f.matches(tenantID, email, purpose) || time.Now().After(f.code.ExpiresAt) {
-		return model.OTPConsumeInvalid, nil
+		return repository.OTPConsumeInvalid, nil
 	}
 	if maxAttempts > 0 && f.code.Attempts >= maxAttempts {
 		f.deleted = true
 		f.code = nil
-		return model.OTPConsumeLockedOut, nil
+		return repository.OTPConsumeLockedOut, nil
 	}
 	if f.code.Code == code {
 		f.deleted = true
 		f.code = nil
-		return model.OTPConsumeValid, nil
+		return repository.OTPConsumeValid, nil
 	}
 	f.code.Attempts++
 	if maxAttempts > 0 && f.code.Attempts >= maxAttempts {
 		f.deleted = true
 		f.code = nil
-		return model.OTPConsumeLockedOut, nil
+		return repository.OTPConsumeLockedOut, nil
 	}
-	return model.OTPConsumeInvalid, nil
+	return repository.OTPConsumeInvalid, nil
 }
 
 func (f *fakeOTPRepository) DeleteVerificationCode(ctx context.Context, tenantID, email, purpose string) error {
@@ -89,7 +90,7 @@ func (f *fakeOTPRepository) DeleteExpiredVerificationCodes(ctx context.Context) 
 
 func TestOTPValidateRejectsPurposeMismatch(t *testing.T) {
 	repo := &fakeOTPRepository{
-		code: &model.VerificationCode{
+		code: &repository.VerificationCode{
 			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			Code:      "123456",
@@ -111,7 +112,7 @@ func TestOTPValidateRejectsPurposeMismatch(t *testing.T) {
 
 func TestOTPValidateRejectsTenantMismatch(t *testing.T) {
 	repo := &fakeOTPRepository{
-		code: &model.VerificationCode{
+		code: &repository.VerificationCode{
 			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			Code:      "123456",
@@ -132,7 +133,7 @@ func TestOTPValidateRejectsTenantMismatch(t *testing.T) {
 
 func TestOTPValidateDeletesMatchingCodeWithNilLogger(t *testing.T) {
 	repo := &fakeOTPRepository{
-		code: &model.VerificationCode{
+		code: &repository.VerificationCode{
 			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			Code:      "123456",
@@ -153,7 +154,7 @@ func TestOTPValidateDeletesMatchingCodeWithNilLogger(t *testing.T) {
 
 func TestOTPValidateLocksOutAfterMaxAttempts(t *testing.T) {
 	repo := &fakeOTPRepository{
-		code: &model.VerificationCode{
+		code: &repository.VerificationCode{
 			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			Code:      "123456",
@@ -192,7 +193,7 @@ func TestOTPValidateLocksOutAfterMaxAttempts(t *testing.T) {
 
 func TestOTPGenerateRateLimitWithNilLogger(t *testing.T) {
 	repo := &fakeOTPRepository{
-		code: &model.VerificationCode{
+		code: &repository.VerificationCode{
 			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			Code:      "123456",
@@ -252,7 +253,7 @@ func TestGenerateSecureOTPRejectsInvalidLength(t *testing.T) {
 
 func TestOTPValidateRejectsExpiredCode(t *testing.T) {
 	repo := &fakeOTPRepository{
-		code: &model.VerificationCode{
+		code: &repository.VerificationCode{
 			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			Code:      "123456",

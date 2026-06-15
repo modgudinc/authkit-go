@@ -31,9 +31,9 @@ type OTPService struct {
 }
 
 type otpRepository interface {
-	GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*model.VerificationCode, error)
-	UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest, rateLimit time.Duration) (bool, error)
-	ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (model.OTPConsumeResult, error)
+	GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*repository.VerificationCode, error)
+	UpsertVerificationCode(ctx context.Context, req repository.CreateVerificationCodeRequest, rateLimit time.Duration) (bool, error)
+	ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (repository.OTPConsumeResult, error)
 	DeleteVerificationCode(ctx context.Context, tenantID, email, purpose string) error
 	DeleteExpiredVerificationCodes(ctx context.Context) (int64, error)
 }
@@ -117,7 +117,7 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 	expiresAt := time.Now().Add(expirationDuration)
 
 	// Upsert OTP to database (create or replace)
-	req := model.CreateVerificationCodeRequest{
+	req := repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
 		Code:      code,
@@ -203,7 +203,7 @@ func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpos
 	}
 
 	switch result {
-	case model.OTPConsumeValid:
+	case repository.OTPConsumeValid:
 		if s.logger != nil {
 			s.logger.Info("OTP validated successfully",
 				"tenant_id", tenantID,
@@ -212,7 +212,7 @@ func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpos
 			)
 		}
 		return nil
-	case model.OTPConsumeLockedOut:
+	case repository.OTPConsumeLockedOut:
 		if s.logger != nil {
 			s.logger.Warn("OTP locked out after too many failed attempts",
 				"tenant_id", tenantID,
@@ -221,7 +221,7 @@ func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpos
 			)
 		}
 		return fmt.Errorf("too many invalid attempts; request a new OTP: %w", model.ErrOTPLockedOut)
-	default: // model.OTPConsumeInvalid
+	default: // repository.OTPConsumeInvalid
 		if s.logger != nil {
 			s.logger.Warn("OTP validation failed",
 				"tenant_id", tenantID,

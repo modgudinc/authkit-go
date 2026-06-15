@@ -8,6 +8,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -77,7 +78,7 @@ func TestAcceptInvitationDuplicateUserReturnsErrUserExists(t *testing.T) {
 	createUserWithPassword(t, ctx, &repo, tenantID, email, "ValidPass1!", pw)
 
 	code := "DUPINVITE00000000001"
-	if err := repo.CreateInvitation(ctx, model.CreateInvitationRequest{
+	if err := repo.CreateInvitation(ctx, repository.InsertInvitationParams{
 		Code:      code,
 		TenantID:  tenantID,
 		CreatedBy: ownerID,
@@ -129,7 +130,7 @@ func TestGetByTokenHashReturnsRefreshTokenSentinel(t *testing.T) {
 	// Expired (but not revoked) token.
 	tenantID := "rt.test"
 	userID := createTenantAndUser(t, ctx, &repo, tenantID)
-	if _, err := repo.CreateRefreshToken(ctx, model.CreateRefreshTokenRequest{
+	if _, err := repo.CreateRefreshToken(ctx, repository.CreateRefreshTokenRequest{
 		UserID:    userID,
 		TokenHash: "expired-token-hash",
 		ExpiresAt: time.Now().Add(-time.Hour),
@@ -207,7 +208,7 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 	createTenantAndUser(t, ctx, &repo, tenantID)
 	email := "expired@" + tenantID
 
-	if _, err := repo.UpsertVerificationCode(ctx, model.CreateVerificationCodeRequest{
+	if _, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
 		Code:      "123456",
@@ -221,7 +222,7 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume expired: %v", err)
 	}
-	if result != model.OTPConsumeInvalid {
+	if result != repository.OTPConsumeInvalid {
 		t.Fatalf("expected OTPConsumeInvalid for expired code, got %v", result)
 	}
 	// The expired row must have been deleted by the consume path.
@@ -251,7 +252,7 @@ func TestRefreshTokenIPRoundTrip(t *testing.T) {
 	userID := createTenantAndUser(t, ctx, &repo, tenantID)
 
 	ip, ua, dev := "127.0.0.1", "integration-agent", "test-device"
-	if _, err := repo.CreateRefreshToken(ctx, model.CreateRefreshTokenRequest{
+	if _, err := repo.CreateRefreshToken(ctx, repository.CreateRefreshTokenRequest{
 		UserID:     userID,
 		TokenHash:  "ip-roundtrip-hash",
 		IPAddress:  &ip,
@@ -363,7 +364,7 @@ func TestUpsertVerificationCodeAtomicRateLimit(t *testing.T) {
 	tenantID := "otp.rl.test"
 	createTenantAndUser(t, ctx, &repo, tenantID)
 
-	req := model.CreateVerificationCodeRequest{
+	req := repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     "u@" + tenantID,
 		Code:      "111111",
@@ -557,7 +558,7 @@ func TestAdminLockIsAdminAttributedAndKeepsFailedCount(t *testing.T) {
 		t.Fatalf("seed failed_login_count: %v", err)
 	}
 
-	if err := repo.Lock(ctx, userID, nil); err != nil {
+	if err := repo.LockByTenant(ctx, userID, tenantID, nil); err != nil {
 		t.Fatalf("admin lock: %v", err)
 	}
 
@@ -596,8 +597,9 @@ func TestNotFoundMutatorsWrapErrNotFound(t *testing.T) {
 	repo := repository.New(db, db)
 	missingUser := uuid.Must(uuid.NewV7())
 
+	newName, newRoles := "x", []string{"r"}
 	cases := map[string]error{
-		"Update":       repo.Update(ctx, missingUser, model.UpdateUserRequest{DisplayName: "x", Roles: []string{"r"}}),
+		"Update":       repo.UpdateByTenant(ctx, missingUser, "no-such-tenant", model.UpdateUserRequest{DisplayName: &newName, Roles: &newRoles}),
 		"UpdateName":   repo.UpdateName(ctx, "no-such-tenant", "x"),
 		"DeleteAPIKey": repo.DeleteAPIKey(ctx, uuid.Must(uuid.NewV7()).String(), "no-such-tenant"),
 		"DeleteSecret": repo.DeleteSecret(ctx, "no-such-tenant", "no-such-key"),
@@ -638,7 +640,7 @@ func TestValidateInvitationKnownInvalidIsFalseNil(t *testing.T) {
 	// past expiry can't be seeded — a CHECK constraint requires expires_at >
 	// created_at — so exhaustion exercises the same ErrInvitationInvalid branch.)
 	const code = "EXHAUSTEDCODE0000001"
-	if err := repo.CreateInvitation(ctx, model.CreateInvitationRequest{
+	if err := repo.CreateInvitation(ctx, repository.InsertInvitationParams{
 		Code:      code,
 		TenantID:  tenantID,
 		CreatedBy: createdBy,
@@ -698,5 +700,67 @@ func TestCreateAPIKeyExpiresInDuration(t *testing.T) {
 	}
 	if resp2.ExpiresAt != nil {
 		t.Fatalf("expected nil ExpiresAt for no expiry, got %s", resp2.ExpiresAt)
+	}
+}
+
+// TestUpdateByTenantPartialUpdate covers UpdateUserRequest's optional fields: a
+// nil field leaves its column unchanged, and token_version is bumped only when
+// roles change (a display-name-only edit must not invalidate sessions).
+func TestUpdateByTenantPartialUpdate(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "partial.update.test"
+	userID := createTenantAndUser(t, ctx, &repo, tenantID)
+
+	before, err := repo.GetByID(ctx, userID, tenantID)
+	if err != nil {
+		t.Fatalf("get before: %v", err)
+	}
+
+	// Display-name-only update: roles and token_version are untouched.
+	newName := "Renamed User"
+	if err := repo.UpdateByTenant(ctx, userID, tenantID, model.UpdateUserRequest{DisplayName: &newName}); err != nil {
+		t.Fatalf("name-only update: %v", err)
+	}
+	afterName, err := repo.GetByID(ctx, userID, tenantID)
+	if err != nil {
+		t.Fatalf("get after name: %v", err)
+	}
+	if afterName.DisplayName != newName {
+		t.Fatalf("display name = %q, want %q", afterName.DisplayName, newName)
+	}
+	if !slices.Equal(afterName.Roles, before.Roles) {
+		t.Fatalf("roles changed on name-only update: %v -> %v", before.Roles, afterName.Roles)
+	}
+	if afterName.TokenVersion != before.TokenVersion {
+		t.Fatalf("token_version bumped on name-only update: %d -> %d", before.TokenVersion, afterName.TokenVersion)
+	}
+
+	// Roles-only update: display name untouched, token_version bumped.
+	newRoles := []string{"Viewer"}
+	if err := repo.UpdateByTenant(ctx, userID, tenantID, model.UpdateUserRequest{Roles: &newRoles}); err != nil {
+		t.Fatalf("roles-only update: %v", err)
+	}
+	afterRoles, err := repo.GetByID(ctx, userID, tenantID)
+	if err != nil {
+		t.Fatalf("get after roles: %v", err)
+	}
+	if afterRoles.DisplayName != newName {
+		t.Fatalf("display name changed on roles-only update: %q", afterRoles.DisplayName)
+	}
+	if !slices.Equal(afterRoles.Roles, newRoles) {
+		t.Fatalf("roles = %v, want %v", afterRoles.Roles, newRoles)
+	}
+	if afterRoles.TokenVersion != afterName.TokenVersion+1 {
+		t.Fatalf("token_version not bumped on roles change: %d -> %d", afterName.TokenVersion, afterRoles.TokenVersion)
 	}
 }

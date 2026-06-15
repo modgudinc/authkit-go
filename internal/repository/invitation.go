@@ -40,10 +40,24 @@ const uniqueViolation = "23505"
 // Maintenance:
 // - CleanupExpired          - Cleanup method to remove expired invitations
 
+// InsertInvitationParams contains the data needed to insert a new invitation. It
+// is a repository-internal persistence DTO — callers use
+// InvitationService.CreateInvitation with model.CreateInvitationRequest, which the
+// service maps onto this type (generating the code and resolving defaults).
+type InsertInvitationParams struct {
+	Code      string
+	TenantID  string
+	CreatedBy uuid.UUID
+	Roles     []string
+	Email     string
+	ExpiresAt time.Time
+	MaxUses   int
+}
+
 // ============================================================================
 // CreateInvitation - Creates a new invitation for team member signup
 // ============================================================================
-func (r *Repository) CreateInvitation(ctx context.Context, req model.CreateInvitationRequest) error {
+func (r *Repository) CreateInvitation(ctx context.Context, params InsertInvitationParams) error {
 	query := `
 		INSERT INTO {{schema}}.invitations (
 			code, tenant_id, created_by, roles, email, expires_at, max_uses, created_at
@@ -52,19 +66,19 @@ func (r *Repository) CreateInvitation(ctx context.Context, req model.CreateInvit
 	`
 
 	// Marshal roles to JSON for JSONB column
-	rolesJSON, err := json.Marshal(req.Roles)
+	rolesJSON, err := json.Marshal(params.Roles)
 	if err != nil {
 		return fmt.Errorf("failed to marshal roles: %w", err)
 	}
 
 	_, err = r.rw.ExecContext(ctx, r.q(query),
-		req.Code,
-		req.TenantID,
-		req.CreatedBy,
+		params.Code,
+		params.TenantID,
+		params.CreatedBy,
 		rolesJSON,
-		req.Email,
-		req.ExpiresAt,
-		req.MaxUses,
+		params.Email,
+		params.ExpiresAt,
+		params.MaxUses,
 	)
 	if err != nil {
 		// code is the primary key and is server-minted from crypto/rand, so a

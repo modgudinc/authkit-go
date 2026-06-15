@@ -171,7 +171,7 @@ func (s *TokenService) GenerateTokenPair(
 		}
 	}
 
-	_, err = s.repo.CreateRefreshToken(ctx, model.CreateRefreshTokenRequest{
+	_, err = s.repo.CreateRefreshToken(ctx, repository.CreateRefreshTokenRequest{
 		UserID:     user.ID,
 		TokenHash:  tokenHash,
 		IPAddress:  ipAddress,
@@ -347,7 +347,7 @@ func (s *TokenService) RefreshTokenPair(
 	}
 
 	// 2. Atomically consume the old refresh token and store the replacement.
-	user, tokenID, err := s.repo.RotateRefreshToken(ctx, oldTokenHash, model.CreateRefreshTokenRequest{
+	user, tokenID, err := s.repo.RotateRefreshToken(ctx, oldTokenHash, repository.CreateRefreshTokenRequest{
 		TokenHash:  newTokenHash,
 		IPAddress:  ipAddress,
 		UserAgent:  userAgent,

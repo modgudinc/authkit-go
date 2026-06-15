@@ -43,7 +43,7 @@ type AuthService interface {
 
 // InvitationService manages invitation lifecycle and redemption.
 type InvitationService interface {
-	CreateInvitation(ctx context.Context, tenantID string, createdBy uuid.UUID, roles []string, email string, maxUses *int, expiresIn *time.Duration) (*model.Invitation, error)
+	CreateInvitation(ctx context.Context, req model.CreateInvitationRequest) (*model.Invitation, error)
 	GetInvitation(ctx context.Context, code string) (*model.Invitation, error)
 	ValidateInvitation(ctx context.Context, code string) (bool, error)
 	AcceptInvitation(ctx context.Context, code, email, displayName, passwordHash string) (uuid.UUID, error)

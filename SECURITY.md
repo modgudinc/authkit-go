@@ -39,7 +39,6 @@ Applications using this library must provide and protect several independent
 secrets:
 
 - `JWTConfig.AccessSecret`: signs access-token JWTs
-- `JWTConfig.RefreshSecret`: reserved for refresh-token related signing/HMAC use
 - `JWTConfig.RefreshTokenHMACSecret`: hashes refresh tokens before storage
 - `APIKeyConfig.HMACSecret`: hashes API keys before storage
 - `SecretConfig.EncryptionKey`: encrypts provider secrets with AES-256-GCM

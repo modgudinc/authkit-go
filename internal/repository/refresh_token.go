@@ -15,6 +15,34 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
+// RefreshToken represents a stored refresh token for session management
+type RefreshToken struct {
+	ID         uuid.UUID  `json:"id" db:"id"`
+	UserID     uuid.UUID  `json:"user_id" db:"user_id"`
+	TokenHash  string     `json:"-" db:"token_hash"`        // HMAC hash, never exposed
+	FamilyID   uuid.UUID  `json:"family_id" db:"family_id"` // Lineage of one login; rotated tokens share it
+	IPAddress  *string    `json:"ip_address,omitempty" db:"ip_address"`
+	UserAgent  *string    `json:"user_agent,omitempty" db:"user_agent"`
+	DeviceName *string    `json:"device_name,omitempty" db:"device_name"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty" db:"last_used_at"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty" db:"revoked_at"` // Set when consumed/revoked
+	ExpiresAt  time.Time  `json:"expires_at" db:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+}
+
+// CreateRefreshTokenRequest represents the parameters for creating a new refresh token
+type CreateRefreshTokenRequest struct {
+	UserID    uuid.UUID
+	TokenHash string // HMAC hash of the plaintext token
+	// FamilyID ties a rotated token to its lineage. Leave as uuid.Nil for a fresh
+	// login (a new family is generated); set it when rotating an existing token.
+	FamilyID   uuid.UUID
+	IPAddress  *string
+	UserAgent  *string
+	DeviceName *string
+	ExpiresAt  time.Time
+}
+
 // Refresh Token Repository Methods:
 //
 // Token Management:
@@ -31,7 +59,7 @@ import (
 // ============================================================================
 // CreateRefreshToken - Stores a new refresh token with session metadata
 // ============================================================================
-func (r *Repository) CreateRefreshToken(ctx context.Context, req model.CreateRefreshTokenRequest) (uuid.UUID, error) {
+func (r *Repository) CreateRefreshToken(ctx context.Context, req CreateRefreshTokenRequest) (uuid.UUID, error) {
 	tokenID, err := uuid.NewV7()
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("could not generate ID for refresh token: %w", err)
@@ -77,7 +105,7 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, req model.CreateRef
 // ============================================================================
 // RotateRefreshToken - Atomically consumes one refresh token and stores a new one
 // ============================================================================
-func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string, req model.CreateRefreshTokenRequest) (*model.User, uuid.UUID, error) {
+func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, uuid.UUID, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, uuid.Nil, fmt.Errorf("failed to begin refresh token rotation: %w", err)
@@ -231,7 +259,7 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 // replica lag could spuriously reject a freshly minted token. Do not switch to
 // r.ro without accepting that auth-failure risk.
 // ============================================================================
-func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*model.RefreshToken, error) {
+func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*RefreshToken, error) {
 	query := `
 		SELECT
 			id, user_id, token_hash, ip_address, user_agent, device_name,
@@ -241,7 +269,7 @@ func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*mod
 		  AND revoked_at IS NULL
 	`
 
-	var token model.RefreshToken
+	var token RefreshToken
 	var ipAddress, userAgent, deviceName *string
 	var lastUsedAt *time.Time
 
@@ -288,7 +316,7 @@ func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*mod
 // Scoped by user_id only (refresh_tokens has no tenant column). Callers MUST
 // tenant-authorize the userID before calling.
 // ============================================================================
-func (r *Repository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*model.RefreshToken, error) {
+func (r *Repository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*RefreshToken, error) {
 	query := `
 		SELECT
 			id, user_id, token_hash, ip_address, user_agent, device_name,
@@ -307,9 +335,9 @@ func (r *Repository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*mode
 		_ = rows.Close()
 	}()
 
-	var tokens []*model.RefreshToken
+	var tokens []*RefreshToken
 	for rows.Next() {
-		var token model.RefreshToken
+		var token RefreshToken
 		var ipAddress, userAgent, deviceName *string
 		var lastUsedAt *time.Time
 

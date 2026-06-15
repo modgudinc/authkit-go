@@ -110,7 +110,7 @@ func newTestAuthService(repo *fakeAuthRepository) *AuthService {
 	return &AuthService{
 		repo:            repo,
 		passwordService: pw,
-		jwtService:      NewJWTService("test-access-secret", "test-refresh-secret", 15*time.Minute, time.Hour, nil),
+		jwtService:      NewJWTService("test-access-secret", 15*time.Minute, time.Hour, nil),
 		logger:          nil,
 	}
 }
@@ -250,7 +250,7 @@ func TestValidateJWTRejectsTokenVersionMismatch(t *testing.T) {
 
 func TestValidateJWTRejectsDisabledAndLocked(t *testing.T) {
 	base := makeUser(t, "Correct1!")
-	token, err := NewJWTService("test-access-secret", "x", 15*time.Minute, time.Hour, nil).GenerateAccessToken(base)
+	token, err := NewJWTService("test-access-secret", 15*time.Minute, time.Hour, nil).GenerateAccessToken(base)
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestValidateJWTRejectsTamperedSignature(t *testing.T) {
 	svc := newTestAuthService(&fakeAuthRepository{user: user})
 
 	// Token signed with a different secret must be rejected as invalid.
-	other := NewJWTService("a-totally-different-secret", "x", 15*time.Minute, time.Hour, nil)
+	other := NewJWTService("a-totally-different-secret", 15*time.Minute, time.Hour, nil)
 	token, err := other.GenerateAccessToken(user)
 	if err != nil {
 		t.Fatalf("generate token: %v", err)

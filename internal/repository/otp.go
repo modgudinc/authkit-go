@@ -14,6 +14,41 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
+// VerificationCode represents an OTP code for email verification
+type VerificationCode struct {
+	TenantID  string    `json:"tenant_id" db:"tenant_id"`
+	Email     string    `json:"email" db:"email"`
+	Code      string    `json:"-" db:"code"` // Never expose the plaintext code in JSON
+	Purpose   string    `json:"purpose" db:"purpose"`
+	Attempts  int       `json:"attempts" db:"attempts"`
+	ExpiresAt time.Time `json:"expires_at" db:"expires_at"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+}
+
+// CreateVerificationCodeRequest contains the data needed to create a new OTP code
+type CreateVerificationCodeRequest struct {
+	TenantID  string
+	Email     string
+	Code      string
+	Purpose   string
+	ExpiresAt time.Time
+}
+
+// OTPConsumeResult is the outcome of attempting to consume (validate) an OTP.
+type OTPConsumeResult int
+
+const (
+	// OTPConsumeInvalid means no active code matched (wrong code, wrong
+	// tenant/email/purpose, expired, or not found). The code, if any, was not
+	// consumed; the failed attempt may have been counted.
+	OTPConsumeInvalid OTPConsumeResult = iota
+	// OTPConsumeValid means the code matched and was consumed (single-use).
+	OTPConsumeValid
+	// OTPConsumeLockedOut means the code had reached the maximum number of failed
+	// attempts and has been invalidated; the caller must request a new code.
+	OTPConsumeLockedOut
+)
+
 // OTP Repository Methods:
 //
 // Code Management:
@@ -40,7 +75,7 @@ import (
 // once it is older than rateLimit; if a more recent code exists the update
 // affects zero rows and stored is false (rate-limited). A fresh insert (no
 // existing code) always stores. rateLimit <= 0 disables the limit.
-func (r *Repository) UpsertVerificationCode(ctx context.Context, req model.CreateVerificationCodeRequest, rateLimit time.Duration) (stored bool, err error) {
+func (r *Repository) UpsertVerificationCode(ctx context.Context, req CreateVerificationCodeRequest, rateLimit time.Duration) (stored bool, err error) {
 	query := `
 		INSERT INTO {{schema}}.verification_codes (
 			tenant_id, email, code, purpose, attempts, expires_at, created_at
@@ -92,7 +127,7 @@ func (r *Repository) UpsertVerificationCode(ctx context.Context, req model.Creat
 // row lock by ConsumeVerificationCode for the constant-time match. Keeping the
 // code out of this read narrows where the plaintext value is exposed.
 // ============================================================================
-func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*model.VerificationCode, error) {
+func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*VerificationCode, error) {
 	query := `
 		SELECT tenant_id, email, purpose, attempts, expires_at, created_at
 		FROM {{schema}}.verification_codes
@@ -101,7 +136,7 @@ func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, p
 		  AND purpose = $3
 	`
 
-	var vc model.VerificationCode
+	var vc VerificationCode
 	err := r.rw.QueryRowContext(ctx, r.q(query), tenantID, email, purpose).Scan(
 		&vc.TenantID,
 		&vc.Email,
@@ -133,10 +168,10 @@ func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, p
 // The code comparison is constant-time to avoid leaking match progress via timing.
 // maxAttempts <= 0 disables lockout (attempts are not enforced).
 // ============================================================================
-func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (model.OTPConsumeResult, error) {
+func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (OTPConsumeResult, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
-		return model.OTPConsumeInvalid, fmt.Errorf("failed to begin verification code consumption: %w", err)
+		return OTPConsumeInvalid, fmt.Errorf("failed to begin verification code consumption: %w", err)
 	}
 
 	committed := false
@@ -163,12 +198,12 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 		if errors.Is(err, sql.ErrNoRows) {
 			// No active code for this (tenant, email, purpose); nothing to consume.
 			if cErr := tx.Commit(); cErr != nil {
-				return model.OTPConsumeInvalid, fmt.Errorf("failed to commit verification code consumption: %w", cErr)
+				return OTPConsumeInvalid, fmt.Errorf("failed to commit verification code consumption: %w", cErr)
 			}
 			committed = true
-			return model.OTPConsumeInvalid, nil
+			return OTPConsumeInvalid, nil
 		}
-		return model.OTPConsumeInvalid, fmt.Errorf("failed to read verification code: %w", err)
+		return OTPConsumeInvalid, fmt.Errorf("failed to read verification code: %w", err)
 	}
 
 	deleteQuery := `
@@ -192,34 +227,34 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 	// Expired: clean up and report invalid.
 	if time.Now().After(expiresAt) {
 		if err := deleteAndCommit(); err != nil {
-			return model.OTPConsumeInvalid, fmt.Errorf("failed to delete expired verification code: %w", err)
+			return OTPConsumeInvalid, fmt.Errorf("failed to delete expired verification code: %w", err)
 		}
-		return model.OTPConsumeInvalid, nil
+		return OTPConsumeInvalid, nil
 	}
 
 	// Already exhausted: invalidate the code and report lockout.
 	if maxAttempts > 0 && attempts >= maxAttempts {
 		if err := deleteAndCommit(); err != nil {
-			return model.OTPConsumeInvalid, fmt.Errorf("failed to delete exhausted verification code: %w", err)
+			return OTPConsumeInvalid, fmt.Errorf("failed to delete exhausted verification code: %w", err)
 		}
-		return model.OTPConsumeLockedOut, nil
+		return OTPConsumeLockedOut, nil
 	}
 
 	// Constant-time comparison to avoid timing side channels.
 	if subtle.ConstantTimeCompare([]byte(storedCode), []byte(code)) == 1 {
 		if err := deleteAndCommit(); err != nil {
-			return model.OTPConsumeInvalid, fmt.Errorf("failed to consume verification code: %w", err)
+			return OTPConsumeInvalid, fmt.Errorf("failed to consume verification code: %w", err)
 		}
-		return model.OTPConsumeValid, nil
+		return OTPConsumeValid, nil
 	}
 
 	// Wrong code: count the failed attempt; lock out if it reaches the cap.
 	newAttempts := attempts + 1
 	if maxAttempts > 0 && newAttempts >= maxAttempts {
 		if err := deleteAndCommit(); err != nil {
-			return model.OTPConsumeInvalid, fmt.Errorf("failed to delete verification code after final attempt: %w", err)
+			return OTPConsumeInvalid, fmt.Errorf("failed to delete verification code after final attempt: %w", err)
 		}
-		return model.OTPConsumeLockedOut, nil
+		return OTPConsumeLockedOut, nil
 	}
 
 	updateQuery := `
@@ -230,14 +265,14 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 		  AND purpose = $3
 	`
 	if _, err := tx.ExecContext(ctx, r.q(updateQuery), tenantID, email, purpose, newAttempts); err != nil {
-		return model.OTPConsumeInvalid, fmt.Errorf("failed to record failed verification attempt: %w", err)
+		return OTPConsumeInvalid, fmt.Errorf("failed to record failed verification attempt: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return model.OTPConsumeInvalid, fmt.Errorf("failed to commit verification code consumption: %w", err)
+		return OTPConsumeInvalid, fmt.Errorf("failed to commit verification code consumption: %w", err)
 	}
 	committed = true
 
-	return model.OTPConsumeInvalid, nil
+	return OTPConsumeInvalid, nil
 }
 
 // ============================================================================

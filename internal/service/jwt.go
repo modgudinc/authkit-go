@@ -23,7 +23,6 @@ const clockSkewLeeway = 30 * time.Second
 // JWTService handles JWT token generation and validation
 type JWTService struct {
 	accessSecret  string
-	refreshSecret string
 	accessExpiry  time.Duration
 	refreshExpiry time.Duration
 	logger        logger.Logger
@@ -53,14 +52,12 @@ func WithAudience(audience string) JWTOption {
 //
 // Parameters:
 //   - accessSecret: Secret key for signing access tokens (required)
-//   - refreshSecret: Secret key for signing refresh tokens (optional, used for HMAC if needed)
 //   - accessExpiry: Access token expiration duration (e.g., 15 minutes)
 //   - refreshExpiry: Refresh token expiration duration (e.g., 7 days)
 //   - logger: Optional logger for structured logging
 //   - opts: Optional settings such as WithIssuer / WithAudience
 func NewJWTService(
 	accessSecret string,
-	refreshSecret string,
 	accessExpiry time.Duration,
 	refreshExpiry time.Duration,
 	logger logger.Logger,
@@ -68,7 +65,6 @@ func NewJWTService(
 ) *JWTService {
 	s := &JWTService{
 		accessSecret:  accessSecret,
-		refreshSecret: refreshSecret,
 		accessExpiry:  accessExpiry,
 		refreshExpiry: refreshExpiry,
 		logger:        logger,

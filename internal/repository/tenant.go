@@ -63,13 +63,13 @@ func (r *Repository) GetTenant(ctx context.Context, tenantID string) (*model.Ten
 	`
 
 	var tenant model.Tenant
-	var domainsJSON []byte
+	var domainsJSON, settingsJSON []byte
 
 	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID).Scan(
 		&tenant.TenantID,
 		&tenant.Name,
 		&domainsJSON,
-		&tenant.Settings,
+		&settingsJSON,
 		&tenant.CreatedAt,
 		&tenant.UpdatedAt,
 	)
@@ -82,6 +82,9 @@ func (r *Repository) GetTenant(ctx context.Context, tenantID string) (*model.Ten
 
 	if err := json.Unmarshal(domainsJSON, &tenant.AllowedDomains); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal allowed_domains: %w", err)
+	}
+	if err := json.Unmarshal(settingsJSON, &tenant.Settings); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal settings: %w", err)
 	}
 
 	return &tenant, nil
@@ -101,13 +104,13 @@ func (r *Repository) GetTenantByDomain(ctx context.Context, domain string) (*mod
 	`
 
 	var tenant model.Tenant
-	var domainsJSON []byte
+	var domainsJSON, settingsJSON []byte
 
 	err := r.ro.QueryRowContext(ctx, r.q(query), domain).Scan(
 		&tenant.TenantID,
 		&tenant.Name,
 		&domainsJSON,
-		&tenant.Settings,
+		&settingsJSON,
 		&tenant.CreatedAt,
 		&tenant.UpdatedAt,
 	)
@@ -120,6 +123,9 @@ func (r *Repository) GetTenantByDomain(ctx context.Context, domain string) (*mod
 
 	if err := json.Unmarshal(domainsJSON, &tenant.AllowedDomains); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal allowed_domains: %w", err)
+	}
+	if err := json.Unmarshal(settingsJSON, &tenant.Settings); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal settings: %w", err)
 	}
 
 	return &tenant, nil
@@ -163,13 +169,13 @@ func (r *Repository) ListAllTenants(ctx context.Context) ([]*model.Tenant, error
 	var tenants []*model.Tenant
 	for rows.Next() {
 		var tenant model.Tenant
-		var domainsJSON []byte
+		var domainsJSON, settingsJSON []byte
 
 		err := rows.Scan(
 			&tenant.TenantID,
 			&tenant.Name,
 			&domainsJSON,
-			&tenant.Settings,
+			&settingsJSON,
 			&tenant.CreatedAt,
 			&tenant.UpdatedAt,
 		)
@@ -179,6 +185,9 @@ func (r *Repository) ListAllTenants(ctx context.Context) ([]*model.Tenant, error
 
 		if err := json.Unmarshal(domainsJSON, &tenant.AllowedDomains); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal allowed_domains: %w", err)
+		}
+		if err := json.Unmarshal(settingsJSON, &tenant.Settings); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal settings: %w", err)
 		}
 
 		tenants = append(tenants, &tenant)

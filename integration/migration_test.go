@@ -366,7 +366,6 @@ func newIntegrationAuthKit(t *testing.T, db *sql.DB) *authkit.AuthKit {
 		},
 		JWTConfig: authkit.JWTConfig{
 			AccessSecret:           "integration-access-secret-at-least-32-bytes",
-			RefreshSecret:          "integration-refresh-secret-at-least-32-bytes",
 			RefreshTokenHMACSecret: "integration-refresh-hmac-secret-at-least-32b",
 			AccessExpiry:           5 * time.Minute,
 			RefreshExpiry:          time.Hour,
@@ -389,7 +388,7 @@ func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repositor
 	t.Helper()
 
 	oldHash := "old-refresh-hash"
-	if _, err := repo.CreateRefreshToken(ctx, model.CreateRefreshTokenRequest{
+	if _, err := repo.CreateRefreshToken(ctx, repository.CreateRefreshTokenRequest{
 		UserID:    userID,
 		TokenHash: oldHash,
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -397,7 +396,7 @@ func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repositor
 		t.Fatalf("create refresh token: %v", err)
 	}
 
-	user, _, err := repo.RotateRefreshToken(ctx, oldHash, model.CreateRefreshTokenRequest{
+	user, _, err := repo.RotateRefreshToken(ctx, oldHash, repository.CreateRefreshTokenRequest{
 		TokenHash: "new-refresh-hash",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -409,7 +408,7 @@ func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repositor
 	}
 
 	// Reusing the already-consumed old token must be detected as reuse/theft.
-	_, _, err = repo.RotateRefreshToken(ctx, oldHash, model.CreateRefreshTokenRequest{
+	_, _, err = repo.RotateRefreshToken(ctx, oldHash, repository.CreateRefreshTokenRequest{
 		TokenHash: "should-not-exist",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -422,7 +421,7 @@ func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repositor
 
 	// Reuse detection must revoke the whole family, so the active replacement
 	// token ("new-refresh-hash") can no longer be rotated either.
-	if _, _, err := repo.RotateRefreshToken(ctx, "new-refresh-hash", model.CreateRefreshTokenRequest{
+	if _, _, err := repo.RotateRefreshToken(ctx, "new-refresh-hash", repository.CreateRefreshTokenRequest{
 		TokenHash: "should-also-not-exist",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}); err == nil {
@@ -458,7 +457,7 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 
 	email := "verify@" + tenantID
 
-	if _, err := repo.UpsertVerificationCode(ctx, model.CreateVerificationCodeRequest{
+	if _, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
 		Code:      "123456",
@@ -473,7 +472,7 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 	if err != nil {
 		t.Fatalf("consume wrong code: %v", err)
 	}
-	if result != model.OTPConsumeInvalid {
+	if result != repository.OTPConsumeInvalid {
 		t.Fatalf("wrong code result = %v, want OTPConsumeInvalid", result)
 	}
 
@@ -482,7 +481,7 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 	if err != nil {
 		t.Fatalf("consume cross-tenant: %v", err)
 	}
-	if result == model.OTPConsumeValid {
+	if result == repository.OTPConsumeValid {
 		t.Fatal("expected cross-tenant OTP consumption to fail")
 	}
 
@@ -491,7 +490,7 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 	if err != nil {
 		t.Fatalf("consume code: %v", err)
 	}
-	if result != model.OTPConsumeValid {
+	if result != repository.OTPConsumeValid {
 		t.Fatalf("expected verification code to be consumed, got %v", result)
 	}
 
@@ -500,7 +499,7 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 	if err != nil {
 		t.Fatalf("consume code second time: %v", err)
 	}
-	if result == model.OTPConsumeValid {
+	if result == repository.OTPConsumeValid {
 		t.Fatal("expected consumed verification code to be single-use")
 	}
 }
@@ -508,7 +507,7 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 func testInvitationPersistence(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID uuid.UUID) {
 	t.Helper()
 
-	if err := repo.CreateInvitation(ctx, model.CreateInvitationRequest{
+	if err := repo.CreateInvitation(ctx, repository.InsertInvitationParams{
 		Code:      "INVITE12345678901234",
 		TenantID:  tenantID,
 		CreatedBy: userID,
@@ -557,7 +556,7 @@ func testInvitationAccept(t *testing.T, ctx context.Context, repo *repository.Re
 
 	code := "ACCEPTCODE0000000001"
 	email := "accept@" + tenantID
-	if err := repo.CreateInvitation(ctx, model.CreateInvitationRequest{
+	if err := repo.CreateInvitation(ctx, repository.InsertInvitationParams{
 		Code:      code,
 		TenantID:  tenantID,
 		CreatedBy: userID,
@@ -654,9 +653,9 @@ func TestValidateRefreshTokenRejectsInactiveAccount(t *testing.T) {
 		t.Fatalf("expected active account refresh token to validate: %v", err)
 	}
 
-	// Disable at the repository level so the refresh-token row is NOT revoked
-	// (UserService.Disable would delete it); this isolates the status gate.
-	if err := repo.Disable(ctx, userID); err != nil {
+	// Disable the account (without deleting its refresh tokens) so we isolate the
+	// account-status gate in ValidateRefreshToken from token revocation.
+	if err := repo.DisableByTenant(ctx, userID, tenantID); err != nil {
 		t.Fatalf("disable user: %v", err)
 	}
 

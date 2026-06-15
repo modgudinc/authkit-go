@@ -54,7 +54,6 @@ type AuthKit struct {
 	roConnection *sql.DB
 
 	accessTokenSecret      string
-	refreshTokenSecret     string
 	refreshTokenHMACSecret string // Secret for HMAC-SHA256 hashing of refresh tokens in storage
 	jwtIssuer              string // Optional "iss" claim
 	jwtAudience            string // Optional "aud" claim
@@ -87,10 +86,6 @@ func New(config Config) (*AuthKit, error) {
 		return nil, errors.New("signing secret for access tokens is required")
 	}
 
-	if config.JWTConfig.RefreshSecret == "" {
-		return nil, errors.New("signing secret for refresh tokens is required")
-	}
-
 	if config.JWTConfig.RefreshTokenHMACSecret == "" {
 		return nil, errors.New("HMAC secret for refresh token storage hashing is required")
 	}
@@ -106,7 +101,6 @@ func New(config Config) (*AuthKit, error) {
 		value string
 	}{
 		{"access token signing secret", config.JWTConfig.AccessSecret},
-		{"refresh token signing secret", config.JWTConfig.RefreshSecret},
 		{"refresh token HMAC secret", config.JWTConfig.RefreshTokenHMACSecret},
 		{"API key HMAC secret", config.APIKeyConfig.HMACSecret},
 	} {
@@ -175,7 +169,6 @@ func New(config Config) (*AuthKit, error) {
 		roConnection: config.DBConnection.IdentityRODB,
 
 		accessTokenSecret:      config.JWTConfig.AccessSecret,
-		refreshTokenSecret:     config.JWTConfig.RefreshSecret,
 		refreshTokenHMACSecret: config.JWTConfig.RefreshTokenHMACSecret,
 		jwtIssuer:              config.JWTConfig.Issuer,
 		jwtAudience:            config.JWTConfig.Audience,
@@ -239,7 +232,6 @@ func (k *AuthKit) newPasswordService() *service.PasswordService {
 func (k *AuthKit) newJWTService() *service.JWTService {
 	return service.NewJWTService(
 		k.accessTokenSecret,
-		k.refreshTokenSecret,
 		k.accessTokenExpiry,
 		k.refreshTokenExpiry,
 		k.logger,

@@ -22,13 +22,15 @@ type Invitation struct {
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 }
 
-// CreateInvitationRequest contains the data needed to create a new invitation
+// CreateInvitationRequest is the input to InvitationService.CreateInvitation.
+// The service generates the invitation code and resolves the optional defaults
+// below before persisting, so callers only supply the tenant, creator, email,
+// and roles.
 type CreateInvitationRequest struct {
-	Code      string    // Cryptographically secure random code (20 characters)
-	TenantID  string    // Tenant identifier
-	CreatedBy uuid.UUID // User UUID of the admin creating the invitation (FK to users.id)
-	Roles     []string  // Roles to assign (validated by application layer)
-	Email     string    // Target email address for this invitation (required)
-	ExpiresAt time.Time // Expiration timestamp (typically NOW() + 7 days)
-	MaxUses   int       // Maximum number of times the code can be used (default: 1)
+	TenantID  string         // Tenant the invitation belongs to
+	CreatedBy uuid.UUID      // User UUID of the admin creating the invitation (FK to users.id)
+	Email     string         // Target email address for this invitation (required)
+	Roles     []string       // Roles to assign on signup (validated by the application layer)
+	MaxUses   *int           // Optional max uses; defaults to 1 when nil or <= 0
+	ExpiresIn *time.Duration // Optional lifetime; defaults to 7 days when nil
 }

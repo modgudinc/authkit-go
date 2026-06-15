@@ -22,7 +22,6 @@ func validTestConfig() Config {
 		},
 		JWTConfig: JWTConfig{
 			AccessSecret:           "access-secret-that-is-at-least-32-bytes-long",
-			RefreshSecret:          "refresh-secret-that-is-at-least-32-bytes-long",
 			RefreshTokenHMACSecret: "refresh-hmac-secret-that-is-at-least-32-bytes",
 		},
 		APIKeyConfig: APIKeyConfig{
@@ -57,13 +56,6 @@ func TestNewValidatesRequiredConfig(t *testing.T) {
 				config.JWTConfig.AccessSecret = ""
 			},
 			wantErr: "access tokens",
-		},
-		{
-			name: "missing refresh secret",
-			mutate: func(config *Config) {
-				config.JWTConfig.RefreshSecret = ""
-			},
-			wantErr: "refresh tokens",
 		},
 		{
 			name: "missing refresh hmac secret",
