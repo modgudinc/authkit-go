@@ -159,7 +159,7 @@ identity, err := authkit.New(authkit.Config{
 ```go
 apiKeyService := identity.APIKeyService()
 
-expiresIn := "90d" // Optional: expires in 90 days
+expiresIn := 90 * 24 * time.Hour // Optional: expires in 90 days (nil = never)
 response, err := apiKeyService.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
     TenantID:  "acme.com",
     CreatedBy: adminUserID, // uuid.UUID of the admin (FK to users.id)

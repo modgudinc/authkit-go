@@ -6,7 +6,6 @@ package service
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestAPIKeyServiceGenerateSecureKeyAndValidateFormat(t *testing.T) {
@@ -59,31 +58,5 @@ func TestAPIKeyServiceComputeHMAC(t *testing.T) {
 	}
 	if hash1 == hash3 {
 		t.Fatal("different API keys should produce different HMACs")
-	}
-}
-
-func TestAPIKeyServiceParseExpiration(t *testing.T) {
-	service := NewAPIKeyService(nil, "hmac-secret", nil)
-
-	tests := map[string]time.Duration{
-		"30d": 30 * 24 * time.Hour,
-		"6M":  6 * 30 * 24 * time.Hour,
-		"1y":  365 * 24 * time.Hour,
-	}
-
-	for input, want := range tests {
-		got, err := service.parseExpiration(input)
-		if err != nil {
-			t.Fatalf("parse %q: %v", input, err)
-		}
-		if got != want {
-			t.Fatalf("parse %q = %s, want %s", input, got, want)
-		}
-	}
-
-	for _, input := range []string{"", "d", "xd", "10h"} {
-		if _, err := service.parseExpiration(input); err == nil {
-			t.Fatalf("expected %q to be invalid", input)
-		}
 	}
 }

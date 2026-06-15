@@ -23,10 +23,10 @@ type APIKey struct {
 
 // CreateAPIKeyRequest represents the request to create an API key
 type CreateAPIKeyRequest struct {
-	TenantID  string    // Tenant identifier
-	CreatedBy uuid.UUID // User UUID of the admin creating the key (FK to users.id)
-	Name      string    // User-friendly name for the key
-	ExpiresIn *string   // Optional expiration duration (e.g., "30d", "6M", "1y")
+	TenantID  string         // Tenant identifier
+	CreatedBy uuid.UUID      // User UUID of the admin creating the key (FK to users.id)
+	Name      string         // User-friendly name for the key
+	ExpiresIn *time.Duration // Optional expiration; nil means the key never expires
 }
 
 // CreateAPIKeyResponse represents the service response from creating an API key

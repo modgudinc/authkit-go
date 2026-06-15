@@ -656,3 +656,47 @@ func TestValidateInvitationKnownInvalidIsFalseNil(t *testing.T) {
 		t.Fatalf("exhausted code: got (valid=%v, err=%v), want (false, nil)", valid, err)
 	}
 }
+
+// TestCreateAPIKeyExpiresInDuration covers the service-level CreateAPIKey path
+// with ExpiresIn now a *time.Duration: a provided duration yields ExpiresAt ≈
+// now+duration, and a nil duration yields a never-expiring key (nil ExpiresAt).
+func TestCreateAPIKeyExpiresInDuration(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "apikey.dur.test"
+	createdBy := createTenantAndUser(t, ctx, &repo, tenantID)
+	svc := service.NewAPIKeyService(&repo, "test-api-key-hmac-secret-0123456789", nil)
+
+	ttl := 48 * time.Hour
+	resp, err := svc.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
+		TenantID: tenantID, CreatedBy: createdBy, Name: "dur-key", ExpiresIn: &ttl,
+	})
+	if err != nil {
+		t.Fatalf("create api key with duration: %v", err)
+	}
+	if resp.ExpiresAt == nil {
+		t.Fatal("expected ExpiresAt to be set when ExpiresIn is provided")
+	}
+	if diff := time.Until(*resp.ExpiresAt) - ttl; diff > time.Minute || diff < -time.Minute {
+		t.Fatalf("ExpiresAt is %s away, want ~%s", time.Until(*resp.ExpiresAt), ttl)
+	}
+
+	resp2, err := svc.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
+		TenantID: tenantID, CreatedBy: createdBy, Name: "no-exp-key",
+	})
+	if err != nil {
+		t.Fatalf("create api key without expiry: %v", err)
+	}
+	if resp2.ExpiresAt != nil {
+		t.Fatalf("expected nil ExpiresAt for no expiry, got %s", resp2.ExpiresAt)
+	}
+}

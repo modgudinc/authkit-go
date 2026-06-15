@@ -8,6 +8,30 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-15
+
+Small follow-up: `CreateAPIKeyRequest.ExpiresIn` becomes a real `time.Duration`,
+and the PostgreSQL driver is updated.
+
+### Changed (breaking)
+
+- **`CreateAPIKeyRequest.ExpiresIn` is now `*time.Duration`** (was `*string` with a
+  `"30d"`/`"6M"`/`"1y"` shorthand). The shorthand never carried calendar semantics
+  — it was collapsed internally to a fixed duration with 30-day months and 365-day
+  years and applied as `time.Now().Add(d)` — so nothing is lost: pass a
+  `time.Duration` directly. This matches `InvitationService.CreateInvitation`'s
+  `expiresIn *time.Duration` and removes the non-standard `parseExpiration` parser.
+
+  ```go
+  // before: ExpiresIn: ptr("90d")
+  d := 90 * 24 * time.Hour
+  // after:  ExpiresIn: &d
+  ```
+
+### Changed
+
+- **Bumped `github.com/jackc/pgx/v5` to v5.9.2** (from v5.8.0).
+
 ## [0.7.0] - 2026-06-14
 
 API-ergonomics release. Consumers can now name the service types they're handed,
@@ -496,7 +520,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/modgudinc/authkit-go/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/modgudinc/authkit-go/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/modgudinc/authkit-go/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/modgudinc/authkit-go/compare/v0.4.1...v0.5.0

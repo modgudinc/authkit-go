@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
-	"strconv"
 	"strings"
 	"time"
 
@@ -72,14 +71,10 @@ func (s *APIKeyService) CreateAPIKey(ctx context.Context, req model.CreateAPIKey
 	// Compute HMAC-SHA256 hash of the API key
 	keyHash := s.computeHMAC(apiKey)
 
-	// Parse expiration if provided
+	// Apply expiration if provided.
 	var expiresAt *time.Time
 	if req.ExpiresIn != nil {
-		duration, err := s.parseExpiration(*req.ExpiresIn)
-		if err != nil {
-			return nil, fmt.Errorf("invalid expires_in format: %w", err)
-		}
-		expiry := time.Now().Add(duration)
+		expiry := time.Now().Add(*req.ExpiresIn)
 		expiresAt = &expiry
 	}
 
@@ -287,34 +282,6 @@ func (s *APIKeyService) computeHMAC(apiKey string) string {
 	h := hmac.New(sha256.New, []byte(s.hmacSecret))
 	h.Write([]byte(apiKey))
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-// parseExpiration parses a duration string like "30d", "1y", "6M"
-// Supported units: d (days), M (months), y (years)
-func (s *APIKeyService) parseExpiration(durationStr string) (time.Duration, error) {
-	if len(durationStr) < 2 {
-		return 0, fmt.Errorf("invalid duration format")
-	}
-
-	// Extract number and unit
-	numStr := durationStr[:len(durationStr)-1]
-	unit := durationStr[len(durationStr)-1:]
-
-	num, err := strconv.Atoi(numStr)
-	if err != nil {
-		return 0, fmt.Errorf("invalid duration number: %w", err)
-	}
-
-	switch unit {
-	case "d":
-		return time.Duration(num) * 24 * time.Hour, nil
-	case "M":
-		return time.Duration(num) * 30 * 24 * time.Hour, nil // Approximate
-	case "y":
-		return time.Duration(num) * 365 * 24 * time.Hour, nil // Approximate
-	default:
-		return 0, fmt.Errorf("invalid duration unit: %s (supported: d, M, y)", unit)
-	}
 }
 
 // validateKeyFormat validates that an API key has the correct format

@@ -92,7 +92,7 @@ if err := authService.Logout(ctx, refreshed.RefreshToken); err != nil {
 
 ```go
 apiKeyService := identity.APIKeyService()
-expiresIn := "90d"
+expiresIn := 90 * 24 * time.Hour
 
 created, err := apiKeyService.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
 	TenantID:  "acme.com",
