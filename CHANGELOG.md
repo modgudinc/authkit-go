@@ -8,6 +8,55 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-15
+
+Security release closing a tenant-isolation gap, plus an API-ergonomics cleanup.
+Several public signatures change; no schema migration is required.
+
+### Security
+
+- **The per-user self-service and building-block methods are now tenant-scoped.**
+  A cluster of methods accepted a bare user id and reached repository queries that
+  filtered on `id` only — so a caller acting for tenant B could, with another
+  tenant's user UUID, read that user's password hash, drive it toward lockout,
+  overwrite its activity timestamps, force-log-it-out, or (with the old password)
+  change its password. Every such path now requires and enforces a tenant:
+  - `AuthService.LogoutAll(ctx, userID, tenantID)` — bumps `token_version` scoped to
+    the tenant first, so a cross-tenant id fails closed (`ErrNotFound`) before any
+    refresh token is touched.
+  - `AuthService.ChangePassword` — `model.ChangePasswordRequest` gains a required
+    `TenantID`; the old-password read and the password write are both tenant-scoped.
+  - `UserService.VerifyPassword`, `UpdateLastLogin`, `IncrementFailedLoginCount`, and
+    `GetDisplayName` all take a `tenantID` and use tenant-scoped queries.
+  - `UserService.GetByIDOnly` (which returned a full user record — including the
+    password hash — by id alone) is **removed** from the public interface. The
+    internal token-validation path that legitimately needs an id-only lookup is
+    unaffected.
+
+  A new integration test (`TestCrossTenantUserOperationsAreRejected`) exercises each
+  path cross-tenant and asserts `ErrNotFound` with no side effect on the victim
+  account, plus same-tenant positive controls.
+
+### Changed (breaking)
+
+- `AuthService.LogoutAll` now takes `(ctx, userID, tenantID)`.
+- `model.ChangePasswordRequest` adds a required `TenantID` field.
+- `UserService.VerifyPassword`, `UpdateLastLogin`, `IncrementFailedLoginCount`, and
+  `GetDisplayName` each take a trailing `tenantID string`.
+- `UserService.GetByIDOnly` is removed (use `GetByID(ctx, userID, tenantID)`).
+- **`InvitationService.AcceptInvitation` now takes `model.AcceptInvitationRequest`**
+  (`{Code, Email, DisplayName, PasswordHash}`) instead of four positional strings.
+- **`OTPService.Generate` and `OTPService.Validate` now take request structs**
+  (`model.OTPGenerateRequest{TenantID, Email, Purpose, ExpirationDuration}` and
+  `model.OTPValidateRequest{TenantID, Email, Code, Purpose}`).
+
+### Removed (internal — not part of the public API)
+
+- The tenant-less repository mutators `SetPassword`, `VerifyPassword`,
+  `IncrementTokenVersion`, `IncrementFailedLoginCount`, `UpdateLastLogin`, `Unlock`,
+  and `GetDisplayName` were removed in favor of their `*ByTenant` variants, so the
+  unscoped query can no longer be reintroduced by accident.
+
 ## [0.9.1] - 2026-06-15
 
 Non-breaking correctness, robustness, dependency, and documentation polish from a
@@ -630,7 +679,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/modgudinc/authkit-go/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/modgudinc/authkit-go/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/modgudinc/authkit-go/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/modgudinc/authkit-go/compare/v0.8.0...v0.8.1

@@ -35,9 +35,14 @@ type RefreshResponse struct {
 	UserID       uuid.UUID `json:"user_id"`
 }
 
-// ChangePasswordRequest contains parameters for password change
+// ChangePasswordRequest contains parameters for password change.
+//
+// TenantID is required: the change is scoped to (UserID, TenantID) so a
+// caller-supplied user id from another tenant cannot be targeted. Pass the tenant
+// the caller is authorized for.
 type ChangePasswordRequest struct {
 	UserID      uuid.UUID `json:"user_id" binding:"required"`
+	TenantID    string    `json:"tenant_id" binding:"required"`
 	OldPassword string    `json:"old_password" binding:"required"`
 	NewPassword string    `json:"new_password" binding:"required"`
 }

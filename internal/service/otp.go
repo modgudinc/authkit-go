@@ -62,8 +62,9 @@ func NewOTPService(repo *repository.Repository, rateLimitDuration time.Duration,
 //   - Generated 6-digit OTP code (plaintext, for email sending)
 //   - Expiration timestamp
 //   - Error if rate limit violated or database error
-func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose string, expirationDuration time.Duration) (*model.GenerateResponse, error) {
-	email = normalizeEmail(email)
+func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest) (*model.GenerateResponse, error) {
+	tenantID, purpose, expirationDuration := req.TenantID, req.Purpose, req.ExpirationDuration
+	email := normalizeEmail(req.Email)
 
 	// Check rate limiting: read the current OTP (from the primary, so replication
 	// lag cannot let a just-issued code slip past the limit) to inspect its
@@ -117,7 +118,7 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 	expiresAt := time.Now().Add(expirationDuration)
 
 	// Upsert OTP to database (create or replace)
-	req := repository.CreateVerificationCodeRequest{
+	upsertReq := repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
 		Code:      code,
@@ -129,7 +130,7 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 	// existing code older than rateLimitDuration. stored == false means a more
 	// recent code already exists (a concurrent request won the race past the
 	// fast-path check above), so report rate-limited rather than overwriting it.
-	stored, err := s.repo.UpsertVerificationCode(ctx, req, s.rateLimitDuration)
+	stored, err := s.repo.UpsertVerificationCode(ctx, upsertReq, s.rateLimitDuration)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error("failed to store OTP in database",
@@ -187,8 +188,9 @@ func (s *OTPService) Generate(ctx context.Context, tenantID, email, purpose stri
 // Returns:
 //   - nil if OTP is valid (and deletes it)
 //   - error if OTP is invalid, expired, not found, or locked out after too many attempts
-func (s *OTPService) Validate(ctx context.Context, tenantID, email, code, purpose string) error {
-	email = normalizeEmail(email)
+func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest) error {
+	tenantID, code, purpose := req.TenantID, req.Code, req.Purpose
+	email := normalizeEmail(req.Email)
 	result, err := s.repo.ConsumeVerificationCode(ctx, tenantID, email, code, purpose, MaxOTPValidationAttempts)
 	if err != nil {
 		if s.logger != nil {

@@ -263,27 +263,25 @@ func (s *InvitationService) ValidateInvitation(ctx context.Context, code string)
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
-//   - code: Invitation code being redeemed
-//   - email: Email of the user being created; must match the invitation's target
-//   - displayName: Display name for the new user
-//   - passwordHash: Pre-hashed password (use PasswordService.HashPassword first)
+//   - req: AcceptInvitationRequest with the code, target email, display name, and
+//     pre-hashed password
 //
 // Returns the new user's ID, or an error wrapping model.ErrInvitationInvalid if
 // the invitation is unknown, expired, exhausted, or the email does not match.
-func (s *InvitationService) AcceptInvitation(ctx context.Context, code, email, displayName, passwordHash string) (uuid.UUID, error) {
+func (s *InvitationService) AcceptInvitation(ctx context.Context, req model.AcceptInvitationRequest) (uuid.UUID, error) {
 	if s.logger != nil {
 		s.logger.Info("Accepting invitation",
-			"code", maskCode(code),
-			"email", maskEmail(email),
+			"code", maskCode(req.Code),
+			"email", maskEmail(req.Email),
 		)
 	}
 
-	userID, err := s.repo.AcceptInvitation(ctx, code, email, displayName, passwordHash)
+	userID, err := s.repo.AcceptInvitation(ctx, req.Code, req.Email, req.DisplayName, req.PasswordHash)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("Failed to accept invitation",
-				"code", maskCode(code),
-				"email", maskEmail(email),
+				"code", maskCode(req.Code),
+				"email", maskEmail(req.Email),
 				"error", err.Error(),
 			)
 		}
@@ -292,7 +290,7 @@ func (s *InvitationService) AcceptInvitation(ctx context.Context, code, email, d
 
 	if s.logger != nil {
 		s.logger.Info("Invitation accepted successfully",
-			"code", maskCode(code),
+			"code", maskCode(req.Code),
 			"user_id", userID.String(),
 		)
 	}

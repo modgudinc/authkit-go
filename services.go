@@ -35,7 +35,7 @@ type APIKeyService interface {
 type AuthService interface {
 	Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error)
 	Logout(ctx context.Context, refreshToken string) error
-	LogoutAll(ctx context.Context, userID uuid.UUID) error
+	LogoutAll(ctx context.Context, userID uuid.UUID, tenantID string) error
 	RefreshToken(ctx context.Context, req model.RefreshRequest) (*model.RefreshResponse, error)
 	ValidateJWT(ctx context.Context, token string) (*model.JWTClaims, error)
 	ChangePassword(ctx context.Context, req model.ChangePasswordRequest) error
@@ -46,7 +46,7 @@ type InvitationService interface {
 	CreateInvitation(ctx context.Context, req model.CreateInvitationRequest) (*model.Invitation, error)
 	GetInvitation(ctx context.Context, code string) (*model.Invitation, error)
 	ValidateInvitation(ctx context.Context, code string) (bool, error)
-	AcceptInvitation(ctx context.Context, code, email, displayName, passwordHash string) (uuid.UUID, error)
+	AcceptInvitation(ctx context.Context, req model.AcceptInvitationRequest) (uuid.UUID, error)
 	ListInvitations(ctx context.Context, tenantID string) ([]*model.Invitation, error)
 	ListActiveInvitations(ctx context.Context, tenantID string) ([]*model.Invitation, error)
 	RevokeInvitation(ctx context.Context, code string) error
@@ -67,8 +67,8 @@ type JWTService interface {
 
 // OTPService manages one-time verification codes with rate limiting and lockout.
 type OTPService interface {
-	Generate(ctx context.Context, tenantID, email, purpose string, expirationDuration time.Duration) (*model.GenerateResponse, error)
-	Validate(ctx context.Context, tenantID, email, code, purpose string) error
+	Generate(ctx context.Context, req model.OTPGenerateRequest) (*model.GenerateResponse, error)
+	Validate(ctx context.Context, req model.OTPValidateRequest) error
 	Delete(ctx context.Context, tenantID, email, purpose string) error
 	CleanupExpired(ctx context.Context) (int64, error)
 }
@@ -96,6 +96,11 @@ type TenantService interface {
 	GetTenant(ctx context.Context, tenantID string) (*model.Tenant, error)
 	GetTenantByDomain(ctx context.Context, domain string) (*model.Tenant, error)
 	CreateTenant(ctx context.Context, req model.CreateTenantRequest) (*model.Tenant, error)
+	// UpdateSettings replaces the tenant's settings, stored as JSONB. The map is
+	// an open, application-defined key/value bag (keys are arbitrary strings;
+	// values must be JSON-serializable) — the library does not interpret or
+	// validate its contents beyond requiring that it marshals to JSON. It is
+	// returned verbatim as Tenant.Settings (a map[string]any) by GetTenant.
 	UpdateSettings(ctx context.Context, tenantID string, settings map[string]interface{}) error
 	UpdateName(ctx context.Context, tenantID, name string) error
 	SetAllowedDomains(ctx context.Context, tenantID string, domains []string) error
@@ -121,21 +126,20 @@ type UserService interface {
 	Update(ctx context.Context, userID uuid.UUID, tenantID string, req model.UpdateUserRequest) error
 	Delete(ctx context.Context, userID uuid.UUID, tenantID string) error
 	GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error)
-	GetByIDOnly(ctx context.Context, userID uuid.UUID) (*model.User, error)
 	GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error)
 	Exists(ctx context.Context, email, tenantID string) (bool, error)
 	List(ctx context.Context, tenantID string, limit, offset int) ([]*model.User, error)
 	ExistsActive(ctx context.Context, email, tenantID string) (bool, error)
-	GetDisplayName(ctx context.Context, userID uuid.UUID) (string, error)
+	GetDisplayName(ctx context.Context, userID uuid.UUID, tenantID string) (string, error)
 	GetActiveUserIDByEmail(ctx context.Context, email, tenantID string) (uuid.UUID, error)
 	Enable(ctx context.Context, userID uuid.UUID, tenantID string) error
 	Disable(ctx context.Context, userID uuid.UUID, tenantID string) error
 	Lock(ctx context.Context, userID uuid.UUID, tenantID string, lockedUntil *time.Time) error
 	Unlock(ctx context.Context, userID uuid.UUID, tenantID string) error
 	SetPassword(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error
-	VerifyPassword(ctx context.Context, userID uuid.UUID) (string, error)
-	UpdateLastLogin(ctx context.Context, userID uuid.UUID) error
-	IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID) error
+	VerifyPassword(ctx context.Context, userID uuid.UUID, tenantID string) (string, error)
+	UpdateLastLogin(ctx context.Context, userID uuid.UUID, tenantID string) error
+	IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID, tenantID string) error
 	IncrementTokenVersion(ctx context.Context, userID uuid.UUID, tenantID string) error
 	CountByTenant(ctx context.Context, tenantID string) (int, error)
 	UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, tenantID string, roles []string) error

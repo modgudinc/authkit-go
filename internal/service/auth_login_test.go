@@ -51,17 +51,12 @@ func (f *fakeAuthRepository) Lock(ctx context.Context, userID uuid.UUID, lockedU
 	return nil
 }
 
-func (f *fakeAuthRepository) Unlock(ctx context.Context, userID uuid.UUID) error {
+func (f *fakeAuthRepository) UnlockByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	f.unlockCalled = true
 	if f.user != nil {
 		f.user.IsLocked = false
 		f.user.FailedLoginCount = 0
 	}
-	return nil
-}
-
-func (f *fakeAuthRepository) IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID) error {
-	f.incFailedCalled++
 	return nil
 }
 
@@ -85,23 +80,23 @@ func (f *fakeAuthRepository) RegisterFailedLogin(ctx context.Context, userID uui
 	return count, locked, nil
 }
 
-func (f *fakeAuthRepository) UpdateLastLogin(ctx context.Context, userID uuid.UUID) error {
+func (f *fakeAuthRepository) UpdateLastLoginByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	f.updateLastLogin++
 	return nil
 }
 
-func (f *fakeAuthRepository) VerifyPassword(ctx context.Context, userID uuid.UUID) (string, error) {
+func (f *fakeAuthRepository) VerifyPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID string) (string, error) {
 	if f.user == nil {
 		return "", model.ErrNotFound
 	}
 	return f.user.PasswordHash, nil
 }
 
-func (f *fakeAuthRepository) SetPassword(ctx context.Context, userID uuid.UUID, hashedPassword string) error {
+func (f *fakeAuthRepository) SetPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error {
 	return nil
 }
 
-func (f *fakeAuthRepository) IncrementTokenVersion(ctx context.Context, userID uuid.UUID) error {
+func (f *fakeAuthRepository) IncrementTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	return nil
 }
 

@@ -764,3 +764,112 @@ func TestUpdateByTenantPartialUpdate(t *testing.T) {
 		t.Fatalf("token_version not bumped on roles change: %d -> %d", afterName.TokenVersion, afterRoles.TokenVersion)
 	}
 }
+
+// TestCrossTenantUserOperationsAreRejected is the regression test for the
+// tenant-isolation finding: the self-service AuthService path (ChangePassword,
+// LogoutAll) and the per-user UserService building blocks (VerifyPassword,
+// GetDisplayName, UpdateLastLogin, IncrementFailedLoginCount) must all be scoped by
+// tenant, so a caller acting for tenant B cannot read or mutate a user that belongs
+// to tenant A using only that user's UUID. Each cross-tenant call must return
+// ErrNotFound and must NOT have any side effect on the victim account.
+func TestCrossTenantUserOperationsAreRejected(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		_ = db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	pw := service.NewPasswordService(4, nil)
+
+	const (
+		tenantA  = "tenant-a.xtest"
+		tenantB  = "tenant-b.xtest" // the "attacker" tenant
+		password = "ValidPass1!"
+	)
+	victimID := createTenantAndUserWithPassword(t, ctx, &repo, tenantA, "alice@"+tenantA, password, pw)
+	// tenantB must exist so the cross-tenant caller is a legitimate, separate tenant.
+	createTenantAndUserWithPassword(t, ctx, &repo, tenantB, "bob@"+tenantB, password, pw)
+
+	authKit := newIntegrationAuthKit(t, db)
+	authSvc := authKit.AuthService()
+	userSvc := authKit.UserService()
+
+	// Give the victim a live session so we can prove LogoutAll cannot touch it
+	// across tenants.
+	login, err := authSvc.Login(ctx, model.LoginRequest{Email: "alice@" + tenantA, Password: password, TenantID: tenantA})
+	if err != nil {
+		t.Fatalf("victim login: %v", err)
+	}
+
+	// --- Cross-tenant LogoutAll must fail closed and leave the session intact. ---
+	if err := authSvc.LogoutAll(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("cross-tenant LogoutAll: expected ErrNotFound, got %v", err)
+	}
+	if _, err := authSvc.ValidateJWT(ctx, login.AccessToken); err != nil {
+		t.Fatalf("victim access token must still be valid after cross-tenant LogoutAll, got %v", err)
+	}
+
+	// --- Cross-tenant per-user reads/writes must all be ErrNotFound. ---
+	if _, err := userSvc.VerifyPassword(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("cross-tenant VerifyPassword: expected ErrNotFound (no hash disclosure), got %v", err)
+	}
+	if _, err := userSvc.GetDisplayName(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("cross-tenant GetDisplayName: expected ErrNotFound, got %v", err)
+	}
+	if err := userSvc.UpdateLastLogin(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("cross-tenant UpdateLastLogin: expected ErrNotFound, got %v", err)
+	}
+	if err := userSvc.IncrementFailedLoginCount(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("cross-tenant IncrementFailedLoginCount: expected ErrNotFound, got %v", err)
+	}
+	// The lockout counter on the victim must be untouched by the cross-tenant call.
+	victim, err := repo.GetByID(ctx, victimID, tenantA)
+	if err != nil {
+		t.Fatalf("reload victim: %v", err)
+	}
+	if victim.FailedLoginCount != 0 {
+		t.Fatalf("cross-tenant IncrementFailedLoginCount leaked: failed_login_count = %d, want 0", victim.FailedLoginCount)
+	}
+
+	// --- Cross-tenant ChangePassword must fail and leave the password unchanged. ---
+	if err := authSvc.ChangePassword(ctx, model.ChangePasswordRequest{
+		UserID:      victimID,
+		TenantID:    tenantB,
+		OldPassword: password,
+		NewPassword: "AttackerPass1!",
+	}); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("cross-tenant ChangePassword: expected ErrNotFound, got %v", err)
+	}
+	if _, err := authSvc.Login(ctx, model.LoginRequest{Email: "alice@" + tenantA, Password: password, TenantID: tenantA}); err != nil {
+		t.Fatalf("victim password must be unchanged after cross-tenant ChangePassword, login failed: %v", err)
+	}
+
+	// --- Positive controls: the same operations succeed within the correct tenant. ---
+	if _, err := userSvc.VerifyPassword(ctx, victimID, tenantA); err != nil {
+		t.Fatalf("same-tenant VerifyPassword should succeed: %v", err)
+	}
+	if name, err := userSvc.GetDisplayName(ctx, victimID, tenantA); err != nil || name == "" {
+		t.Fatalf("same-tenant GetDisplayName should succeed, got name=%q err=%v", name, err)
+	}
+	if err := authSvc.ChangePassword(ctx, model.ChangePasswordRequest{
+		UserID:      victimID,
+		TenantID:    tenantA,
+		OldPassword: password,
+		NewPassword: "NewValidPass1!",
+	}); err != nil {
+		t.Fatalf("same-tenant ChangePassword should succeed: %v", err)
+	}
+	// ChangePassword revokes sessions: the original access token must now be invalid.
+	if _, err := authSvc.ValidateJWT(ctx, login.AccessToken); err == nil {
+		t.Fatal("expected victim's original access token to be invalid after same-tenant password change")
+	}
+	// And LogoutAll within the correct tenant succeeds.
+	if err := authSvc.LogoutAll(ctx, victimID, tenantA); err != nil {
+		t.Fatalf("same-tenant LogoutAll should succeed: %v", err)
+	}
+}

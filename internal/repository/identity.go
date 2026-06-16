@@ -254,62 +254,29 @@ func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (
 }
 
 // ============================================================================
-// SetPassword - Sets the password hash for a user (low-level operation)
-// IMPORTANT: This method accepts a HASHED password, not plaintext
-// Password hashing must be done at the service/controller layer
-// ============================================================================
-func (r *Repository) SetPassword(ctx context.Context, userID uuid.UUID, hashedPassword string) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			password_hash = $1,
-			updated_at = $2
-		WHERE id = $3
-	`
-
-	result, err := r.rw.ExecContext(ctx, r.q(query),
-		hashedPassword,
-		time.Now(),
-		userID,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to set password: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user %s not found: %w", userID, model.ErrNotFound)
-	}
-
-	return nil
-}
-
-// ============================================================================
-// VerifyPassword - Retrieves the stored password hash for verification
-// IMPORTANT: Returns the HASHED password for comparison at service layer
-// Password verification (hash comparison) must be done at service/controller layer
+// VerifyPasswordByTenant - Retrieves the stored password hash for verification,
+// scoped to a tenant so a caller-supplied user id from another tenant cannot read
+// a hash it does not own.
+// IMPORTANT: Returns the HASHED password for comparison at service layer.
+// Password verification (hash comparison) must be done at service/controller layer.
 //
 // Reads from the PRIMARY (rw), not a read replica: this hash backs a
 // security-sensitive auth gate (e.g. ChangePassword's old-password check), and a
 // lagging replica could return a stale hash right after a password change. This
 // matches the read-write split's rule that validation paths use the primary.
 // ============================================================================
-func (r *Repository) VerifyPassword(ctx context.Context, userID uuid.UUID) (string, error) {
+func (r *Repository) VerifyPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID string) (string, error) {
 	query := `
 		SELECT password_hash
 		FROM {{schema}}.users
-		WHERE id = $1
+		WHERE id = $1 AND tenant_id = $2
 	`
 
 	var hashedPassword string
-	err := r.rw.QueryRowContext(ctx, r.q(query), userID).Scan(&hashedPassword)
+	err := r.rw.QueryRowContext(ctx, r.q(query), userID, tenantID).Scan(&hashedPassword)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", fmt.Errorf("user not found: %w", model.ErrNotFound)
+			return "", fmt.Errorf("user not found or does not belong to tenant: %w", model.ErrNotFound)
 		}
 		return "", fmt.Errorf("failed to get password hash: %w", err)
 	}
@@ -585,65 +552,27 @@ func (r *Repository) List(ctx context.Context, tenantID string, limit, offset in
 }
 
 // ============================================================================
-// IncrementTokenVersion - Increments the user's token version
-// This invalidates all existing JWTs for the user, forcing re-authentication
-// Used for: logout all sessions, password reset, security breach response
+// IncrementFailedLoginCountByTenant - Increments failed login count and updates
+// the last-failed-login timestamp, scoped to a tenant so a caller-supplied user id
+// from another tenant cannot drive an unrelated account toward lockout.
+// Used for tracking failed login attempts before account lockout.
 // ============================================================================
-func (r *Repository) IncrementTokenVersion(ctx context.Context, userID uuid.UUID) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET
-			token_version = token_version + 1,
-			updated_at = $1
-		WHERE id = $2
-	`
-
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID)
-	if err != nil {
-		return fmt.Errorf("failed to increment token version: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user %s not found: %w", userID, model.ErrNotFound)
-	}
-
-	return nil
-}
-
-// ============================================================================
-// IncrementFailedLoginCount - Increments failed login count and updates last failed login timestamp
-// Used for tracking failed login attempts before account lockout
-// ============================================================================
-func (r *Repository) IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID) error {
+func (r *Repository) IncrementFailedLoginCountByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	query := `
 		UPDATE {{schema}}.users
 		SET
 			failed_login_count = failed_login_count + 1,
 			last_failed_login = $1,
 			updated_at = $1
-		WHERE id = $2
+		WHERE id = $2 AND tenant_id = $3
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID)
+	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to increment failed login count: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user %s not found: %w", userID, model.ErrNotFound)
-	}
-
-	return nil
+	return rowsAffectedOrNotFound(result)
 }
 
 // ============================================================================
@@ -716,53 +645,25 @@ func (r *Repository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, 
 }
 
 // ============================================================================
-// Unlock - Unlocks a user account (security control)
-// Clears the locked status, locked_until timestamp, and resets failed login count
+// UpdateLastLoginByTenant - Updates the last login timestamp for a user, scoped to
+// a tenant so a caller-supplied user id from another tenant cannot be touched.
+// Called after successful authentication to track user activity.
 // ============================================================================
-func (r *Repository) Unlock(ctx context.Context, userID uuid.UUID) error {
-	return r.withUserStatusAudit(ctx, userID, nil, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
-		if _, err := tx.ExecContext(ctx, r.q(`
-			UPDATE {{schema}}.users SET is_locked = false, locked_until = NULL, failed_login_count = 0, updated_at = $1 WHERE id = $2
-		`), time.Now(), userID); err != nil {
-			return old, fmt.Errorf("failed to unlock user: %w", err)
-		}
-		current := old
-		current.IsLocked = false
-		current.LockedUntil = nil
-		current.FailedLoginCount = 0
-		return current, nil
-	})
-}
-
-// ============================================================================
-// UpdateLastLogin - Updates the last login timestamp for a user
-// Called after successful authentication to track user activity
-// ============================================================================
-func (r *Repository) UpdateLastLogin(ctx context.Context, userID uuid.UUID) error {
+func (r *Repository) UpdateLastLoginByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	query := `
 		UPDATE {{schema}}.users
 		SET
 			last_login = $1,
 			updated_at = $1
-		WHERE id = $2
+		WHERE id = $2 AND tenant_id = $3
 	`
 
-	now := time.Now()
-	result, err := r.rw.ExecContext(ctx, r.q(query), now, userID)
+	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to update last login: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user %s not found: %w", userID, model.ErrNotFound)
-	}
-
-	return nil
+	return rowsAffectedOrNotFound(result)
 }
 
 // ============================================================================
@@ -787,17 +688,18 @@ func (r *Repository) ExistsActive(ctx context.Context, email, tenantID string) (
 }
 
 // ============================================================================
-// GetDisplayName - Gets just the display name for a user
-// Useful when enriching responses with user names
+// GetDisplayNameByTenant - Gets just the display name for a user, scoped to a
+// tenant so a caller-supplied user id from another tenant cannot be read.
+// Useful when enriching responses with user names.
 // ============================================================================
-func (r *Repository) GetDisplayName(ctx context.Context, userID uuid.UUID) (string, error) {
-	query := `SELECT display_name FROM {{schema}}.users WHERE id = $1`
+func (r *Repository) GetDisplayNameByTenant(ctx context.Context, userID uuid.UUID, tenantID string) (string, error) {
+	query := `SELECT display_name FROM {{schema}}.users WHERE id = $1 AND tenant_id = $2`
 
 	var displayName string
-	err := r.ro.QueryRowContext(ctx, r.q(query), userID).Scan(&displayName)
+	err := r.ro.QueryRowContext(ctx, r.q(query), userID, tenantID).Scan(&displayName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", fmt.Errorf("user not found: %w", model.ErrNotFound)
+			return "", fmt.Errorf("user not found or does not belong to tenant: %w", model.ErrNotFound)
 		}
 		return "", fmt.Errorf("failed to get display name: %w", err)
 	}

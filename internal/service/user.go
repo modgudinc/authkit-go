@@ -93,12 +93,6 @@ func (s *UserService) GetByID(ctx context.Context, userID uuid.UUID, tenantID st
 	return u, sanitizeError(s.logger, "get user by id", err)
 }
 
-// GetByIDOnly retrieves a user by ID without tenant scoping
-// Used for internal operations where tenant is not yet known
-func (s *UserService) GetByIDOnly(ctx context.Context, userID uuid.UUID) (*model.User, error) {
-	return s.repo.GetByIDOnly(ctx, userID)
-}
-
 // GetByEmail retrieves a user by email within a specific tenant
 func (s *UserService) GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error) {
 	u, err := s.repo.GetByEmail(ctx, normalizeEmail(email), tenantID)
@@ -131,10 +125,11 @@ func (s *UserService) ExistsActive(ctx context.Context, email, tenantID string) 
 	return ok, sanitizeError(s.logger, "check active user exists", err)
 }
 
-// GetDisplayName gets just the display name for a user
-// Useful when enriching responses with user names
-func (s *UserService) GetDisplayName(ctx context.Context, userID uuid.UUID) (string, error) {
-	name, err := s.repo.GetDisplayName(ctx, userID)
+// GetDisplayName gets just the display name for a user within a tenant (scoped to
+// prevent reading a user that belongs to another tenant).
+// Useful when enriching responses with user names.
+func (s *UserService) GetDisplayName(ctx context.Context, userID uuid.UUID, tenantID string) (string, error) {
+	name, err := s.repo.GetDisplayNameByTenant(ctx, userID, tenantID)
 	return name, sanitizeError(s.logger, "get display name", err)
 }
 
@@ -195,10 +190,11 @@ func (s *UserService) SetPassword(ctx context.Context, userID uuid.UUID, tenantI
 	return sanitizeError(nil, "set password", s.revokeRefreshTokens(ctx, userID, "set_password"))
 }
 
-// VerifyPassword retrieves the password hash for verification
-// Returns the stored hash which should be compared using bcrypt
-func (s *UserService) VerifyPassword(ctx context.Context, userID uuid.UUID) (string, error) {
-	hash, err := s.repo.VerifyPassword(ctx, userID)
+// VerifyPassword retrieves the password hash for verification within a tenant
+// (scoped so a caller-supplied user id from another tenant cannot read its hash).
+// Returns the stored hash which should be compared using bcrypt.
+func (s *UserService) VerifyPassword(ctx context.Context, userID uuid.UUID, tenantID string) (string, error) {
+	hash, err := s.repo.VerifyPasswordByTenant(ctx, userID, tenantID)
 	return hash, sanitizeError(s.logger, "verify password", err)
 }
 
@@ -206,14 +202,17 @@ func (s *UserService) VerifyPassword(ctx context.Context, userID uuid.UUID) (str
 // Activity Tracking
 // ============================================================================
 
-// UpdateLastLogin updates the last_login timestamp for a user
-func (s *UserService) UpdateLastLogin(ctx context.Context, userID uuid.UUID) error {
-	return sanitizeError(s.logger, "update last login", s.repo.UpdateLastLogin(ctx, userID))
+// UpdateLastLogin updates the last_login timestamp for a user within a tenant
+// (scoped so a caller-supplied user id from another tenant cannot be touched).
+func (s *UserService) UpdateLastLogin(ctx context.Context, userID uuid.UUID, tenantID string) error {
+	return sanitizeError(s.logger, "update last login", s.repo.UpdateLastLoginByTenant(ctx, userID, tenantID))
 }
 
-// IncrementFailedLoginCount increments the failed login counter
-func (s *UserService) IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID) error {
-	return sanitizeError(s.logger, "increment failed login count", s.repo.IncrementFailedLoginCount(ctx, userID))
+// IncrementFailedLoginCount increments the failed login counter for a user within
+// a tenant (scoped so a caller-supplied user id from another tenant cannot be
+// driven toward lockout).
+func (s *UserService) IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID, tenantID string) error {
+	return sanitizeError(s.logger, "increment failed login count", s.repo.IncrementFailedLoginCountByTenant(ctx, userID, tenantID))
 }
 
 // ============================================================================

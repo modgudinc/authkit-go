@@ -135,7 +135,12 @@ passwordHash, err := identity.PasswordService().HashPassword("SecurePass1!")
 if err != nil {
 	return err
 }
-newUserID, err := invitationService.AcceptInvitation(ctx, invitation.Code, "invitee@acme.com", "Invited User", passwordHash)
+newUserID, err := invitationService.AcceptInvitation(ctx, model.AcceptInvitationRequest{
+	Code:         invitation.Code,
+	Email:        "invitee@acme.com",
+	DisplayName:  "Invited User",
+	PasswordHash: passwordHash,
+})
 if err != nil {
 	return err
 }
@@ -147,13 +152,23 @@ _ = newUserID
 ```go
 otpService := identity.OTPService()
 
-generated, err := otpService.Generate(ctx, "acme.com", "user@acme.com", "signup", time.Hour)
+generated, err := otpService.Generate(ctx, model.OTPGenerateRequest{
+	TenantID:           "acme.com",
+	Email:              "user@acme.com",
+	Purpose:            "signup",
+	ExpirationDuration: time.Hour,
+})
 if err != nil {
 	return err
 }
 
 // Send generated.Code through your email/SMS provider.
-if err := otpService.Validate(ctx, "acme.com", "user@acme.com", generated.Code, "signup"); err != nil {
+if err := otpService.Validate(ctx, model.OTPValidateRequest{
+	TenantID: "acme.com",
+	Email:    "user@acme.com",
+	Code:     generated.Code,
+	Purpose:  "signup",
+}); err != nil {
 	return err
 }
 ```
@@ -166,7 +181,7 @@ secretService := identity.SecretService()
 saved, err := secretService.SaveSecret(ctx, model.SaveSecretRequest{
 	TenantID:   "acme.com",
 	Key:        "openai",
-	PlainValue: "sk-live-secret",
+	PlainValue: "sk-live-secret", // placeholder — pass the real provider key here
 	CreatedBy:  userID,
 })
 if err != nil {

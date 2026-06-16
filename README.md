@@ -483,7 +483,8 @@ err := authService.Logout(ctx, refreshToken)
 // Note: JWT remains valid until expiry (stateless design)
 
 // Logout from all devices (revoke all tokens + invalidate all JWTs)
-err := authService.LogoutAll(ctx, userID)
+// Scoped by tenantID: a userID from another tenant is rejected (ErrNotFound).
+err := authService.LogoutAll(ctx, userID, tenantID)
 // This increments token_version, immediately invalidating all existing JWTs
 ```
 
@@ -532,6 +533,7 @@ roles := claims.Roles        // User roles ([]string)
 ```go
 err := authService.ChangePassword(ctx, model.ChangePasswordRequest{
     UserID:      userID,
+    TenantID:    tenantID, // required: scopes the change to the user's tenant
     OldPassword: "OldPassword123!",
     NewPassword: "NewSecurePassword456!",
 })
@@ -816,7 +818,12 @@ if err != nil {
     return err
 }
 
-userID, err := invitationService.AcceptInvitation(ctx, invitationCode, email, displayName, passwordHash)
+userID, err := invitationService.AcceptInvitation(ctx, model.AcceptInvitationRequest{
+    Code:         invitationCode,
+    Email:        email,
+    DisplayName:  displayName,
+    PasswordHash: passwordHash,
+})
 if err != nil {
     // errors.Is(err, authkit.ErrInvitationInvalid) => unknown, expired, fully used, or email mismatch
     return fmt.Errorf("invitation signup failed: %w", err)
@@ -1007,7 +1014,12 @@ func UserSignupWithInvitation(ctx context.Context, email, displayName, password,
     // user in a SINGLE transaction. Tenant and roles are taken from the invitation,
     // and the email must match the invitation's target — so a single-use invitation
     // can never onboard more than one account and roles can't be tampered with.
-    userID, err := invitationService.AcceptInvitation(ctx, invitationCode, email, displayName, passwordHash)
+    userID, err := invitationService.AcceptInvitation(ctx, model.AcceptInvitationRequest{
+        Code:         invitationCode,
+        Email:        email,
+        DisplayName:  displayName,
+        PasswordHash: passwordHash,
+    })
     if err != nil {
         // errors.Is(err, authkit.ErrInvitationInvalid) => unknown/expired/used/email-mismatch
         return fmt.Errorf("invitation signup failed: %w", err)
@@ -1052,7 +1064,7 @@ func AdminRevokeInvitation(ctx context.Context, invitationCode string) error {
 - **Atomic redemption** (`AcceptInvitation` validates, consumes, and creates the user in one transaction)
 - **Soft delete option** (revoke vs delete for audit trail)
 - **Automatic cleanup** (periodic maintenance job)
-- **Comprehensive logging** (all operations logged with masked codes)
+- **Comprehensive logging** (all operations logged with masked codes — only when a `Logger` is injected; logging is a no-op otherwise)
 
 **Security Considerations:**
 - Invitation codes are masked in logs (first 4 chars + ***)
@@ -1074,7 +1086,12 @@ otpService := identity.OTPService()
 
 // Generate 6-digit OTP with 1-hour expiration.
 // Codes are scoped to (tenantID, email, purpose).
-response, err := otpService.Generate(ctx, "acme.com", "user@acme.com", "signup", time.Hour)
+response, err := otpService.Generate(ctx, model.OTPGenerateRequest{
+    TenantID:           "acme.com",
+    Email:              "user@acme.com",
+    Purpose:            "signup",
+    ExpirationDuration: time.Hour,
+})
 if err != nil {
     // Rate limit exceeded or generation failed
     log.Fatal(err)
@@ -1098,7 +1115,12 @@ emailService.SendOTP(ctx, email, response.Code, response.ExpiresAt)
 
 ```go
 // User provides OTP code from email (scoped to tenantID, email, purpose)
-err := otpService.Validate(ctx, "acme.com", "user@acme.com", "123456", "signup")
+err := otpService.Validate(ctx, model.OTPValidateRequest{
+    TenantID: "acme.com",
+    Email:    "user@acme.com",
+    Code:     "123456",
+    Purpose:  "signup",
+})
 if err != nil {
     // Invalid, expired, not found, or locked out after too many attempts
     return fmt.Errorf("OTP validation failed: %w", err)
@@ -1141,7 +1163,12 @@ func InitiateSignup(ctx context.Context, tenantID, email, name string) error {
     otpService := identity.OTPService()
 
     // Generate OTP with 1-hour expiration (scoped to tenantID + email + purpose)
-    response, err := otpService.Generate(ctx, tenantID, email, "signup", time.Hour)
+    response, err := otpService.Generate(ctx, model.OTPGenerateRequest{
+        TenantID:           tenantID,
+        Email:              email,
+        Purpose:            "signup",
+        ExpirationDuration: time.Hour,
+    })
     if err != nil {
         return fmt.Errorf("failed to generate OTP: %w", err)
     }
@@ -1160,7 +1187,12 @@ func CompleteSignup(ctx context.Context, tenantID, email, otpCode, password stri
     otpService := identity.OTPService()
 
     // Validate OTP (single-use, auto-deleted on success)
-    err := otpService.Validate(ctx, tenantID, email, otpCode, "signup")
+    err := otpService.Validate(ctx, model.OTPValidateRequest{
+        TenantID: tenantID,
+        Email:    email,
+        Code:     otpCode,
+        Purpose:  "signup",
+    })
     if err != nil {
         return fmt.Errorf("invalid or expired OTP: %w", err)
     }

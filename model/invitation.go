@@ -22,6 +22,17 @@ type Invitation struct {
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 }
 
+// AcceptInvitationRequest is the input to InvitationService.AcceptInvitation. The
+// new user's tenant and roles come from the invitation; only the display name and
+// (already-hashed) password come from the caller, and Email must match the
+// invitation's target.
+type AcceptInvitationRequest struct {
+	Code         string // Invitation code being redeemed
+	Email        string // Email of the user being created; must match the invitation's target
+	DisplayName  string // Display name for the new user
+	PasswordHash string // Pre-hashed password (use PasswordService.HashPassword first)
+}
+
 // CreateInvitationRequest is the input to InvitationService.CreateInvitation.
 // The service generates the invitation code and resolves the optional defaults
 // below before persisting, so callers only supply the tenant, creator, email,

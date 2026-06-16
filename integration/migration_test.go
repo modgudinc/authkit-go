@@ -114,7 +114,7 @@ func TestAuthServiceFlows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second login: %v", err)
 	}
-	if err := authService.LogoutAll(ctx, loginUserID); err != nil {
+	if err := authService.LogoutAll(ctx, loginUserID, tenantID); err != nil {
 		t.Fatalf("logout all: %v", err)
 	}
 	if _, err := authService.ValidateJWT(ctx, secondLogin.AccessToken); err == nil {
