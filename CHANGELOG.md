@@ -8,6 +8,40 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-15
+
+Non-breaking correctness, robustness, dependency, and documentation polish from a
+third review pass. No public API signatures change; no schema migration.
+
+### Fixed
+
+- **`APIKeyService.CreateAPIKey` now rejects a non-positive `ExpiresIn`.** A zero or
+  negative duration previously minted a key with an `expires_at` in the past (dead on
+  arrival); because `nil` means "never expires", a typo'd negative value was an easy
+  way to get surprising behavior. It now returns a clear error, matching the
+  positive-duration intent used elsewhere.
+- **`maskValue` no longer over-reveals a secret when its first `_`/`-` delimiter sits
+  late in the string.** The masked display form now reveals only a *short* leading
+  type tag (e.g. `sk-`, `cur_`) plus the last 4 characters, and always keeps a masked
+  gap between them; a delimiter far into the value is not treated as a type tag (which
+  previously could echo most of the secret into logs/API responses). Cryptographic
+  handling was never affected — the stored secret is encrypted and never exposed.
+
+### Changed
+
+- Dependency patch bumps: `golang-jwt/jwt/v5` `v5.3.0` → `v5.3.1`, `golang.org/x/crypto`
+  `v0.52.0` → `v0.53.0` (transitively `golang.org/x/text` → `v0.38.0`,
+  `golang.org/x/sync` → `v0.21.0`).
+
+### Documentation
+
+- `TenantService.UpdateSettings` now documents that the `map[string]any` is an open,
+  application-defined bag the library does not interpret (values must be
+  JSON-serializable).
+- README clarifies that "comprehensive logging" applies only when a `Logger` is
+  injected (logging is a no-op otherwise); the secret example marks its value as a
+  placeholder to replace.
+
 ## [0.9.0] - 2026-06-15
 
 API-ergonomics release addressing the breaking findings from the review. Several
@@ -596,7 +630,8 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/modgudinc/authkit-go/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/modgudinc/authkit-go/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/modgudinc/authkit-go/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/modgudinc/authkit-go/compare/v0.7.0...v0.8.0

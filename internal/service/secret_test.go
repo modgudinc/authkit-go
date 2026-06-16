@@ -152,6 +152,11 @@ func TestMaskValue(t *testing.T) {
 		"plainsecret":        "************",         // 11 chars: now fully masked
 		"sk-abc123def456":    "sk-************f456",  // 15 chars: partial reveal
 		"cur_1234567890abcd": "cur_************abcd", // 18 chars: partial reveal
+		// A delimiter that sits LATE in the string is not a type tag; revealing
+		// everything up to it would leak the bulk of the secret, so only the last 4
+		// chars are revealed. (Regression: the old guard could leak the leading run.)
+		"abcdefghi-jklm":  "************jklm", // 14 chars, first delimiter at index 9
+		"abcdefghijklmno": "************lmno", // 15 chars, no delimiter at all
 	}
 
 	for input, want := range tests {

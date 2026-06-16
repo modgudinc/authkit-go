@@ -270,34 +270,49 @@ func (s *SecretService) decrypt(ciphertext, tenantID, key string) (string, error
 	return string(plaintext), nil
 }
 
-// maskValue generates a masked version of a value for display
+// maskValue generates a masked version of a value for display.
 //
-// Format: prefix (up to '_') + '************' + last 4 chars
-// Example: "cur_1234567890abcdef" -> "cur_************cdef"
-// Example: "sk-abc123def456" -> "sk-************f456"
+// Format: optional short type tag (up to the first '_' or '-') + '************' +
+// last 4 chars. Example: "cur_1234567890abcdef" -> "cur_************cdef";
+// "sk-abc123def456" -> "sk-************f456".
 //
-// For short values (< 12 chars) the whole value is masked: revealing a known
-// prefix plus the last 4 characters of, say, an 8-character secret would expose
-// most of it, so partial reveal is reserved for values long enough that it
-// leaks only a small fraction.
+// It is deliberately conservative and only ever reveals a *short* leading type
+// tag plus the last 4 characters:
+//   - Values under 12 chars are fully masked: a known tag plus the last 4 chars
+//     of, say, an 8-char secret would expose most of it.
+//   - The tag is only revealed when the first delimiter sits within the first few
+//     characters (a real type tag like "sk-"/"cur_") AND a masked gap of at least
+//     a few characters remains before the revealed suffix. A delimiter that sits
+//     late in the string is not a type tag, so revealing everything up to it would
+//     leak the bulk of the secret — that case falls back to suffix-only masking.
 func maskValue(value string) string {
+	const (
+		mask         = "************"
+		revealSuffix = 4
+		// A type tag is short ("sk_", "cur_", "pk-"); never treat a long leading
+		// run as a prefix.
+		maxPrefixLen = 5
+		// Require at least this many masked characters between the revealed prefix
+		// and the revealed suffix, so the two can never add up to most of the value.
+		minMaskedGap = 4
+	)
+
 	if len(value) < 12 {
-		return "************"
+		return mask
 	}
 
-	// Find prefix (up to first underscore or hyphen)
 	prefix := ""
 	for i, ch := range value {
+		if i >= maxPrefixLen {
+			break // no short type tag near the start; reveal only the suffix
+		}
 		if ch == '_' || ch == '-' {
-			if i > 0 && i < len(value)-4 {
-				prefix = value[:i+1] // Include the delimiter
+			if i > 0 && i+1+revealSuffix+minMaskedGap <= len(value) {
+				prefix = value[:i+1] // include the delimiter
 			}
 			break
 		}
 	}
 
-	// Get last 4 characters
-	suffix := value[len(value)-4:]
-
-	return prefix + "************" + suffix
+	return prefix + mask + value[len(value)-revealSuffix:]
 }

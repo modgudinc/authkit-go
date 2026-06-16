@@ -71,9 +71,14 @@ func (s *APIKeyService) CreateAPIKey(ctx context.Context, req model.CreateAPIKey
 	// Compute HMAC-SHA256 hash of the API key
 	keyHash := s.computeHMAC(apiKey)
 
-	// Apply expiration if provided.
+	// Apply expiration if provided. A non-positive duration is rejected rather than
+	// silently minting an already-expired (or, since nil means "never expires", a
+	// surprisingly immortal) key — almost always a caller bug worth surfacing.
 	var expiresAt *time.Time
 	if req.ExpiresIn != nil {
+		if *req.ExpiresIn <= 0 {
+			return nil, fmt.Errorf("api key expiration duration must be positive (got %s)", *req.ExpiresIn)
+		}
 		expiry := time.Now().Add(*req.ExpiresIn)
 		expiresAt = &expiry
 	}
