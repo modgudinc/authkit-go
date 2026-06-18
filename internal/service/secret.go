@@ -53,11 +53,11 @@ func NewSecretService(repo *repository.Repository, encryptionKey []byte, logger 
 	return &SecretService{
 		repo:          repo,
 		encryptionKey: encryptionKey,
-		logger:        logger,
+		logger:        ensureLogger(logger),
 	}
 }
 
-// SaveSecret encrypts and stores a secret
+// Save encrypts and stores a secret
 //
 // Flow:
 // 1. Validate encryption key is configured (32 bytes)
@@ -67,13 +67,11 @@ func NewSecretService(repo *repository.Repository, encryptionKey []byte, logger 
 // 5. Return saved secret metadata (without encrypted value)
 //
 // IMPORTANT: The plaintext value is encrypted before storage and never stored in plaintext
-func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequest) (*model.SaveSecretResponse, error) {
-	if s.logger != nil {
-		s.logger.Info("Saving secret",
-			"tenant_id", req.TenantID,
-			"key", req.Key,
-		)
-	}
+func (s *SecretService) Save(ctx context.Context, req model.SaveSecretRequest) (*model.SaveSecretResponse, error) {
+	s.logger.Info("Saving secret",
+		"tenant_id", req.TenantID,
+		"key", req.Key,
+	)
 
 	// Validate encryption key
 	if len(s.encryptionKey) != 32 {
@@ -95,12 +93,10 @@ func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequ
 		return nil, sanitizeError(s.logger, "save secret", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Secret saved successfully",
-			"tenant_id", req.TenantID,
-			"key", req.Key,
-		)
-	}
+	s.logger.Info("Secret saved successfully",
+		"tenant_id", req.TenantID,
+		"key", req.Key,
+	)
 
 	return &model.SaveSecretResponse{
 		TenantID:    secret.TenantID,
@@ -113,7 +109,7 @@ func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequ
 	}, nil
 }
 
-// GetSecret decrypts and returns a secret's plain value
+// Get decrypts and returns a secret's plain value
 //
 // Flow:
 // 1. Retrieve encrypted value from database
@@ -121,7 +117,7 @@ func (s *SecretService) SaveSecret(ctx context.Context, req model.SaveSecretRequ
 // 3. Return plaintext value
 //
 // Returns error if secret not found or decryption fails
-func (s *SecretService) GetSecret(ctx context.Context, tenantID, key string) (string, error) {
+func (s *SecretService) Get(ctx context.Context, tenantID, key string) (string, error) {
 	// Validate encryption key
 	if len(s.encryptionKey) != 32 {
 		return "", fmt.Errorf("get secret: %w", model.ErrSecretEncryptionKeyMissing)
@@ -136,50 +132,44 @@ func (s *SecretService) GetSecret(ctx context.Context, tenantID, key string) (st
 	// Decrypt the value, authenticating it against its (tenant, key) context.
 	plainValue, err := s.decrypt(encryptedValue, tenantID, key)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to decrypt secret",
-				"tenant_id", tenantID,
-				"key", key,
-				"error", err.Error(),
-			)
-		}
+		s.logger.Error("Failed to decrypt secret",
+			"tenant_id", tenantID,
+			"key", key,
+			"error", err.Error(),
+		)
 		return "", fmt.Errorf("failed to decrypt secret: %w", err)
 	}
 
 	return plainValue, nil
 }
 
-// ListSecrets lists all secrets for a tenant
+// List lists all secrets for a tenant
 //
 // Returns masked values only (not decrypted)
 // Ordered by key ASC
-func (s *SecretService) ListSecrets(ctx context.Context, tenantID string) ([]*model.Secret, error) {
+func (s *SecretService) List(ctx context.Context, tenantID string) ([]*model.Secret, error) {
 	secrets, err := s.repo.ListSecrets(ctx, tenantID)
 	return secrets, sanitizeError(s.logger, "list secrets", err)
 }
 
-// DeleteSecret removes a secret
+// Delete removes a secret
 //
 // Returns error if secret not found
-func (s *SecretService) DeleteSecret(ctx context.Context, tenantID, key string) error {
-	if s.logger != nil {
-		s.logger.Info("Deleting secret",
-			"tenant_id", tenantID,
-			"key", key,
-		)
-	}
+func (s *SecretService) Delete(ctx context.Context, tenantID, key string) error {
+	s.logger.Info("Deleting secret",
+		"tenant_id", tenantID,
+		"key", key,
+	)
 
 	err := s.repo.DeleteSecret(ctx, tenantID, key)
 	if err != nil {
 		return sanitizeError(s.logger, "delete secret", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Secret deleted successfully",
-			"tenant_id", tenantID,
-			"key", key,
-		)
-	}
+	s.logger.Info("Secret deleted successfully",
+		"tenant_id", tenantID,
+		"key", key,
+	)
 
 	return nil
 }
@@ -192,8 +182,8 @@ func (s *SecretService) MarkVerified(ctx context.Context, tenantID, key string) 
 	return sanitizeError(s.logger, "mark secret verified", s.repo.UpdateSecretVerified(ctx, tenantID, key))
 }
 
-// CountByTenant returns the count of secrets for a tenant
-func (s *SecretService) CountByTenant(ctx context.Context, tenantID string) (int, error) {
+// Count returns the count of secrets for a tenant
+func (s *SecretService) Count(ctx context.Context, tenantID string) (int, error) {
 	n, err := s.repo.CountSecretsByTenant(ctx, tenantID)
 	return n, sanitizeError(s.logger, "count secrets", err)
 }
@@ -206,6 +196,14 @@ func (s *SecretService) CountByTenant(ctx context.Context, tenantID string) (int
 // (tenantID, key) context via the GCM additional authenticated data.
 //
 // Output is "v1:" + base64(nonce (12 bytes) + encrypted data + auth tag (16 bytes)).
+//
+// The 96-bit nonce is random per call under a single, long-lived key. Random GCM
+// nonces stay collision-safe well past any realistic tenant-secret write volume
+// (the birthday bound is on the order of 2^32 encryptions per key), so this is safe
+// at expected scale. Note there is no built-in key-rotation / re-encryption helper
+// and no per-tenant key derivation: rotating SecretConfig.EncryptionKey requires
+// decrypting with the old key and re-encrypting with the new one at the application
+// layer (see SECURITY.md, "Rotation Expectations").
 func (s *SecretService) encrypt(plaintext, tenantID, key string) (string, error) {
 	block, err := aes.NewCipher(s.encryptionKey)
 	if err != nil {

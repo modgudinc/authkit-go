@@ -3,7 +3,34 @@
 
 package service
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/modgudinc/authkit-go/model"
+)
+
+func TestCreateInvitationRejectsInvalidInput(t *testing.T) {
+	// Validation runs before any repository call, so a nil repo is fine here.
+	service := NewInvitationService(nil, nil)
+
+	excessiveUses := MaxInvitationUses + 1
+	cases := map[string]model.CreateInvitationRequest{
+		"empty email":      {TenantID: "acme.test", Email: ""},
+		"malformed email":  {TenantID: "acme.test", Email: "not-an-email"},
+		"empty domain":     {TenantID: "acme.test", Email: "user@"},
+		"whitespace local": {TenantID: "acme.test", Email: "a b@acme.test"},
+		"excessive uses":   {TenantID: "acme.test", Email: "user@acme.test", MaxUses: &excessiveUses},
+	}
+
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := service.Create(context.Background(), req); err == nil {
+				t.Fatal("expected a validation error, got nil")
+			}
+		})
+	}
+}
 
 func TestInvitationServiceGenerateInvitationCode(t *testing.T) {
 	service := NewInvitationService(nil, nil)

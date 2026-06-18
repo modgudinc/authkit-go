@@ -6,7 +6,6 @@ package repository
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -172,47 +171,10 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 		return nil, uuid.Nil, fmt.Errorf("failed to consume refresh token: %w", err)
 	}
 
-	userQuery := `
-		SELECT
-			id, email, password_hash, tenant_id, display_name, roles, token_version,
-			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
-			created_at, updated_at
-		FROM {{schema}}.users
-		WHERE id = $1
-	`
-
-	var user model.User
-	var rolesJSON []byte
-	var disabledAt, lockedUntil, lastFailedLogin, lastLogin *time.Time
-	if err := tx.QueryRowContext(ctx, r.q(userQuery), userID).Scan(
-		&user.ID,
-		&user.Email,
-		&user.PasswordHash,
-		&user.TenantID,
-		&user.DisplayName,
-		&rolesJSON,
-		&user.TokenVersion,
-		&user.IsEnabled,
-		&disabledAt,
-		&user.IsLocked,
-		&lockedUntil,
-		&user.FailedLoginCount,
-		&lastFailedLogin,
-		&lastLogin,
-		&user.CreatedAt,
-		&user.UpdatedAt,
-	); err != nil {
+	user, err := scanUser(tx.QueryRowContext(ctx, r.q(`SELECT `+userColumns+` FROM {{schema}}.users WHERE id = $1`), userID))
+	if err != nil {
 		return nil, uuid.Nil, fmt.Errorf("failed to get user for refresh token: %w", err)
 	}
-
-	if err := json.Unmarshal(rolesJSON, &user.Roles); err != nil {
-		return nil, uuid.Nil, fmt.Errorf("failed to unmarshal roles: %w", err)
-	}
-
-	user.DisabledAt = disabledAt
-	user.LockedUntil = lockedUntil
-	user.LastFailedLoginAt = lastFailedLogin
-	user.LastLoginAt = lastLogin
 
 	tokenID, err := uuid.NewV7()
 	if err != nil {
@@ -247,7 +209,7 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 	}
 	committed = true
 
-	return &user, tokenID, nil
+	return user, tokenID, nil
 }
 
 // ============================================================================
@@ -406,16 +368,34 @@ func (r *Repository) DeleteByTokenHash(ctx context.Context, tokenHash string) er
 		return fmt.Errorf("failed to delete refresh token: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
+	return requireRowsAffected(result, fmt.Errorf("refresh token not found: %w", model.ErrNotFound))
+}
+
+// ============================================================================
+// RevokeByTokenHash - Soft-revokes a specific refresh token by its hash (sets
+// revoked_at) rather than deleting it, so a later replay of the same token is
+// detected as reuse/theft by RotateRefreshToken — which, on a deleted row, would
+// instead see a missing token and report a benign ErrInvalidRefreshToken. Used for
+// single-session logout.
+//
+// The retained row is removed by DeleteExpired after expiry. Returns
+// model.ErrNotFound when no active (non-revoked) token matches the hash, which the
+// idempotent logout path treats as already-revoked success.
+// ============================================================================
+func (r *Repository) RevokeByTokenHash(ctx context.Context, tokenHash string) error {
+	query := `
+		UPDATE {{schema}}.refresh_tokens
+		SET revoked_at = $1
+		WHERE token_hash = $2
+		  AND revoked_at IS NULL
+	`
+
+	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), tokenHash)
 	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
+		return fmt.Errorf("failed to revoke refresh token: %w", err)
 	}
 
-	if rowsAffected == 0 {
-		return fmt.Errorf("refresh token not found: %w", model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("refresh token not found: %w", model.ErrNotFound))
 }
 
 // ============================================================================

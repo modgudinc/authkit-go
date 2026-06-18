@@ -3,7 +3,14 @@
 
 package service
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/modgudinc/authkit-go/model"
+)
 
 func TestTenantServiceValidateDomain(t *testing.T) {
 	service := NewTenantService(nil, nil)
@@ -18,6 +25,17 @@ func TestTenantServiceValidateDomain(t *testing.T) {
 		if err := service.validateDomain(domain); err == nil {
 			t.Fatalf("expected %q to be invalid", domain)
 		}
+	}
+}
+
+func TestUpdateSettingsRejectsOversizedPayload(t *testing.T) {
+	// Validation happens before any repository use, so a nil repo is fine here.
+	service := NewTenantService(nil, nil)
+
+	oversized := map[string]interface{}{"blob": strings.Repeat("x", MaxTenantSettingsBytes)}
+	err := service.UpdateSettings(context.Background(), "acme.test", oversized)
+	if !errors.Is(err, model.ErrValueTooLong) {
+		t.Fatalf("expected ErrValueTooLong for oversized settings, got %v", err)
 	}
 }
 

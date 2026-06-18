@@ -17,7 +17,7 @@ type OTPGenerateRequest struct {
 	TenantID           string        // Tenant the code belongs to
 	Email              string        // Recipient email (normalized by the service)
 	Purpose            string        // Caller-defined purpose (e.g. "signup", "reset-password")
-	ExpirationDuration time.Duration // How long the issued code remains valid
+	ExpirationDuration time.Duration // How long the issued code remains valid. Required and must be > 0; a zero/omitted value is rejected (it would yield an already-expired code).
 }
 
 // OTPValidateRequest is the input to OTPService.Validate. The fields must match the

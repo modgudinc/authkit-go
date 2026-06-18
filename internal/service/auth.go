@@ -19,12 +19,15 @@ import (
 // security-critical auth logic be unit-tested with an in-memory fake.
 type authRepository interface {
 	GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error)
+	GetByEmailFromPrimary(ctx context.Context, email, tenantID string) (*model.User, error)
 	GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error)
+	GetByIDFromPrimary(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error)
 	UnlockByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error
 	RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error)
 	UpdateLastLoginByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error
 	VerifyPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID string) (string, error)
 	SetPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error
+	SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error
 	IncrementTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error
 }
 
@@ -65,11 +68,17 @@ func NewAuthService(
 		passwordService: passwordService,
 		tokenService:    tokenService,
 		jwtService:      jwtService,
-		logger:          logger,
+		logger:          ensureLogger(logger),
 	}
 }
 
 // Login authenticates a user with email and password
+//
+// Security note: the only built-in online-guessing defense is the per-account
+// failed-login lockout (MaxFailedLoginAttempts, then a timed lock). That bounds
+// guessing against a single account but does NOT stop password spraying across
+// many accounts or distributed guessing — the caller MUST apply IP/global rate
+// limiting in front of Login. See SECURITY.md ("Caller-Owned Controls").
 //
 // Parameters:
 //   - ctx: Context for database operations
@@ -105,29 +114,27 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	// Normalize the email so lookups match how users are stored (see normalizeEmail).
 	email := normalizeEmail(req.Email)
 
-	if s.logger != nil {
-		s.logger.Info("User login attempt",
-			"email", maskEmail(email),
-			"tenant_id", req.TenantID,
-		)
-	}
+	s.logger.Info("User login attempt",
+		"email", maskEmail(email),
+		"tenant_id", req.TenantID,
+	)
 
-	// 1. Get user by email + tenant
-	user, err := s.repo.GetByEmail(ctx, email, req.TenantID)
+	// 1. Get user by email + tenant. Read from the PRIMARY: the is_enabled/is_locked
+	// gate below must observe an admin disable/lock (or an auto-lock just written by
+	// RegisterFailedLogin) immediately, not after replica catch-up.
+	user, err := s.repo.GetByEmailFromPrimary(ctx, email, req.TenantID)
 	if err != nil {
 		// Burn a bcrypt comparison so the unknown-email path takes about as long
 		// as the wrong-password path (prevents username enumeration by timing),
 		// and return a generic error that does not reveal whether the account exists.
 		s.passwordService.DummyVerify(req.Password)
-		if s.logger != nil {
-			// Do not log err.Error() here: it can echo lookup/query context and,
-			// together with the email, turns this line into an account-enumeration
-			// list. The generic ErrInvalidCredentials is what callers receive.
-			s.logger.Warn("Login failed: user not found",
-				"email", maskEmail(email),
-				"tenant_id", req.TenantID,
-			)
-		}
+		// Do not log err.Error() here: it can echo lookup/query context and,
+		// together with the email, turns this line into an account-enumeration
+		// list. The generic ErrInvalidCredentials is what callers receive.
+		s.logger.Warn("Login failed: user not found",
+			"email", maskEmail(email),
+			"tenant_id", req.TenantID,
+		)
 		return nil, model.ErrInvalidCredentials
 	}
 
@@ -136,12 +143,10 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	// not-found/wrong-password; equalize timing with a dummy bcrypt compare.
 	if !user.IsEnabled {
 		s.passwordService.DummyVerify(req.Password)
-		if s.logger != nil {
-			s.logger.Warn("Login failed: account disabled",
-				"user_id", user.ID.String(),
-				"email", maskEmail(email),
-			)
-		}
+		s.logger.Warn("Login failed: account disabled",
+			"user_id", user.ID.String(),
+			"email", maskEmail(email),
+		)
 		return nil, model.ErrInvalidCredentials
 	}
 
@@ -150,16 +155,14 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		if user.LockedUntil != nil && time.Now().After(*user.LockedUntil) {
 			// Auto-unlock: locked_until has passed
 			if err := s.repo.UnlockByTenant(ctx, user.ID, req.TenantID); err != nil {
-				if s.logger != nil {
-					s.logger.Error("Failed to auto-unlock account", "error", err.Error())
-				}
+				s.logger.Error("Failed to auto-unlock account", "error", err.Error())
 				// Continue anyway - will try to authenticate
 			} else {
-				if s.logger != nil {
-					s.logger.Info("Account auto-unlocked", "user_id", user.ID.String())
-				}
-				// Refresh user data
-				user, err = s.repo.GetByID(ctx, user.ID, req.TenantID)
+				s.logger.Info("Account auto-unlocked", "user_id", user.ID.String())
+				// Refresh user data from the PRIMARY: the unlock we just committed
+				// (UnlockByTenant writes rw) must be visible here, so re-reading from a
+				// lagging replica could still show the account locked.
+				user, err = s.repo.GetByIDFromPrimary(ctx, user.ID, req.TenantID)
 				if err != nil {
 					return nil, sanitizeError(s.logger, "refresh user data", err)
 				}
@@ -168,12 +171,10 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 			// Still locked. Generic error + dummy compare so a locked account is
 			// indistinguishable (by message or timing) from not-found/wrong-password.
 			s.passwordService.DummyVerify(req.Password)
-			if s.logger != nil {
-				s.logger.Warn("Login failed: account locked",
-					"user_id", user.ID.String(),
-					"locked_until", user.LockedUntil,
-				)
-			}
+			s.logger.Warn("Login failed: account locked",
+				"user_id", user.ID.String(),
+				"locked_until", user.LockedUntil,
+			)
 			return nil, model.ErrInvalidCredentials
 		}
 	}
@@ -182,12 +183,10 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	err = s.passwordService.VerifyPassword(req.Password, user.PasswordHash)
 	if err != nil {
 		// Password verification failed
-		if s.logger != nil {
-			s.logger.Warn("Password verification failed",
-				"user_id", user.ID.String(),
-				"email", maskEmail(email),
-			)
-		}
+		s.logger.Warn("Password verification failed",
+			"user_id", user.ID.String(),
+			"email", maskEmail(email),
+		)
 
 		// Record the failed attempt and lock at the threshold atomically in the DB.
 		// The lock decision uses the authoritative post-increment count returned by
@@ -196,24 +195,18 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		count, locked, regErr := s.repo.RegisterFailedLogin(ctx, user.ID, MaxFailedLoginAttempts, LockDuration)
 		switch {
 		case regErr != nil:
-			if s.logger != nil {
-				s.logger.Error("Failed to record failed login attempt", "error", regErr.Error())
-			}
+			s.logger.Error("Failed to record failed login attempt", "error", regErr.Error())
 			// Continue anyway - authentication still failed.
 		case locked:
-			if s.logger != nil {
-				s.logger.Warn("Account locked after max failed attempts",
-					"user_id", user.ID.String(),
-					"failed_attempts", count,
-				)
-			}
+			s.logger.Warn("Account locked after max failed attempts",
+				"user_id", user.ID.String(),
+				"failed_attempts", count,
+			)
 		default:
-			if s.logger != nil {
-				s.logger.Info("Failed login attempt recorded",
-					"user_id", user.ID.String(),
-					"failed_attempts", count,
-				)
-			}
+			s.logger.Info("Failed login attempt recorded",
+				"user_id", user.ID.String(),
+				"failed_attempts", count,
+			)
 		}
 
 		return nil, model.ErrInvalidCredentials
@@ -223,37 +216,29 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	// Reset failed login count if any
 	if user.FailedLoginCount > 0 {
 		if err := s.repo.UnlockByTenant(ctx, user.ID, req.TenantID); err != nil {
-			if s.logger != nil {
-				s.logger.Warn("Failed to reset failed login count", "error", err.Error())
-			}
+			s.logger.Warn("Failed to reset failed login count", "error", err.Error())
 			// Continue anyway - user authenticated successfully
 		}
 	}
 
 	// 6. Update last login timestamp
 	if err := s.repo.UpdateLastLoginByTenant(ctx, user.ID, req.TenantID); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("Failed to update last login timestamp", "error", err.Error())
-		}
+		s.logger.Warn("Failed to update last login timestamp", "error", err.Error())
 		// Continue anyway - non-critical operation
 	}
 
 	// 7. Generate token pair
 	tokenPair, err := s.tokenService.GenerateTokenPair(ctx, user, req.SessionInfo)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to generate token pair", "error", err.Error())
-		}
-		return nil, sanitizeError(nil, "generate tokens", err)
+		s.logger.Error("Failed to generate token pair", "error", err.Error())
+		return nil, sanitizeError(s.logger, "generate tokens", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("User login successful",
-			"user_id", user.ID.String(),
-			"email", maskEmail(email),
-			"tenant_id", req.TenantID,
-		)
-	}
+	s.logger.Info("User login successful",
+		"user_id", user.ID.String(),
+		"email", maskEmail(email),
+		"tenant_id", req.TenantID,
+	)
 
 	// 8. Return LoginResponse
 	return &model.LoginResponse{
@@ -280,20 +265,14 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 //	    return fmt.Errorf("logout failed: %w", err)
 //	}
 func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
-	if s.logger != nil {
-		s.logger.Info("User logout")
-	}
+	s.logger.Info("User logout")
 
 	if err := s.tokenService.RevokeRefreshToken(ctx, refreshToken); err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to revoke refresh token", "error", err.Error())
-		}
-		return sanitizeError(nil, "logout", err)
+		s.logger.Error("Failed to revoke refresh token", "error", err.Error())
+		return sanitizeError(s.logger, "logout", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("User logged out successfully")
-	}
+	s.logger.Info("User logged out successfully")
 
 	return nil
 }
@@ -328,37 +307,34 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 //	    return fmt.Errorf("logout all failed: %w", err)
 //	}
 func (s *AuthService) LogoutAll(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	if s.logger != nil {
-		s.logger.Info("Logout from all devices", "user_id", userID, "tenant_id", tenantID)
-	}
+	s.logger.Info("Logout from all devices", "user_id", userID, "tenant_id", tenantID)
 
 	// 1. Increment token version (invalidates all JWTs) scoped to the tenant. This
 	// also gates the whole operation on tenant ownership: a cross-tenant userID
 	// matches no row (ErrNotFound) and we stop here without revoking any tokens.
 	if err := s.repo.IncrementTokenVersionByTenant(ctx, userID, tenantID); err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to increment token version", "error", err.Error())
-		}
-		return sanitizeError(nil, "increment token version", err)
+		s.logger.Error("Failed to increment token version", "error", err.Error())
+		return sanitizeError(s.logger, "increment token version", err)
 	}
 
 	// 2. Revoke all refresh tokens (refresh tokens are keyed by user_id and carry
 	// no tenant column; step 1 has already proven the user belongs to the tenant).
 	if err := s.tokenService.RevokeAllUserTokens(ctx, userID); err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to revoke all refresh tokens", "error", err.Error())
-		}
-		return sanitizeError(nil, "revoke refresh tokens", err)
+		s.logger.Error("Failed to revoke all refresh tokens", "error", err.Error())
+		return sanitizeError(s.logger, "revoke refresh tokens", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Logged out from all devices successfully", "user_id", userID, "tenant_id", tenantID)
-	}
+	s.logger.Info("Logged out from all devices successfully", "user_id", userID, "tenant_id", tenantID)
 
 	return nil
 }
 
 // RefreshToken validates refresh token and returns new token pair (token rotation)
+//
+// Security note: like Login, RefreshToken has no built-in rate limiting. Refresh
+// tokens are 256-bit random and not feasibly guessable, but the caller should
+// still throttle this endpoint to bound abuse. See SECURITY.md ("Caller-Owned
+// Controls").
 //
 // Parameters:
 //   - ctx: Context for database operations
@@ -384,31 +360,23 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID uuid.UUID, tenantID 
 //	}
 //	// Return new tokens to client
 func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest) (*model.RefreshResponse, error) {
-	if s.logger != nil {
-		s.logger.Info("Refreshing tokens")
-	}
+	s.logger.Info("Refreshing tokens")
 
 	// Rotate tokens via TokenService
 	tokenPair, err := s.tokenService.RefreshTokenPair(ctx, req.RefreshToken, req.SessionInfo)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to refresh token pair", "error", err.Error())
-		}
-		return nil, sanitizeError(nil, "refresh tokens", err)
+		s.logger.Error("Failed to refresh token pair", "error", err.Error())
+		return nil, sanitizeError(s.logger, "refresh tokens", err)
 	}
 
 	// Get user ID from new access token
 	claims, err := s.jwtService.ValidateAccessToken(tokenPair.AccessToken)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to validate new access token", "error", err.Error())
-		}
-		return nil, sanitizeError(nil, "validate new token", err)
+		s.logger.Error("Failed to validate new access token", "error", err.Error())
+		return nil, sanitizeError(s.logger, "validate new token", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Tokens refreshed successfully", "user_id", claims.UserID)
-	}
+	s.logger.Info("Tokens refreshed successfully", "user_id", claims.UserID)
 
 	return &model.RefreshResponse{
 		AccessToken:  tokenPair.AccessToken,
@@ -446,39 +414,34 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 	// 1. Validate JWT signature and expiration
 	claims, err := s.jwtService.ValidateAccessToken(token)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("JWT validation failed", "error", err.Error())
-		}
+		s.logger.Warn("JWT validation failed", "error", err.Error())
 		return nil, fmt.Errorf("invalid token: %w", model.ErrInvalidToken)
 	}
 
 	// 2. Get user from database (claims.UserID is a uuid.UUID; a malformed token
-	// id would already have failed JWT claim parsing above).
-	user, err := s.repo.GetByID(ctx, claims.UserID, claims.TenantID)
+	// id would already have failed JWT claim parsing above). Read from the PRIMARY:
+	// this is the revocation/account-status gate, so token_version, is_enabled and
+	// is_locked must reflect LogoutAll / ChangePassword / disable / lock writes
+	// immediately rather than lagging a read replica (which would fail open).
+	user, err := s.repo.GetByIDFromPrimary(ctx, claims.UserID, claims.TenantID)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("User not found for JWT", "user_id", claims.UserID, "error", err.Error())
-		}
+		s.logger.Warn("User not found for JWT", "user_id", claims.UserID, "error", err.Error())
 		return nil, fmt.Errorf("user not found: %w", model.ErrInvalidToken)
 	}
 
 	// 3. Check token_version matches (detect revoked tokens)
 	if user.TokenVersion != claims.TokenVersion {
-		if s.logger != nil {
-			s.logger.Warn("Token version mismatch",
-				"user_id", claims.UserID,
-				"token_version", claims.TokenVersion,
-				"current_version", user.TokenVersion,
-			)
-		}
+		s.logger.Warn("Token version mismatch",
+			"user_id", claims.UserID,
+			"token_version", claims.TokenVersion,
+			"current_version", user.TokenVersion,
+		)
 		return nil, model.ErrTokenRevoked
 	}
 
 	// 4. Check account is enabled
 	if !user.IsEnabled {
-		if s.logger != nil {
-			s.logger.Warn("Account disabled", "user_id", claims.UserID)
-		}
+		s.logger.Warn("Account disabled", "user_id", claims.UserID)
 		return nil, model.ErrAccountDisabled
 	}
 
@@ -487,24 +450,18 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 		if user.LockedUntil != nil && time.Now().After(*user.LockedUntil) {
 			// Auto-unlock
 			if err := s.repo.UnlockByTenant(ctx, user.ID, claims.TenantID); err != nil {
-				if s.logger != nil {
-					s.logger.Warn("Failed to auto-unlock account", "error", err.Error())
-				}
+				s.logger.Warn("Failed to auto-unlock account", "error", err.Error())
 				// Still return locked error
 				return nil, model.ErrAccountLocked
 			}
 			// Successfully unlocked, allow access
 		} else {
-			if s.logger != nil {
-				s.logger.Warn("Account locked", "user_id", claims.UserID)
-			}
+			s.logger.Warn("Account locked", "user_id", claims.UserID)
 			return nil, model.ErrAccountLocked
 		}
 	}
 
-	if s.logger != nil {
-		s.logger.Info("JWT validated successfully", "user_id", claims.UserID)
-	}
+	s.logger.Info("JWT validated successfully", "user_id", claims.UserID)
 
 	return claims, nil
 }
@@ -519,13 +476,12 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 //   - Error if password change fails
 //
 // Flow:
-//  1. Get user by ID
+//  1. Read the current password hash (tenant-scoped)
 //  2. Verify old password
-//  3. Validate new password strength (optional)
+//  3. Validate new password strength
 //  4. Hash new password
-//  5. Update password in database
-//  6. Increment token_version (invalidate all JWTs)
-//  7. Revoke all refresh tokens (logout from all devices)
+//  5. Atomically update the password AND bump token_version (invalidate all JWTs)
+//  6. Revoke all refresh tokens (logout from all devices)
 //
 // Example:
 //
@@ -539,26 +495,20 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 //	    return fmt.Errorf("password change failed: %w", err)
 //	}
 func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswordRequest) error {
-	if s.logger != nil {
-		s.logger.Info("Changing password", "user_id", req.UserID)
-	}
+	s.logger.Info("Changing password", "user_id", req.UserID)
 
 	// 1. Get current password hash, scoped to the tenant so a caller-supplied user
 	// id from another tenant cannot be targeted (returns ErrNotFound on mismatch).
 	currentHash, err := s.repo.VerifyPasswordByTenant(ctx, req.UserID, req.TenantID)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to get current password hash", "error", err.Error())
-		}
-		return sanitizeError(nil, "retrieve user password", err)
+		s.logger.Error("Failed to get current password hash", "error", err.Error())
+		return sanitizeError(s.logger, "retrieve user password", err)
 	}
 
 	// 2. Verify old password
 	err = s.passwordService.VerifyPassword(req.OldPassword, currentHash)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("Old password verification failed", "user_id", req.UserID)
-		}
+		s.logger.Warn("Old password verification failed", "user_id", req.UserID)
 		return fmt.Errorf("incorrect old password: %w", model.ErrIncorrectPassword)
 	}
 
@@ -566,46 +516,41 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 	requirements := model.DefaultPasswordRequirements()
 	err = s.passwordService.ValidatePasswordStrength(req.NewPassword, requirements)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("New password validation failed", "error", err.Error())
-		}
-		return sanitizeError(nil, "validate password strength", err)
+		s.logger.Warn("New password validation failed", "error", err.Error())
+		return sanitizeError(s.logger, "validate password strength", err)
 	}
 
 	// 4. Hash new password
 	newHash, err := s.passwordService.HashPassword(req.NewPassword)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to hash new password", "error", err.Error())
-		}
-		return sanitizeError(nil, "hash password", err)
+		s.logger.Error("Failed to hash new password", "error", err.Error())
+		return sanitizeError(s.logger, "hash password", err)
 	}
 
-	// 5. Update password in database (tenant-scoped, as in step 1)
-	if err := s.repo.SetPasswordByTenant(ctx, req.UserID, req.TenantID, newHash); err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to update password", "error", err.Error())
-		}
-		return sanitizeError(nil, "update password", err)
+	// 5. Atomically update the password AND bump token_version in a single
+	// tenant-scoped UPDATE. Doing both at once means the change can never be left
+	// half-applied — there is no window where the password is changed but old access
+	// tokens (<=15m) still validate, or vice versa.
+	if err := s.repo.SetPasswordAndBumpTokenVersionByTenant(ctx, req.UserID, req.TenantID, newHash); err != nil {
+		s.logger.Error("Failed to update password", "error", err.Error())
+		return sanitizeError(s.logger, "update password", err)
 	}
 
-	// 6. Invalidate all sessions (logout from all devices).
-	// The password is already changed at this point, but session revocation
-	// (refresh-token deletion + token_version bump) is part of the operation's
-	// security contract: if it fails we must NOT report success, otherwise old
-	// access tokens (<=15m) and refresh tokens (<=7d) silently keep working
-	// against the new password. Surface the failure so the caller can react
-	// (retry revocation / force re-login).
-	if err := s.LogoutAll(ctx, req.UserID, req.TenantID); err != nil {
-		if s.logger != nil {
-			s.logger.Error("Password updated but session revocation failed", "user_id", req.UserID, "error", err.Error())
-		}
-		return sanitizeError(nil, "revoke existing sessions", err)
+	// 6. Revoke all refresh tokens. The password change and JWT invalidation are
+	// already durably committed by step 5; this removes the refresh tokens so a
+	// leftover one cannot mint fresh access tokens against the new password. It is a
+	// follow-up step rather than part of the atomic write, but its failure is still
+	// surfaced (NOT reported as success), since an undeleted refresh token stays
+	// usable for up to RefreshExpiry. On failure the caller should retry revocation
+	// via LogoutAll — re-running ChangePassword will not work because the old
+	// password no longer verifies. Tenant ownership was already proven in step 1
+	// (VerifyPasswordByTenant), so revoking by user_id here is safe.
+	if err := s.tokenService.RevokeAllUserTokens(ctx, req.UserID); err != nil {
+		s.logger.Error("Password updated but refresh-token revocation failed", "user_id", req.UserID, "error", err.Error())
+		return sanitizeError(s.logger, "revoke existing sessions", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Password changed successfully", "user_id", req.UserID)
-	}
+	s.logger.Info("Password changed successfully", "user_id", req.UserID)
 
 	return nil
 }

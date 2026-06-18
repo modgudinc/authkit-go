@@ -15,6 +15,13 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
+// MaxTenantSettingsBytes caps the serialized size of the tenant Settings JSONB
+// blob. Settings is an application-defined bag stored in a JSONB column with no
+// width limit, so without a cap a very large or deeply nested map is an unbounded
+// allocation / storage-DoS vector. 1 MiB is far larger than any reasonable
+// settings object; an over-cap payload is rejected with model.ErrValueTooLong.
+const MaxTenantSettingsBytes = 1 << 20 // 1 MiB
+
 // TenantService handles tenant-related business logic including
 // tenant creation, retrieval, settings management, and domain management.
 type TenantService struct {
@@ -26,83 +33,71 @@ type TenantService struct {
 func NewTenantService(repo *repository.Repository, logger logger.Logger) *TenantService {
 	return &TenantService{
 		repo:   repo,
-		logger: logger,
+		logger: ensureLogger(logger),
 	}
 }
 
-// GetTenant retrieves a tenant by tenant_id
+// Get retrieves a tenant by tenant_id
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
 //   - tenantID: Tenant identifier (primary email domain)
 //
 // Returns the tenant or error if not found
-func (s *TenantService) GetTenant(ctx context.Context, tenantID string) (*model.Tenant, error) {
-	if s.logger != nil {
-		s.logger.Info("Retrieving tenant",
-			"tenant_id", tenantID,
-		)
-	}
+func (s *TenantService) Get(ctx context.Context, tenantID string) (*model.Tenant, error) {
+	s.logger.Info("Retrieving tenant",
+		"tenant_id", tenantID,
+	)
 
 	tenant, err := s.repo.GetTenant(ctx, tenantID)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to retrieve tenant",
-				"tenant_id", tenantID,
-				"error", err.Error(),
-			)
-		}
-		return nil, sanitizeError(nil, "get tenant", err)
+		s.logger.Error("Failed to retrieve tenant",
+			"tenant_id", tenantID,
+			"error", err.Error(),
+		)
+		return nil, sanitizeError(s.logger, "get tenant", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Tenant retrieved successfully",
-			"tenant_id", tenantID,
-		)
-	}
+	s.logger.Info("Tenant retrieved successfully",
+		"tenant_id", tenantID,
+	)
 
 	return tenant, nil
 }
 
-// GetTenantByDomain retrieves a tenant that has the specified domain in its allowed_domains
+// GetByDomain retrieves a tenant that has the specified domain in its allowed_domains
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
 //   - domain: Email domain to search for (e.g., "acme.com")
 //
 // Returns the tenant or error if not found
-func (s *TenantService) GetTenantByDomain(ctx context.Context, domain string) (*model.Tenant, error) {
-	if s.logger != nil {
-		s.logger.Info("Retrieving tenant by domain",
-			"domain", domain,
-		)
-	}
+func (s *TenantService) GetByDomain(ctx context.Context, domain string) (*model.Tenant, error) {
+	s.logger.Info("Retrieving tenant by domain",
+		"domain", domain,
+	)
 
 	// Normalize domain (lowercase, trim whitespace)
 	domain = strings.ToLower(strings.TrimSpace(domain))
 
 	tenant, err := s.repo.GetTenantByDomain(ctx, domain)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to retrieve tenant by domain",
-				"domain", domain,
-				"error", err.Error(),
-			)
-		}
-		return nil, sanitizeError(nil, "get tenant by domain", err)
+		s.logger.Error("Failed to retrieve tenant by domain",
+			"domain", domain,
+			"error", err.Error(),
+		)
+		return nil, sanitizeError(s.logger, "get tenant by domain", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Tenant retrieved successfully by domain",
-			"domain", domain,
-			"tenant_id", tenant.TenantID,
-		)
-	}
+	s.logger.Info("Tenant retrieved successfully by domain",
+		"domain", domain,
+		"tenant_id", tenant.TenantID,
+	)
 
 	return tenant, nil
 }
 
-// CreateTenant creates a new tenant/organization
+// Create creates a new tenant/organization
 //
 // Flow:
 // 1. Validate allowed_domains (all must be valid domains)
@@ -113,14 +108,12 @@ func (s *TenantService) GetTenantByDomain(ctx context.Context, domain string) (*
 //   - req: CreateTenantRequest with tenant details
 //
 // Returns the created tenant or error
-func (s *TenantService) CreateTenant(ctx context.Context, req model.CreateTenantRequest) (*model.Tenant, error) {
-	if s.logger != nil {
-		s.logger.Info("Creating tenant",
-			"tenant_id", req.TenantID,
-			"name", req.Name,
-			"allowed_domains", strings.Join(req.AllowedDomains, ","),
-		)
-	}
+func (s *TenantService) Create(ctx context.Context, req model.CreateTenantRequest) (*model.Tenant, error) {
+	s.logger.Info("Creating tenant",
+		"tenant_id", req.TenantID,
+		"name", req.Name,
+		"allowed_domains", strings.Join(req.AllowedDomains, ","),
+	)
 
 	// A tenant must have at least one allowed domain (the schema enforces this with
 	// a NOT NULL + non-empty CHECK; reject up front with a clear error instead of
@@ -131,7 +124,7 @@ func (s *TenantService) CreateTenant(ctx context.Context, req model.CreateTenant
 
 	// Validate and normalize all allowed_domains. Domains are lowercased on write
 	// so the (already-lowercased) lookups in ValidateDomainAccess and
-	// GetTenantByDomain match — fulfilling the documented case-insensitive
+	// GetByDomain match — fulfilling the documented case-insensitive
 	// matching contract.
 	for i, domain := range req.AllowedDomains {
 		normalized := strings.ToLower(strings.TrimSpace(domain))
@@ -144,33 +137,27 @@ func (s *TenantService) CreateTenant(ctx context.Context, req model.CreateTenant
 	// Create tenant
 	err := s.repo.CreateTenant(ctx, req)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to create tenant",
-				"tenant_id", req.TenantID,
-				"error", err.Error(),
-			)
-		}
-		return nil, sanitizeError(nil, "create tenant", err)
+		s.logger.Error("Failed to create tenant",
+			"tenant_id", req.TenantID,
+			"error", err.Error(),
+		)
+		return nil, sanitizeError(s.logger, "create tenant", err)
 	}
 
 	// Retrieve the created tenant
 	tenant, err := s.repo.GetTenant(ctx, req.TenantID)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to retrieve created tenant",
-				"tenant_id", req.TenantID,
-				"error", err.Error(),
-			)
-		}
-		return nil, sanitizeError(nil, "retrieve created tenant", err)
+		s.logger.Error("Failed to retrieve created tenant",
+			"tenant_id", req.TenantID,
+			"error", err.Error(),
+		)
+		return nil, sanitizeError(s.logger, "retrieve created tenant", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Tenant created successfully",
-			"tenant_id", req.TenantID,
-			"name", req.Name,
-		)
-	}
+	s.logger.Info("Tenant created successfully",
+		"tenant_id", req.TenantID,
+		"name", req.Name,
+	)
 
 	return tenant, nil
 }
@@ -189,41 +176,44 @@ func (s *TenantService) CreateTenant(ctx context.Context, req model.CreateTenant
 //
 // Returns error if validation or update fails
 func (s *TenantService) UpdateSettings(ctx context.Context, tenantID string, settings map[string]interface{}) error {
-	if s.logger != nil {
-		s.logger.Info("Updating tenant settings",
-			"tenant_id", tenantID,
-		)
-	}
+	s.logger.Info("Updating tenant settings",
+		"tenant_id", tenantID,
+	)
 
 	// Validate settings can be marshaled to JSON
 	settingsJSON, err := json.Marshal(settings)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Invalid settings JSON",
-				"tenant_id", tenantID,
-				"error", err.Error(),
-			)
-		}
+		s.logger.Error("Invalid settings JSON",
+			"tenant_id", tenantID,
+			"error", err.Error(),
+		)
 		return fmt.Errorf("invalid settings: %w", err)
+	}
+
+	// Bound the serialized size: Settings is a JSONB column with no width limit, so
+	// reject an oversized blob up front rather than allowing an unbounded write.
+	if len(settingsJSON) > MaxTenantSettingsBytes {
+		s.logger.Warn("Tenant settings exceed size cap",
+			"tenant_id", tenantID,
+			"size_bytes", len(settingsJSON),
+			"max_bytes", MaxTenantSettingsBytes,
+		)
+		return fmt.Errorf("tenant settings exceed the %d-byte maximum: %w", MaxTenantSettingsBytes, model.ErrValueTooLong)
 	}
 
 	// Update settings
 	err = s.repo.UpdateSettings(ctx, tenantID, string(settingsJSON))
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to update tenant settings",
-				"tenant_id", tenantID,
-				"error", err.Error(),
-			)
-		}
-		return sanitizeError(nil, "update tenant settings", err)
+		s.logger.Error("Failed to update tenant settings",
+			"tenant_id", tenantID,
+			"error", err.Error(),
+		)
+		return sanitizeError(s.logger, "update tenant settings", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Tenant settings updated successfully",
-			"tenant_id", tenantID,
-		)
-	}
+	s.logger.Info("Tenant settings updated successfully",
+		"tenant_id", tenantID,
+	)
 
 	return nil
 }
@@ -237,29 +227,23 @@ func (s *TenantService) UpdateSettings(ctx context.Context, tenantID string, set
 //
 // Returns error if update fails
 func (s *TenantService) UpdateName(ctx context.Context, tenantID, name string) error {
-	if s.logger != nil {
-		s.logger.Info("Updating tenant name",
-			"tenant_id", tenantID,
-			"name", name,
-		)
-	}
+	s.logger.Info("Updating tenant name",
+		"tenant_id", tenantID,
+		"name", name,
+	)
 
 	err := s.repo.UpdateName(ctx, tenantID, name)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to update tenant name",
-				"tenant_id", tenantID,
-				"error", err.Error(),
-			)
-		}
-		return sanitizeError(nil, "update tenant name", err)
+		s.logger.Error("Failed to update tenant name",
+			"tenant_id", tenantID,
+			"error", err.Error(),
+		)
+		return sanitizeError(s.logger, "update tenant name", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Tenant name updated successfully",
-			"tenant_id", tenantID,
-		)
-	}
+	s.logger.Info("Tenant name updated successfully",
+		"tenant_id", tenantID,
+	)
 
 	return nil
 }
@@ -277,12 +261,10 @@ func (s *TenantService) UpdateName(ctx context.Context, tenantID, name string) e
 //
 // Returns error if validation or update fails
 func (s *TenantService) SetAllowedDomains(ctx context.Context, tenantID string, domains []string) error {
-	if s.logger != nil {
-		s.logger.Info("Setting allowed domains",
-			"tenant_id", tenantID,
-			"domains", strings.Join(domains, ","),
-		)
-	}
+	s.logger.Info("Setting allowed domains",
+		"tenant_id", tenantID,
+		"domains", strings.Join(domains, ","),
+	)
 
 	// A tenant must keep at least one allowed domain (NOT NULL + non-empty CHECK in
 	// the schema); reject an empty list up front rather than emitting a raw
@@ -291,17 +273,15 @@ func (s *TenantService) SetAllowedDomains(ctx context.Context, tenantID string, 
 		return fmt.Errorf("at least one allowed_domain is required")
 	}
 
-	// Validate and normalize all domains (lowercased on write; see CreateTenant).
+	// Validate and normalize all domains (lowercased on write; see Create).
 	for i, domain := range domains {
 		normalized := strings.ToLower(strings.TrimSpace(domain))
 		if err := s.validateDomain(normalized); err != nil {
-			if s.logger != nil {
-				s.logger.Error("Invalid domain format",
-					"tenant_id", tenantID,
-					"domain", domain,
-					"error", err.Error(),
-				)
-			}
+			s.logger.Error("Invalid domain format",
+				"tenant_id", tenantID,
+				"domain", domain,
+				"error", err.Error(),
+			)
 			return fmt.Errorf("invalid domain '%s': %w", domain, err)
 		}
 		domains[i] = normalized
@@ -309,20 +289,16 @@ func (s *TenantService) SetAllowedDomains(ctx context.Context, tenantID string, 
 
 	err := s.repo.SetAllowedDomains(ctx, tenantID, domains)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to set allowed domains",
-				"tenant_id", tenantID,
-				"error", err.Error(),
-			)
-		}
-		return sanitizeError(nil, "set allowed domains", err)
+		s.logger.Error("Failed to set allowed domains",
+			"tenant_id", tenantID,
+			"error", err.Error(),
+		)
+		return sanitizeError(s.logger, "set allowed domains", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Allowed domains set successfully",
-			"tenant_id", tenantID,
-		)
-	}
+	s.logger.Info("Allowed domains set successfully",
+		"tenant_id", tenantID,
+	)
 
 	return nil
 }
@@ -340,98 +316,82 @@ func (s *TenantService) SetAllowedDomains(ctx context.Context, tenantID string, 
 //
 // Returns error if validation or update fails
 func (s *TenantService) AddAllowedDomain(ctx context.Context, tenantID, domain string) error {
-	if s.logger != nil {
-		s.logger.Info("Adding allowed domain",
-			"tenant_id", tenantID,
-			"domain", domain,
-		)
-	}
+	s.logger.Info("Adding allowed domain",
+		"tenant_id", tenantID,
+		"domain", domain,
+	)
 
-	// Normalize on write (lowercased; see CreateTenant) so it matches lookups.
+	// Normalize on write (lowercased; see Create) so it matches lookups.
 	domain = strings.ToLower(strings.TrimSpace(domain))
 
 	// Validate domain format
 	if err := s.validateDomain(domain); err != nil {
-		if s.logger != nil {
-			s.logger.Error("Invalid domain format",
-				"tenant_id", tenantID,
-				"domain", domain,
-				"error", err.Error(),
-			)
-		}
+		s.logger.Error("Invalid domain format",
+			"tenant_id", tenantID,
+			"domain", domain,
+			"error", err.Error(),
+		)
 		return fmt.Errorf("invalid domain: %w", err)
 	}
 
 	// Add domain (repository handles duplicate check)
 	err := s.repo.AddAllowedDomain(ctx, tenantID, domain)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to add allowed domain",
-				"tenant_id", tenantID,
-				"domain", domain,
-				"error", err.Error(),
-			)
-		}
-		return sanitizeError(nil, "add allowed domain", err)
-	}
-
-	if s.logger != nil {
-		s.logger.Info("Allowed domain added successfully",
+		s.logger.Error("Failed to add allowed domain",
 			"tenant_id", tenantID,
 			"domain", domain,
+			"error", err.Error(),
 		)
+		return sanitizeError(s.logger, "add allowed domain", err)
 	}
+
+	s.logger.Info("Allowed domain added successfully",
+		"tenant_id", tenantID,
+		"domain", domain,
+	)
 
 	return nil
 }
 
-// ListTenants lists all tenants (admin/debug operation)
+// List lists all tenants (admin/debug operation)
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
 //
 // Returns a list of all tenants ordered by created_at DESC
-func (s *TenantService) ListTenants(ctx context.Context) ([]*model.Tenant, error) {
-	if s.logger != nil {
-		s.logger.Info("Listing all tenants")
-	}
+func (s *TenantService) List(ctx context.Context) ([]*model.Tenant, error) {
+	s.logger.Info("Listing all tenants")
 
 	tenants, err := s.repo.ListAllTenants(ctx)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to list tenants",
-				"error", err.Error(),
-			)
-		}
-		return nil, sanitizeError(nil, "list tenants", err)
+		s.logger.Error("Failed to list tenants",
+			"error", err.Error(),
+		)
+		return nil, sanitizeError(s.logger, "list tenants", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Tenants listed successfully",
-			"count", len(tenants),
-		)
-	}
+	s.logger.Info("Tenants listed successfully",
+		"count", len(tenants),
+	)
 
 	return tenants, nil
 }
 
-// TenantExists checks if a tenant exists by tenant_id
+// Exists checks if a tenant exists by tenant_id
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
 //   - tenantID: Tenant identifier
 //
 // Returns true if tenant exists, false otherwise
-func (s *TenantService) TenantExists(ctx context.Context, tenantID string) (bool, error) {
+func (s *TenantService) Exists(ctx context.Context, tenantID string) (bool, error) {
 	exists, err := s.repo.TenantExists(ctx, tenantID)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to check tenant existence",
-				"tenant_id", tenantID,
-				"error", err.Error(),
-			)
-		}
-		return false, sanitizeError(nil, "check tenant existence", err)
+		s.logger.Error("Failed to check tenant existence",
+			"tenant_id", tenantID,
+			"error", err.Error(),
+		)
+		return false, sanitizeError(s.logger, "check tenant existence", err)
 	}
 
 	return exists, nil

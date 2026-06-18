@@ -41,12 +41,15 @@ type CreateUserRequest struct {
 	Roles        []string
 }
 
-// UpdateUserRequest updates a user's display name and/or roles. Each field is
-// optional: a nil pointer leaves that column unchanged, so callers can do a
-// partial update without first reading the current values. Changing Roles bumps
-// the user's token_version (invalidating existing JWTs); a display-name-only
-// update does not.
+// UpdateUserRequest updates a user's display name and/or roles. UserID and TenantID
+// identify the target and are required; the update is tenant-scoped (a cross-tenant
+// UserID matches no row). DisplayName and Roles are each optional — a nil pointer
+// leaves that column unchanged, so callers can do a partial update without first
+// reading the current values. Changing Roles bumps the user's token_version
+// (invalidating existing JWTs); a display-name-only update does not.
 type UpdateUserRequest struct {
+	UserID      uuid.UUID
+	TenantID    string
 	DisplayName *string
 	Roles       *[]string
 }

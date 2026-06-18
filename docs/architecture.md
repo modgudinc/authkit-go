@@ -63,7 +63,7 @@ Library guarantees:
 - API keys are generated with `crypto/rand` and stored only as HMAC-SHA256 hashes.
 - Refresh tokens are random opaque strings and stored only as HMAC-SHA256 hashes.
 - Refresh-token rotation consumes the old token and stores the replacement in one transaction.
-- OTP validation consumes the code atomically with `DELETE ... RETURNING`.
+- OTP validation consumes the code atomically within a transaction (`SELECT ... FOR UPDATE`, then `DELETE`).
 - Secrets are encrypted with AES-256-GCM before storage.
 - Passwords are hashed with bcrypt.
 

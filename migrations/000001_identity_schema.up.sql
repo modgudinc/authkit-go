@@ -18,7 +18,10 @@ CREATE TABLE IF NOT EXISTS authkit.tenants (
     settings JSONB DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT check_allowed_domains_not_empty CHECK (array_length(allowed_domains, 1) > 0)
+    -- cardinality() returns 0 (not NULL) for an empty array, so this actually
+    -- rejects '{}'. array_length(arr, 1) returns NULL for an empty array, and a
+    -- CHECK only fails on an explicit FALSE — so NULL > 0 would let '{}' through.
+    CONSTRAINT check_allowed_domains_not_empty CHECK (cardinality(allowed_domains) > 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenants_allowed_domains ON authkit.tenants USING GIN (allowed_domains);
@@ -152,8 +155,9 @@ CREATE TABLE IF NOT EXISTS authkit.refresh_tokens (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- token_hash is declared UNIQUE (above), which already creates the index used by
+-- the hot GetByTokenHash / RotateRefreshToken lookups — no separate token_hash index.
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON authkit.refresh_tokens(user_id);
-CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON authkit.refresh_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family_id ON authkit.refresh_tokens(family_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON authkit.refresh_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_ip_address ON authkit.refresh_tokens(ip_address);
@@ -177,7 +181,8 @@ CREATE TABLE IF NOT EXISTS authkit.verification_codes (
     PRIMARY KEY (tenant_id, email, purpose)
 );
 
-CREATE INDEX IF NOT EXISTS idx_verification_codes_tenant_email ON authkit.verification_codes(tenant_id, email);
+-- (tenant_id, email) lookups are served by the left prefix of the PRIMARY KEY
+-- (tenant_id, email, purpose) — no separate (tenant_id, email) index needed.
 CREATE INDEX IF NOT EXISTS idx_verification_codes_expires_at ON authkit.verification_codes(expires_at);
 CREATE INDEX IF NOT EXISTS idx_verification_codes_purpose ON authkit.verification_codes(purpose);
 

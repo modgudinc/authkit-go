@@ -50,6 +50,21 @@ func (r *Repository) q(query string) string {
 	return strings.ReplaceAll(query, schemaPlaceholder+".", r.schemaPrefix)
 }
 
+// requireRowsAffected returns notFound when a mutation matched no row, surfaces a
+// RowsAffected() driver error, and otherwise returns nil. It centralizes the
+// affected-rows check that the entity repositories' tenant/key-scoped updates and
+// deletes would otherwise reimplement inline.
+func requireRowsAffected(result sql.Result, notFound error) error {
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if n == 0 {
+		return notFound
+	}
+	return nil
+}
+
 func IsIdentifier(value string) bool {
 	if value == "" {
 		return false

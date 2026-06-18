@@ -105,8 +105,10 @@ type Handlers struct {
 h := Handlers{auth: identity.AuthService()}
 ```
 
-The returned services are cheap to construct (they wrap the shared connection
-pool and config), so calling an accessor per use or caching one is equally fine.
+Each accessor call allocates a fresh service (and, for composite ones like
+`AuthService()`, its dependency graph); no new DB connections are opened. Prefer
+constructing a service once and reusing it rather than calling the accessor on hot
+request paths. The returned services are safe for concurrent use.
 
 ### 2. Custom Logger Implementation
 
@@ -159,7 +161,7 @@ identity, err := authkit.New(authkit.Config{
 apiKeyService := identity.APIKeyService()
 
 expiresIn := 90 * 24 * time.Hour // Optional: expires in 90 days (nil = never)
-response, err := apiKeyService.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
+response, err := apiKeyService.Create(ctx, model.CreateAPIKeyRequest{
     TenantID:  "acme.com",
     CreatedBy: adminUserID, // uuid.UUID of the admin (FK to users.id)
     Name:      "Production SDK Key",
@@ -181,7 +183,7 @@ fmt.Printf("Key ID: %s\n", response.KeyID)
 ```go
 apiKey := "sk_live_abc123..." // From HTTP header or SDK
 
-keyCtx, err := apiKeyService.ValidateAPIKey(ctx, apiKey)
+keyCtx, err := apiKeyService.Validate(ctx, apiKey)
 if err != nil {
     // Invalid or expired key
     return err
@@ -196,23 +198,23 @@ fmt.Printf("Key ID: %s\n", keyCtx.KeyID)
 
 ```go
 // List all non-expired keys
-apiKeys, err := apiKeyService.ListAPIKeys(ctx, "acme.com", false)
+apiKeys, err := apiKeyService.List(ctx, "acme.com", false)
 if err != nil {
     log.Fatal(err)
 }
 
 // List including expired keys
-allKeys, err := apiKeyService.ListAPIKeys(ctx, "acme.com", true)
+allKeys, err := apiKeyService.List(ctx, "acme.com", true)
 ```
 
 ### Revoke an API Key
 
-The revoke (and `GetAPIKey`) lookup is scoped to the owning tenant, so pass the
+The revoke (and `Get`) lookup is scoped to the owning tenant, so pass the
 tenant ID alongside the key ID. This prevents one tenant from revoking or reading
 another tenant's key by guessing its ID.
 
 ```go
-err := apiKeyService.RevokeAPIKey(ctx, "key-uuid-v7", "acme.com")
+err := apiKeyService.Revoke(ctx, "key-uuid-v7", "acme.com")
 if err != nil {
     log.Fatal(err)
 }
@@ -223,7 +225,7 @@ if err != nil {
 Run periodically (e.g., via cron job) to maintain database hygiene:
 
 ```go
-count, err := apiKeyService.CleanupExpiredKeys(ctx)
+count, err := apiKeyService.CleanupExpired(ctx)
 if err != nil {
     log.Fatal(err)
 }
@@ -432,7 +434,7 @@ err := tokenService.RevokeRefreshToken(ctx, refreshToken)
 err := tokenService.RevokeAllUserTokens(ctx, userID)
 
 // Cleanup expired tokens (periodic maintenance job)
-count, err := tokenService.CleanupExpiredTokens(ctx)
+count, err := tokenService.CleanupExpired(ctx)
 fmt.Printf("Deleted %d expired tokens\n", count)
 ```
 
@@ -562,7 +564,7 @@ The TenantService provides tenant management operations including creation, retr
 tenantService := identity.TenantService()
 
 // Retrieve tenant by tenant_id (primary email domain)
-tenant, err := tenantService.GetTenant(ctx, "acme.com")
+tenant, err := tenantService.Get(ctx, "acme.com")
 if err != nil {
     log.Fatal(err)
 }
@@ -576,7 +578,7 @@ fmt.Printf("Allowed Domains: %v\n", tenant.AllowedDomains)
 
 ```go
 // Create new tenant/organization
-tenant, err := tenantService.CreateTenant(ctx, model.CreateTenantRequest{
+tenant, err := tenantService.Create(ctx, model.CreateTenantRequest{
     TenantID:       "acme.com",                    // Primary email domain
     Name:           "Acme Corporation",
     AllowedDomains: []string{"acme.com", "acme.io"}, // Multi-domain support
@@ -648,7 +650,7 @@ if err != nil {
 
 ```go
 // List all tenants (admin/debug operation)
-tenants, err := tenantService.ListTenants(ctx)
+tenants, err := tenantService.List(ctx)
 if err != nil {
     log.Fatal(err)
 }
@@ -663,7 +665,7 @@ for _, tenant := range tenants {
 
 ```go
 // Check if tenant exists before operations
-exists, err := tenantService.TenantExists(ctx, "acme.com")
+exists, err := tenantService.Exists(ctx, "acme.com")
 if err != nil {
     log.Fatal(err)
 }
@@ -715,7 +717,7 @@ func CreateTenantWithMultipleDomains(ctx context.Context, primaryDomain, name st
     // Create tenant with all allowed domains
     allDomains := append([]string{primaryDomain}, additionalDomains...)
 
-    tenant, err := tenantService.CreateTenant(ctx, model.CreateTenantRequest{
+    tenant, err := tenantService.Create(ctx, model.CreateTenantRequest{
         TenantID:       primaryDomain,
         Name:           name,
         AllowedDomains: allDomains,
@@ -761,7 +763,7 @@ invitationService := identity.InvitationService()
 maxUses := 1
 expiresIn := 7 * 24 * time.Hour // 7 days
 
-invitation, err := invitationService.CreateInvitation(ctx, model.CreateInvitationRequest{
+invitation, err := invitationService.Create(ctx, model.CreateInvitationRequest{
     TenantID:  "acme.com",
     CreatedBy: adminUserID,        // uuid.UUID of the admin (FK to users.id)
     Email:     "user@acme.com",    // Target email address
@@ -790,7 +792,7 @@ fmt.Printf("Expires: %s\n", invitation.ExpiresAt.Format(time.RFC3339))
 
 ```go
 // Retrieve invitation by code
-invitation, err := invitationService.GetInvitation(ctx, "ABC1234567890XYZQWER")
+invitation, err := invitationService.Get(ctx, "ABC1234567890XYZQWER")
 if err != nil {
     // Invitation not found
     log.Fatal(err)
@@ -805,7 +807,7 @@ fmt.Printf("Expires: %s\n", invitation.ExpiresAt)
 
 ### Accept Invitation (recommended for signup)
 
-Use `AcceptInvitation` to onboard an invited user. It validates the invitation,
+Use `Accept` to onboard an invited user. It validates the invitation,
 consumes one use, and creates the user **in a single transaction**, so a
 single-use invitation can never onboard more than one account (no
 validate→create→increment race or over-redemption). The new user's tenant and
@@ -818,7 +820,7 @@ if err != nil {
     return err
 }
 
-userID, err := invitationService.AcceptInvitation(ctx, model.AcceptInvitationRequest{
+userID, err := invitationService.Accept(ctx, model.AcceptInvitationRequest{
     Code:         invitationCode,
     Email:        email,
     DisplayName:  displayName,
@@ -831,28 +833,28 @@ if err != nil {
 // userID is the new user — issue tokens, send a welcome email, etc.
 ```
 
-Prefer this over composing `ValidateInvitation` + `GetInvitation` + your own user
+Prefer this over composing `Validate` + `Get` + your own user
 creation + `IncrementUseCount`: those are lower-level building blocks (below) and
 composing them yourself reintroduces a TOCTOU / over-redemption window.
 
-> **Domain policy is not enforced here.** `CreateInvitation` and `AcceptInvitation`
+> **Domain policy is not enforced here.** `Create` and `Accept`
 > do **not** check the tenant's `allowed_domains` — by design, since admins
 > legitimately invite out-of-domain users (contractors, partners). If you require
 > invited emails to stay within the tenant's domain list, call
 > `TenantService.ValidateDomainAccess(ctx, email, tenantID)` yourself before
-> `CreateInvitation` (see the flow example below).
+> `Create` (see the flow example below).
 
 ### Validate Invitation
 
 > **Low-level / read-only.** This only *checks* an invitation; it does not consume
-> it. For signup, use `AcceptInvitation` (above) so validation and consumption are
-> atomic. Use `ValidateInvitation` for display or pre-flight checks only.
+> it. For signup, use `Accept` (above) so validation and consumption are
+> atomic. Use `Validate` for display or pre-flight checks only.
 
 ```go
 // Read-only check (e.g. to show "invitation valid" in a UI before signup).
 // The boolean is the answer; a non-nil error means a genuine system fault, not
 // "the invitation is invalid".
-valid, err := invitationService.ValidateInvitation(ctx, invitationCode)
+valid, err := invitationService.Validate(ctx, invitationCode)
 if err != nil {
     // Storage/system fault (already sanitized) — surface as a 500.
     return fmt.Errorf("could not validate invitation: %w", err)
@@ -875,13 +877,13 @@ if !valid {
 
 ```go
 // List all invitations for tenant (including expired)
-allInvitations, err := invitationService.ListInvitations(ctx, "acme.com")
+allInvitations, err := invitationService.List(ctx, "acme.com")
 if err != nil {
     log.Fatal(err)
 }
 
 // List only active invitations (not expired, has uses remaining)
-activeInvitations, err := invitationService.ListActiveInvitations(ctx, "acme.com")
+activeInvitations, err := invitationService.ListActive(ctx, "acme.com")
 if err != nil {
     log.Fatal(err)
 }
@@ -894,8 +896,8 @@ for _, inv := range activeInvitations {
 ```
 
 **Listing Features:**
-- `ListInvitations`: Returns all invitations (for audit/admin)
-- `ListActiveInvitations`: Returns only usable invitations (for UI display)
+- `List`: Returns all invitations (for audit/admin)
+- `ListActive`: Returns only usable invitations (for UI display)
 - Ordered by created_at DESC (newest first)
 - Includes usage statistics
 
@@ -903,7 +905,7 @@ for _, inv := range activeInvitations {
 
 ```go
 // Soft delete - invalidates invitation but preserves audit trail
-err := invitationService.RevokeInvitation(ctx, invitationCode)
+err := invitationService.Revoke(ctx, invitationCode)
 if err != nil {
     log.Fatal(err)
 }
@@ -922,7 +924,7 @@ if err != nil {
 
 ```go
 // Permanent deletion from database
-err := invitationService.DeleteInvitation(ctx, invitationCode)
+err := invitationService.Delete(ctx, invitationCode)
 if err != nil {
     log.Fatal(err)
 }
@@ -933,9 +935,9 @@ if err != nil {
 ### Increment Use Count
 
 > **Low-level building block.** The single UPDATE is atomic, but composing
-> `ValidateInvitation` → create user → `IncrementUseCount` yourself is **not**
+> `Validate` → create user → `IncrementUseCount` yourself is **not**
 > atomic and can over-redeem a single-use invitation under concurrency. Use
-> `AcceptInvitation` for signup; reach for `IncrementUseCount` only for custom
+> `Accept` for signup; reach for `IncrementUseCount` only for custom
 > redemption flows where you manage the surrounding transaction.
 
 ```go
@@ -951,7 +953,7 @@ if err != nil {
 **Usage Tracking:**
 - The increment statement itself is atomic (database constraint enforced)
 - Automatic invalidation when max uses reached
-- For onboarding, prefer `AcceptInvitation`, which performs validate + increment +
+- For onboarding, prefer `Accept`, which performs validate + increment +
   user creation in one transaction
 
 ### Cleanup Expired Invitations
@@ -960,7 +962,7 @@ Run periodically (e.g., daily cron job) to maintain database hygiene:
 
 ```go
 // Delete all expired invitations
-count, err := invitationService.CleanupExpiredInvitations(ctx)
+count, err := invitationService.CleanupExpired(ctx)
 if err != nil {
     log.Fatal(err)
 }
@@ -983,7 +985,7 @@ func AdminCreateInvitation(ctx context.Context, tenantID string, adminUserID uui
     }
 
     // Create invitation with defaults (1 use, 7 days expiration)
-    invitation, err := invitationService.CreateInvitation(ctx, model.CreateInvitationRequest{
+    invitation, err := invitationService.Create(ctx, model.CreateInvitationRequest{
         TenantID:  tenantID,
         CreatedBy: adminUserID,
         Email:     inviteeEmail,
@@ -1010,11 +1012,11 @@ func UserSignupWithInvitation(ctx context.Context, email, displayName, password,
         return fmt.Errorf("password hashing failed: %w", err)
     }
 
-    // AcceptInvitation validates the invitation, consumes one use, and creates the
+    // Accept validates the invitation, consumes one use, and creates the
     // user in a SINGLE transaction. Tenant and roles are taken from the invitation,
     // and the email must match the invitation's target — so a single-use invitation
     // can never onboard more than one account and roles can't be tampered with.
-    userID, err := invitationService.AcceptInvitation(ctx, model.AcceptInvitationRequest{
+    userID, err := invitationService.Accept(ctx, model.AcceptInvitationRequest{
         Code:         invitationCode,
         Email:        email,
         DisplayName:  displayName,
@@ -1034,7 +1036,7 @@ func AdminListActiveInvitations(ctx context.Context, tenantID string) ([]*model.
     invitationService := identity.InvitationService()
 
     // Get only active invitations for display
-    invitations, err := invitationService.ListActiveInvitations(ctx, tenantID)
+    invitations, err := invitationService.ListActive(ctx, tenantID)
     if err != nil {
         return nil, fmt.Errorf("failed to list invitations: %w", err)
     }
@@ -1047,7 +1049,7 @@ func AdminRevokeInvitation(ctx context.Context, invitationCode string) error {
     invitationService := identity.InvitationService()
 
     // Soft delete - preserves audit trail
-    err := invitationService.RevokeInvitation(ctx, invitationCode)
+    err := invitationService.Revoke(ctx, invitationCode)
     if err != nil {
         return fmt.Errorf("failed to revoke invitation: %w", err)
     }
@@ -1061,7 +1063,7 @@ func AdminRevokeInvitation(ctx context.Context, invitationCode string) error {
 - **Multi-role support** (array of roles, validated by application layer)
 - **Configurable expiration** (default 7 days)
 - **Multi-use support** (default single-use, configurable)
-- **Atomic redemption** (`AcceptInvitation` validates, consumes, and creates the user in one transaction)
+- **Atomic redemption** (`Accept` validates, consumes, and creates the user in one transaction)
 - **Soft delete option** (revoke vs delete for audit trail)
 - **Automatic cleanup** (periodic maintenance job)
 - **Comprehensive logging** (all operations logged with masked codes — only when a `Logger` is injected; logging is a no-op otherwise)
@@ -1071,7 +1073,7 @@ func AdminRevokeInvitation(ctx context.Context, invitationCode string) error {
 - Role validation is handled by the application layer (library is app-agnostic)
 - Expiration enforcement prevents stale invitations
 - Usage limits prevent invitation sharing
-- `AcceptInvitation` redeems and creates the user in one transaction, preventing
+- `Accept` redeems and creates the user in one transaction, preventing
   over-redemption of single-use invitations
 - Soft delete preserves audit trail for compliance
 
@@ -1290,6 +1292,25 @@ if err != nil {
 
 `SecretConfig.EncryptionKey` must be a base64-encoded 32-byte AES-256 key when `SecretService` is used.
 
+#### Generating secrets
+
+The JWT/HMAC secrets must be at least 32 bytes of high-entropy random data, and
+`SecretConfig.EncryptionKey` must be the base64 encoding of exactly 32 random bytes.
+`New` rejects anything shorter, but it cannot tell random data from a weak passphrase —
+always generate these with a CSPRNG, never type them by hand:
+
+```bash
+# JWT access secret, refresh-token HMAC secret, API-key HMAC secret (one each):
+openssl rand -base64 32
+
+# SecretConfig.EncryptionKey — must DECODE to 32 bytes, so use base64 of 32 random
+# bytes (a 32-character ASCII string is wrong: it base64-decodes to 24 bytes and is rejected):
+openssl rand -base64 32
+```
+
+Use a distinct value for each field and a different set per environment. See
+[SECURITY.md](SECURITY.md) for storage and rotation guidance.
+
 ### Required Configuration
 
 - **`IdentityRWDB`**: Database connection for write operations (required)
@@ -1430,9 +1451,9 @@ invitationService := identity.InvitationService()
 
 The library optimizes database access by separating read and write operations:
 
-- **Write operations** (`CreateAPIKey`, `RevokeAPIKey`) use `IdentityRWDB`
-- **Security-sensitive validation** (`ValidateAPIKey`, refresh token validation/rotation) uses `IdentityRWDB` to avoid replica-lag acceptance after revocation
-- **Non-critical reads** (`ListAPIKeys`, tenant/user list operations) use `IdentityRODB`
+- **Write operations** (`Create`, `Revoke`) use `IdentityRWDB`
+- **Security-sensitive validation** (`Validate`, refresh token validation/rotation) uses `IdentityRWDB` to avoid replica-lag acceptance after revocation
+- **Non-critical reads** (`List`, tenant/user list operations) use `IdentityRODB`
 - Supports PostgreSQL read replicas for horizontal scaling
 
 ## Error Handling
@@ -1481,8 +1502,8 @@ context. Map to a status with `errors.Is`, and log the raw error server-side.
 API key validation updates `last_used_at` asynchronously to avoid blocking:
 
 ```go
-// ValidateAPIKey returns immediately
-context, err := apiKeyService.ValidateAPIKey(ctx, apiKey)
+// Validate returns immediately
+context, err := apiKeyService.Validate(ctx, apiKey)
 // last_used_at updated in background goroutine
 ```
 

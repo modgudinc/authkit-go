@@ -26,5 +26,6 @@ var (
 	ErrUserExists                 = model.ErrUserExists
 	ErrPasswordTooWeak            = model.ErrPasswordTooWeak
 	ErrSecretEncryptionKeyMissing = model.ErrSecretEncryptionKeyMissing
+	ErrValueTooLong               = model.ErrValueTooLong
 	ErrInternal                   = model.ErrInternal
 )

@@ -160,10 +160,18 @@ func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, p
 //
 // Within a single transaction (row locked FOR UPDATE) it:
 //   - rejects and deletes an expired code,
-//   - rejects and deletes a code that has already reached maxAttempts (lockout),
+//   - on a code that has already reached maxAttempts: reports lockout (the row is
+//     retained — see below),
 //   - on a correct code: deletes it and reports OTPConsumeValid (single-use),
-//   - on a wrong code: increments attempts, and if that reaches maxAttempts
-//     deletes the code and reports OTPConsumeLockedOut, otherwise OTPConsumeInvalid.
+//   - on a wrong code: increments attempts; if that reaches maxAttempts the code is
+//     locked out (row retained) and it reports OTPConsumeLockedOut, otherwise
+//     OTPConsumeInvalid.
+//
+// A locked-out code's row is deliberately NOT deleted: its created_at keeps
+// enforcing the generation rate limit, so repeatedly failing a code cannot reset
+// the per-(tenant, email, purpose) cooldown and drive unlimited OTP resends. The
+// row is replaced by the next generation once the cooldown elapses, and removed by
+// DeleteExpiredVerificationCodes at expiry.
 //
 // The code comparison is constant-time to avoid leaking match progress via timing.
 // maxAttempts <= 0 disables lockout (attempts are not enforced).
@@ -232,11 +240,13 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 		return OTPConsumeInvalid, nil
 	}
 
-	// Already exhausted: invalidate the code and report lockout.
+	// Already locked out: the row stays put — its created_at still enforces the
+	// generation cooldown (see the method doc) — so just release the lock and report it.
 	if maxAttempts > 0 && attempts >= maxAttempts {
-		if err := deleteAndCommit(); err != nil {
-			return OTPConsumeInvalid, fmt.Errorf("failed to delete exhausted verification code: %w", err)
+		if err := tx.Commit(); err != nil {
+			return OTPConsumeInvalid, fmt.Errorf("failed to commit verification code consumption: %w", err)
 		}
+		committed = true
 		return OTPConsumeLockedOut, nil
 	}
 
@@ -248,15 +258,11 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 		return OTPConsumeValid, nil
 	}
 
-	// Wrong code: count the failed attempt; lock out if it reaches the cap.
+	// Wrong code: persist the incremented attempt count. The row is retained even
+	// when this trips the lockout, so its created_at keeps enforcing the generation
+	// cooldown (see the method doc) — a burst of wrong guesses cannot wipe it to
+	// drive fresh OTP emails on demand.
 	newAttempts := attempts + 1
-	if maxAttempts > 0 && newAttempts >= maxAttempts {
-		if err := deleteAndCommit(); err != nil {
-			return OTPConsumeInvalid, fmt.Errorf("failed to delete verification code after final attempt: %w", err)
-		}
-		return OTPConsumeLockedOut, nil
-	}
-
 	updateQuery := `
 		UPDATE {{schema}}.verification_codes
 		SET attempts = $4
@@ -272,6 +278,9 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 	}
 	committed = true
 
+	if maxAttempts > 0 && newAttempts >= maxAttempts {
+		return OTPConsumeLockedOut, nil
+	}
 	return OTPConsumeInvalid, nil
 }
 
@@ -292,16 +301,7 @@ func (r *Repository) DeleteVerificationCode(ctx context.Context, tenantID, email
 		return fmt.Errorf("failed to delete verification code: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("verification code not found: %w", model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("verification code not found: %w", model.ErrNotFound))
 }
 
 // ============================================================================

@@ -37,4 +37,15 @@ jobs:
       - name: Run gosec
         uses: securego/gosec@9e6a9843d7a4a6e3e9a8539b02612c8a4aa3f889 # v2.27.1
         with:
-          args: ./...
+          # Explicit thresholds (report everything) so a future change to the action's
+          # defaults can't silently relax the gate; emit SARIF for triage. gosec still
+          # exits non-zero on findings, so the job fails — the SARIF is uploaded below
+          # regardless via if: always().
+          args: '-severity low -confidence low -fmt sarif -out gosec-results.sarif ./...'
+      - name: Upload gosec SARIF report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gosec-sarif
+          path: gosec-results.sarif
+          if-no-files-found: warn

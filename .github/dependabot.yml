@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Go module dependencies. Security-sensitive transitive deps (golang-jwt, pgx,
+  # golang.org/x/crypto) get automated update PRs; govulncheck (security.yml) gates
+  # known-vulnerable versions, dependabot keeps them moving.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+
+  # GitHub Actions are pinned by commit SHA in this repo; this bumps those pins.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
