@@ -169,16 +169,7 @@ func (r *Repository) IncrementUseCount(ctx context.Context, code string) error {
 		return fmt.Errorf("failed to increment invitation use count: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("invitation %q not found or max uses exceeded: %w", code, model.ErrInvitationInvalid)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("invitation %q not found or max uses exceeded: %w", code, model.ErrInvitationInvalid))
 }
 
 // ============================================================================
@@ -254,12 +245,8 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to consume invitation: %w", err)
 	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if affected == 0 {
-		return uuid.Nil, fmt.Errorf("invitation has been fully used: %w", model.ErrInvitationInvalid)
+	if err := requireRowsAffected(res, fmt.Errorf("invitation has been fully used: %w", model.ErrInvitationInvalid)); err != nil {
+		return uuid.Nil, err
 	}
 
 	// Create the user with tenant and roles taken from the invitation.
@@ -318,16 +305,7 @@ func (r *Repository) InvalidateInvitation(ctx context.Context, code string) erro
 		return fmt.Errorf("failed to invalidate invitation: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("invitation %q not found: %w", code, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("invitation %q not found: %w", code, model.ErrNotFound))
 }
 
 // ============================================================================
@@ -454,16 +432,7 @@ func (r *Repository) DeleteInvitation(ctx context.Context, code string) error {
 		return fmt.Errorf("failed to delete invitation: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("invitation %q not found: %w", code, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("invitation %q not found: %w", code, model.ErrNotFound))
 }
 
 // ============================================================================

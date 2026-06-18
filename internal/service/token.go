@@ -93,7 +93,7 @@ func NewTokenService(
 		repo:                   repo,
 		refreshExpiry:          refreshExpiry,
 		refreshTokenHMACSecret: refreshTokenHMACSecret,
-		logger:                 logger,
+		logger:                 ensureLogger(logger),
 	}
 }
 
@@ -126,30 +126,24 @@ func (s *TokenService) GenerateTokenPair(
 	user *model.User,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
-	if s.logger != nil {
-		s.logger.Info("Generating token pair",
-			"user_id", user.ID.String(),
-			"email", maskEmail(user.Email),
-			"tenant_id", user.TenantID,
-		)
-	}
+	s.logger.Info("Generating token pair",
+		"user_id", user.ID.String(),
+		"email", maskEmail(user.Email),
+		"tenant_id", user.TenantID,
+	)
 
 	// 1. Generate JWT access token
 	accessToken, err := s.jwtService.GenerateAccessToken(user)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to generate access token", "error", err.Error())
-		}
-		return nil, sanitizeError(nil, "generate access token", err)
+		s.logger.Error("Failed to generate access token", "error", err.Error())
+		return nil, sanitizeError(s.logger, "generate access token", err)
 	}
 
 	// 2. Generate random refresh token
 	refreshToken, err := s.jwtService.GenerateRefreshToken()
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to generate refresh token", "error", err.Error())
-		}
-		return nil, sanitizeError(nil, "generate refresh token", err)
+		s.logger.Error("Failed to generate refresh token", "error", err.Error())
+		return nil, sanitizeError(s.logger, "generate refresh token", err)
 	}
 
 	// 3. Hash refresh token with HMAC-SHA256
@@ -180,19 +174,15 @@ func (s *TokenService) GenerateTokenPair(
 		ExpiresAt:  expiresAt,
 	})
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to store refresh token", "error", err.Error())
-		}
-		return nil, sanitizeError(nil, "store refresh token", err)
+		s.logger.Error("Failed to store refresh token", "error", err.Error())
+		return nil, sanitizeError(s.logger, "store refresh token", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Token pair generated successfully",
-			"user_id", user.ID.String(),
-			"access_expires_in", s.jwtService.GetAccessExpiry().Seconds(),
-			"refresh_expires_in", s.refreshExpiry.Seconds(),
-		)
-	}
+	s.logger.Info("Token pair generated successfully",
+		"user_id", user.ID.String(),
+		"access_expires_in", s.jwtService.GetAccessExpiry().Seconds(),
+		"refresh_expires_in", s.refreshExpiry.Seconds(),
+	)
 
 	return &model.TokenPairResponse{
 		AccessToken:  accessToken,
@@ -230,9 +220,7 @@ func (s *TokenService) GenerateTokenPair(
 //	    return fmt.Errorf("invalid refresh token: %w", err)
 //	}
 func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString string) (*model.User, error) {
-	if s.logger != nil {
-		s.logger.Info("Validating refresh token")
-	}
+	s.logger.Info("Validating refresh token")
 
 	// 1. Hash provided token
 	tokenHash := s.hashToken(tokenString)
@@ -240,31 +228,25 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 	// 2. Lookup token in database
 	storedToken, err := s.repo.GetByTokenHash(ctx, tokenHash)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("Refresh token not found or expired", "error", err.Error())
-		}
-		return nil, sanitizeError(nil, "lookup refresh token", err)
+		s.logger.Warn("Refresh token not found or expired", "error", err.Error())
+		return nil, sanitizeError(s.logger, "lookup refresh token", err)
 	}
 
 	// 3. Fetch user by user_id (no tenant_id needed since user_id is unique)
 	user, err := s.repo.GetByIDOnly(ctx, storedToken.UserID)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to fetch user for refresh token", "error", err.Error())
-		}
-		return nil, sanitizeError(nil, "fetch user for refresh token", err)
+		s.logger.Error("Failed to fetch user for refresh token", "error", err.Error())
+		return nil, sanitizeError(s.logger, "fetch user for refresh token", err)
 	}
 
 	// 4. Reject disabled/locked accounts so a cut-off account cannot be treated
 	// as valid even if a consumer uses this method directly to build a session.
 	if !user.IsEnabled || isUserLocked(user) {
-		if s.logger != nil {
-			s.logger.Warn("Refresh token rejected: account is not active",
-				"user_id", user.ID.String(),
-				"is_enabled", user.IsEnabled,
-				"is_locked", user.IsLocked,
-			)
-		}
+		s.logger.Warn("Refresh token rejected: account is not active",
+			"user_id", user.ID.String(),
+			"is_enabled", user.IsEnabled,
+			"is_locked", user.IsLocked,
+		)
 		return nil, fmt.Errorf("account is not active: %w", model.ErrInvalidRefreshToken)
 	}
 
@@ -276,12 +258,10 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 		return s.repo.UpdateLastUsed(uctx, tokenID)
 	})
 
-	if s.logger != nil {
-		s.logger.Info("Refresh token validated successfully",
-			"user_id", user.ID.String(),
-			"token_id", storedToken.ID.String(),
-		)
-	}
+	s.logger.Info("Refresh token validated successfully",
+		"user_id", user.ID.String(),
+		"token_id", storedToken.ID.String(),
+	)
 
 	return user, nil
 }
@@ -316,17 +296,13 @@ func (s *TokenService) RefreshTokenPair(
 	refreshToken string,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
-	if s.logger != nil {
-		s.logger.Info("Refreshing token pair")
-	}
+	s.logger.Info("Refreshing token pair")
 
 	// 1. Generate the replacement refresh token before entering the DB transaction.
 	newRefreshToken, err := s.jwtService.GenerateRefreshToken()
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to generate replacement refresh token", "error", err.Error())
-		}
-		return nil, sanitizeError(nil, "generate replacement refresh token", err)
+		s.logger.Error("Failed to generate replacement refresh token", "error", err.Error())
+		return nil, sanitizeError(s.logger, "generate replacement refresh token", err)
 	}
 
 	oldTokenHash := s.hashToken(refreshToken)
@@ -355,13 +331,11 @@ func (s *TokenService) RefreshTokenPair(
 		ExpiresAt:  expiresAt,
 	})
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("Failed to rotate refresh token", "error", err.Error())
-		}
+		s.logger.Warn("Failed to rotate refresh token", "error", err.Error())
 		// Preserve the underlying sentinel (model.ErrInvalidRefreshToken or
 		// model.ErrRefreshTokenReuse) so callers can distinguish a benign
 		// invalid/expired token from a detected reuse/theft event.
-		return nil, sanitizeError(nil, "rotate refresh token", err)
+		return nil, sanitizeError(s.logger, "rotate refresh token", err)
 	}
 
 	// 3. Re-check account standing before minting a new access token.
@@ -378,37 +352,31 @@ func (s *TokenService) RefreshTokenPair(
 				"error", revokeErr.Error(),
 			)
 		}
-		if s.logger != nil {
-			s.logger.Warn("Refresh denied: account is not active",
-				"user_id", user.ID.String(),
-				"is_enabled", user.IsEnabled,
-				"is_locked", user.IsLocked,
-			)
-		}
+		s.logger.Warn("Refresh denied: account is not active",
+			"user_id", user.ID.String(),
+			"is_enabled", user.IsEnabled,
+			"is_locked", user.IsLocked,
+		)
 		return nil, fmt.Errorf("account is not active: %w", model.ErrInvalidRefreshToken)
 	}
 
 	// 4. Generate a new access token for the user tied to the consumed token.
 	accessToken, err := s.jwtService.GenerateAccessToken(user)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to generate rotated access token", "error", err.Error())
-		}
+		s.logger.Error("Failed to generate rotated access token", "error", err.Error())
 		if revokeErr := s.repo.DeleteByTokenHash(ctx, newTokenHash); revokeErr != nil && s.logger != nil {
 			s.logger.Warn("Failed to revoke rotated refresh token after access token error",
 				"token_id", tokenID.String(),
 				"error", revokeErr.Error(),
 			)
 		}
-		return nil, sanitizeError(nil, "generate rotated access token", err)
+		return nil, sanitizeError(s.logger, "generate rotated access token", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Refresh token rotated successfully",
-			"user_id", user.ID.String(),
-			"token_id", tokenID.String(),
-		)
-	}
+	s.logger.Info("Refresh token rotated successfully",
+		"user_id", user.ID.String(),
+		"token_id", tokenID.String(),
+	)
 
 	return &model.TokenPairResponse{
 		AccessToken:  accessToken,
@@ -425,9 +393,15 @@ func (s *TokenService) RefreshTokenPair(
 //
 // # Used for single session logout
 //
-// This operation is idempotent: revoking a token that no longer exists (because
-// it was already revoked, rotated, or expired) is treated as success and returns
-// nil. Only a genuine storage/driver fault yields a non-nil (sanitized) error.
+// The token is soft-revoked (its row is retained with revoked_at set), not deleted,
+// so that if a stolen-then-logged-out token is later replayed, RotateRefreshToken
+// detects it as reuse (ErrRefreshTokenReuse) and revokes the whole family — the same
+// theft-detection guarantee that token rotation provides. The retained row is
+// cleaned up by CleanupExpired after expiry.
+//
+// This operation is idempotent: revoking a token that is no longer active (because
+// it was already revoked, rotated, or expired/cleaned up) is treated as success and
+// returns nil. Only a genuine storage/driver fault yields a non-nil (sanitized) error.
 //
 // Example:
 //
@@ -436,29 +410,21 @@ func (s *TokenService) RefreshTokenPair(
 //	    return fmt.Errorf("failed to revoke token: %w", err)
 //	}
 func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString string) error {
-	if s.logger != nil {
-		s.logger.Info("Revoking refresh token")
-	}
+	s.logger.Info("Revoking refresh token")
 
 	tokenHash := s.hashToken(tokenString)
-	if err := s.repo.DeleteByTokenHash(ctx, tokenHash); err != nil {
-		// Logout is idempotent: a token that no longer exists is already revoked,
-		// so treat a not-found delete as success rather than an error.
+	if err := s.repo.RevokeByTokenHash(ctx, tokenHash); err != nil {
+		// Logout is idempotent: a token that is no longer active is already revoked,
+		// so treat a not-found soft-revoke as success rather than an error.
 		if errors.Is(err, model.ErrNotFound) {
-			if s.logger != nil {
-				s.logger.Info("Refresh token already revoked")
-			}
+			s.logger.Info("Refresh token already revoked")
 			return nil
 		}
-		if s.logger != nil {
-			s.logger.Error("Failed to revoke refresh token", "error", err.Error())
-		}
-		return sanitizeError(nil, "revoke refresh token", err)
+		s.logger.Error("Failed to revoke refresh token", "error", err.Error())
+		return sanitizeError(s.logger, "revoke refresh token", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Refresh token revoked successfully")
-	}
+	s.logger.Info("Refresh token revoked successfully")
 
 	return nil
 }
@@ -471,10 +437,15 @@ func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString strin
 //
 // Used for "logout from all devices" functionality
 //
+// This method is intentionally NOT part of the public TokenService interface
+// (services.go) — it is reachable only internally, via AuthService.LogoutAll.
+//
 // Precondition: the caller MUST have already verified that userID belongs to the
 // caller's tenant. This method scopes by user_id only and does not re-check
 // tenant membership (refresh tokens are not tenant-columned); passing a
 // caller-supplied id without that check is a cross-tenant authorization gap.
+// AuthService.LogoutAll satisfies this by calling IncrementTokenVersionByTenant
+// first, which fails closed (ErrNotFound) for a cross-tenant id.
 //
 // Example:
 //
@@ -483,25 +454,19 @@ func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString strin
 //	    return fmt.Errorf("failed to revoke all tokens: %w", err)
 //	}
 func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID uuid.UUID) error {
-	if s.logger != nil {
-		s.logger.Info("Revoking all refresh tokens for user", "user_id", userID)
-	}
+	s.logger.Info("Revoking all refresh tokens for user", "user_id", userID)
 
 	if err := s.repo.DeleteByUserID(ctx, userID); err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to revoke all user tokens", "error", err.Error())
-		}
-		return sanitizeError(nil, "revoke all user tokens", err)
+		s.logger.Error("Failed to revoke all user tokens", "error", err.Error())
+		return sanitizeError(s.logger, "revoke all user tokens", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("All refresh tokens revoked successfully", "user_id", userID)
-	}
+	s.logger.Info("All refresh tokens revoked successfully", "user_id", userID)
 
 	return nil
 }
 
-// CleanupExpiredTokens removes expired refresh tokens from the database
+// CleanupExpired removes expired refresh tokens from the database
 //
 // Parameters:
 //   - ctx: Context for database operations
@@ -514,27 +479,21 @@ func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID uuid.UUID
 //
 // Example:
 //
-//	count, err := tokenService.CleanupExpiredTokens(ctx)
+//	count, err := tokenService.CleanupExpired(ctx)
 //	if err != nil {
 //	    return fmt.Errorf("cleanup failed: %w", err)
 //	}
 //	fmt.Printf("Deleted %d expired tokens\n", count)
-func (s *TokenService) CleanupExpiredTokens(ctx context.Context) (int64, error) {
-	if s.logger != nil {
-		s.logger.Info("Cleaning up expired refresh tokens")
-	}
+func (s *TokenService) CleanupExpired(ctx context.Context) (int64, error) {
+	s.logger.Info("Cleaning up expired refresh tokens")
 
 	count, err := s.repo.DeleteExpired(ctx)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to cleanup expired tokens", "error", err.Error())
-		}
-		return 0, sanitizeError(nil, "cleanup expired tokens", err)
+		s.logger.Error("Failed to cleanup expired tokens", "error", err.Error())
+		return 0, sanitizeError(s.logger, "cleanup expired tokens", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Expired tokens cleaned up successfully", "count", count)
-	}
+	s.logger.Info("Expired tokens cleaned up successfully", "count", count)
 
 	return count, nil
 }

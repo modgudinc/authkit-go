@@ -135,14 +135,14 @@ func TestSecretServiceMissingKeyReturnsSentinel(t *testing.T) {
 	ctx := context.Background()
 	svc := NewSecretService(nil, []byte("too-short"), nil) // not 32 bytes
 
-	_, saveErr := svc.SaveSecret(ctx, model.SaveSecretRequest{TenantID: testTenant, Key: testKeyName, PlainValue: "v"})
+	_, saveErr := svc.Save(ctx, model.SaveSecretRequest{TenantID: testTenant, Key: testKeyName, PlainValue: "v"})
 	if !errors.Is(saveErr, model.ErrSecretEncryptionKeyMissing) {
-		t.Fatalf("SaveSecret: expected ErrSecretEncryptionKeyMissing, got %v", saveErr)
+		t.Fatalf("Save: expected ErrSecretEncryptionKeyMissing, got %v", saveErr)
 	}
 
-	_, getErr := svc.GetSecret(ctx, testTenant, testKeyName)
+	_, getErr := svc.Get(ctx, testTenant, testKeyName)
 	if !errors.Is(getErr, model.ErrSecretEncryptionKeyMissing) {
-		t.Fatalf("GetSecret: expected ErrSecretEncryptionKeyMissing, got %v", getErr)
+		t.Fatalf("Get: expected ErrSecretEncryptionKeyMissing, got %v", getErr)
 	}
 }
 

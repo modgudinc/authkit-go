@@ -7,7 +7,7 @@ These examples show typical service usage. They assume `identity` is an initiali
 ```go
 tenantService := identity.TenantService()
 
-tenant, err := tenantService.CreateTenant(ctx, model.CreateTenantRequest{
+tenant, err := tenantService.Create(ctx, model.CreateTenantRequest{
 	TenantID:       "acme.com",
 	Name:           "Acme",
 	AllowedDomains: []string{"acme.com"},
@@ -94,7 +94,7 @@ if err := authService.Logout(ctx, refreshed.RefreshToken); err != nil {
 apiKeyService := identity.APIKeyService()
 expiresIn := 90 * 24 * time.Hour
 
-created, err := apiKeyService.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
+created, err := apiKeyService.Create(ctx, model.CreateAPIKeyRequest{
 	TenantID:  "acme.com",
 	CreatedBy: userID,
 	Name:      "Production",
@@ -105,7 +105,7 @@ if err != nil {
 }
 
 // Store or display created.APIKey once. It is never stored in plaintext.
-keyContext, err := apiKeyService.ValidateAPIKey(ctx, created.APIKey)
+keyContext, err := apiKeyService.Validate(ctx, created.APIKey)
 if err != nil {
 	return err
 }
@@ -118,7 +118,7 @@ _ = keyContext
 ```go
 invitationService := identity.InvitationService()
 
-invitation, err := invitationService.CreateInvitation(ctx, model.CreateInvitationRequest{
+invitation, err := invitationService.Create(ctx, model.CreateInvitationRequest{
 	TenantID:  "acme.com",
 	CreatedBy: userID,
 	Email:     "invitee@acme.com",
@@ -129,13 +129,13 @@ if err != nil {
 }
 
 // Redeem the invitation and create the user atomically (validate + consume +
-// create in one transaction). Prefer this over ValidateInvitation + IncrementUseCount,
+// create in one transaction). Prefer this over Validate + IncrementUseCount,
 // which is non-atomic and can over-redeem a single-use invitation.
 passwordHash, err := identity.PasswordService().HashPassword("SecurePass1!")
 if err != nil {
 	return err
 }
-newUserID, err := invitationService.AcceptInvitation(ctx, model.AcceptInvitationRequest{
+newUserID, err := invitationService.Accept(ctx, model.AcceptInvitationRequest{
 	Code:         invitation.Code,
 	Email:        "invitee@acme.com",
 	DisplayName:  "Invited User",
@@ -178,7 +178,7 @@ if err := otpService.Validate(ctx, model.OTPValidateRequest{
 ```go
 secretService := identity.SecretService()
 
-saved, err := secretService.SaveSecret(ctx, model.SaveSecretRequest{
+saved, err := secretService.Save(ctx, model.SaveSecretRequest{
 	TenantID:   "acme.com",
 	Key:        "openai",
 	PlainValue: "sk-live-secret", // placeholder — pass the real provider key here
@@ -188,7 +188,7 @@ if err != nil {
 	return err
 }
 
-plain, err := secretService.GetSecret(ctx, saved.TenantID, saved.Key)
+plain, err := secretService.Get(ctx, saved.TenantID, saved.Key)
 if err != nil {
 	return err
 }

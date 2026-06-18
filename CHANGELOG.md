@@ -8,6 +8,189 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-18
+
+Breaking API-ergonomics cleanup — service methods are renamed to bare, namespaced
+verbs, `UserService` duplicate methods are removed, and `Update` takes its ids in the
+request struct — bundled with the security, correctness, and hardening work since
+v0.10.0. No schema migration is required.
+
+### Security
+
+- **`AuthService.ValidateJWT` now reads the user from the primary, not a read replica.**
+  The `token_version` revocation check (and the `is_enabled`/`is_locked` account-status gate) is
+  the library's only immediate session-revocation mechanism, but it read from the read-only
+  replica while `LogoutAll` and `ChangePassword` write the bumped `token_version` to the primary.
+  Under replication lag, a just-revoked access token (or a just-disabled/locked account) kept
+  passing validation until the replica caught up — a fail-open window. The gate now reads the
+  primary via a new internal `Repository.GetByIDFromPrimary`, matching the existing read-write
+  decision already used for refresh-token and API-key validation. Deployments where the RO and RW
+  handles are the same `*sql.DB` were never affected.
+
+- **`AuthService.Login` now reads its account-status gate from the primary.** The
+  `is_enabled`/`is_locked` check (and the post-auto-unlock re-read) previously came from the read
+  replica, so an admin disable/lock — or an auto-lock just written by `RegisterFailedLogin` — was
+  invisible to the front-door gate during replication lag, allowing a few extra logins against a
+  just-locked/disabled account. The gate now reads the primary via `Repository.GetByEmailFromPrimary`
+  / `GetByIDFromPrimary`. (The authoritative lockout *counter* was already enforced on the primary
+  and was never evadable.)
+
+- **`APIKeyService.CreateAPIKey` no longer leaks raw driver errors.** A database fault (e.g. an FK
+  or unique-constraint violation from a bad `tenant_id`/`created_by`) was returned verbatim,
+  exposing table/constraint names and SQLSTATE to the caller. It now routes through `sanitizeError`
+  like every other create method — logged server-side, returned as `ErrInternal` — while known
+  sentinels still pass through for `errors.Is`.
+
+- **An OTP attempt-lockout no longer resets the generation rate-limit window.** Reaching the
+  failed-attempt cap (`MaxOTPValidationAttempts`) used to delete the code row; because the
+  per-`(tenant, email, purpose)` generation cooldown is keyed on that row's `created_at`, a burst
+  of wrong guesses (or any lockout) wiped the cooldown and allowed fresh OTP emails to be issued on
+  demand (cost/spam amplification). The locked-out row is now retained as a tombstone so the
+  cooldown stays in force; it is replaced by the next generation once the cooldown elapses and
+  removed by `CleanupExpired` at expiry. (Behavior change: a user who locks out a code may now have
+  to wait out the cooldown before a new code is issued, instead of immediately.)
+
+- **`PasswordService.DummyVerify` no longer latches a generation failure.** The dummy bcrypt hash
+  used to equalize login timing (preventing username enumeration) was memoized with `sync.Once`, so
+  a single failed generation would silently disable the equalizer for the process lifetime. It now
+  re-attempts generation on a later call (mutex-guarded, still computed at most once on success), so
+  a transient failure cannot permanently reopen the timing side channel. No behavior change on the
+  normal path.
+
+- **Single-session logout now soft-revokes the refresh token instead of deleting it.**
+  `AuthService.Logout` / `TokenService.RevokeRefreshToken` previously hard-deleted the token row, so
+  replaying a stolen-then-logged-out token read as a benign invalid token rather than triggering
+  reuse/theft detection. The row is now retained with `revoked_at` set (and reaped by
+  `CleanupExpiredTokens` at expiry), so a later replay trips `ErrRefreshTokenReuse` and revokes the
+  whole token family — the same guarantee token rotation already provided. Logout remains idempotent.
+
+### Changed (breaking)
+
+- **Service methods renamed to bare, namespaced verbs (#14).** Each service already
+  namespaces its noun, so the type suffix was redundant:
+  `APIKeyService`: `CreateAPIKey`→`Create`, `ValidateAPIKey`→`Validate`, `ListAPIKeys`→`List`,
+  `GetAPIKey`→`Get`, `RevokeAPIKey`→`Revoke`, `CountByTenant`→`Count`, `CleanupExpiredKeys`→`CleanupExpired`;
+  `TenantService`: `CreateTenant`→`Create`, `GetTenant`→`Get`, `GetTenantByDomain`→`GetByDomain`,
+  `ListTenants`→`List`, `TenantExists`→`Exists`;
+  `InvitationService`: `CreateInvitation`→`Create`, `GetInvitation`→`Get`, `ListInvitations`→`List`,
+  `ListActiveInvitations`→`ListActive`, `ValidateInvitation`→`Validate`, `AcceptInvitation`→`Accept`,
+  `RevokeInvitation`→`Revoke`, `DeleteInvitation`→`Delete`, `CleanupExpiredInvitations`→`CleanupExpired`;
+  `SecretService`: `SaveSecret`→`Save`, `GetSecret`→`Get`, `ListSecrets`→`List`, `DeleteSecret`→`Delete`,
+  `CountByTenant`→`Count`; `TokenService`: `CleanupExpiredTokens`→`CleanupExpired`. Each is a pure
+  rename (same args, same behavior); `model.*Request`/`*Response` type names are unchanged.
+
+- **`UserService`: duplicate methods removed and `ByTenant` suffix dropped (#6).** The duplicate
+  `Enable`/`Disable` aliases are removed and `EnableByTenant`→`Enable`, `DisableByTenant`→`Disable`,
+  `CountByTenant`→`Count`, `UpdateRolesByTenant`→`UpdateRoles` (every `UserService` mutator is already
+  tenant-scoped, so the suffix signalled nothing).
+
+- **`UserService.Update` takes its ids in the request struct (#13).** Signature changes from
+  `Update(ctx, userID, tenantID, req)` to `Update(ctx, req)`; `model.UpdateUserRequest` gains
+  `UserID` and `TenantID`. This matches `Create` and `ChangePassword` (create/update take a keyed
+  request struct; simple get/delete/status ops take positional ids).
+
+- **`TokenService.RevokeAllUserTokens` is removed from the public `TokenService` interface.**
+  It scopes by `user_id` only (refresh tokens carry no tenant column), so calling it with a
+  caller-supplied id and no prior tenant-ownership check was a cross-tenant authorization gap
+  (one tenant could force-log-out another tenant's user). Use
+  `AuthService.LogoutAll(ctx, userID, tenantID)` instead, which proves tenant membership first
+  (and also invalidates access tokens). The method remains available internally for `LogoutAll`.
+
+### Fixed
+
+- **`OTPService.Generate` now rejects a non-positive `ExpirationDuration`.** A zero value (the
+  zero value of an omitted field) or a negative duration previously minted a code that was already
+  expired the instant it was issued — impossible to validate, yet returned to the caller as
+  success while still consuming the generation rate-limit window. It now returns a clear error up
+  front, mirroring the positive-expiry check already enforced by `CreateAPIKey`.
+
+- **`AuthService.ChangePassword` now updates the password and bumps `token_version` atomically.**
+  The password write and the access-token-invalidating `token_version` bump are now a single
+  tenant-scoped UPDATE (`SetPasswordAndBumpTokenVersionByTenant`) rather than two separate writes, so
+  they can never be left half-applied (e.g. password changed but old access tokens still validating).
+  Refresh-token revocation remains a follow-up step whose failure is still surfaced as an error (an
+  undeleted refresh token stays usable until expiry); on that failure, retry via `LogoutAll`.
+
+- **`InvitationService.CreateInvitation` now validates its inputs.** It rejects an empty or
+  malformed target email (previously stored verbatim and later bound onto the created account by
+  `AcceptInvitation`) and a `MaxUses` above `MaxInvitationUses` (1000), which would mint an
+  effectively unlimited signup link. The email is normalized before the structural check.
+
+- **Over-length string inputs now surface as a matchable error instead of `ErrInternal`.** A value
+  exceeding its column width (e.g. an over-long tenant_id, name, secret key, email, or display name)
+  produced a Postgres SQLSTATE 22001 that `sanitizeError` collapsed into the opaque `ErrInternal`.
+  It is now mapped to a new sentinel, `ErrValueTooLong` (re-exported as `authkit.ErrValueTooLong`),
+  so callers can `errors.Is` it and return a 400. `TenantService.UpdateSettings` additionally rejects
+  a serialized settings blob larger than `MaxTenantSettingsBytes` (1 MiB) with the same sentinel.
+
+### Fixed (schema / CI)
+
+- **The `allowed_domains` non-empty CHECK now actually rejects an empty array.** It used
+  `array_length(allowed_domains, 1) > 0`, which is `NULL` (not `FALSE`) for `'{}'` and so passed
+  the constraint; it now uses `cardinality(allowed_domains) > 0`. (The service layer already
+  rejected an empty list, so this is a schema-correctness/defense-in-depth fix.)
+- **Dropped two redundant indexes from the initial migration** — `idx_refresh_tokens_token_hash`
+  (the `token_hash UNIQUE` constraint already provides that index) and
+  `idx_verification_codes_tenant_email` (a left-prefix of the `(tenant_id, email, purpose)` PK).
+  Both edits are in the consolidated `000001` migration; a fresh `migrate up` gets the corrected
+  schema (existing deployments are unaffected and may drop them manually).
+- **Hardened the gosec CI step**: explicit `-severity`/`-confidence` thresholds (so a future
+  default change can't silently relax the gate) plus SARIF output uploaded as a build artifact for
+  triage history.
+- **Added `.github/dependabot.yml`** (gomod + github-actions, weekly) so the already-whitelisted
+  `dependabot/*` branches actually get created for security-sensitive dependency bumps.
+
+### Documentation
+
+- **Documented that login/refresh rate limiting is caller-owned.** `AuthService.Login` enforces
+  only a per-account failed-login lockout, which does not stop password spraying across accounts;
+  `RefreshToken` has no built-in throttle. Added a "Caller-Owned Controls" section to SECURITY.md
+  and security notes to the `Login`/`RefreshToken` godoc making clear the embedding application
+  must provide IP/global rate limiting.
+
+- **Documented several defense-in-depth assumptions.** The secret-encryption design (random GCM
+  nonces under a single long-lived key, safe at expected scale; no built-in key-rotation helper) is
+  now noted at `SecretService.encrypt`; that access tokens carry the user's email in signed-but-not-
+  encrypted claims (so raw tokens must not be logged) and that injected line-oriented loggers should
+  escape caller-supplied fields are noted in SECURITY.md; and that `GetTenant`/`GetTenantByDomain`/
+  `ListTenants` return the full, unauthorized `Settings` blob is noted on the `TenantService` interface.
+
+- **Added a "Generating secrets" section to the README** with `openssl rand -base64 32` snippets and
+  a note that `SecretConfig.EncryptionKey` must *decode* to 32 bytes (a 32-char ASCII string is wrong).
+
+- **Documented that `GenerateAccessToken`/`GenerateTokenPair` require a complete, freshly loaded
+  `*model.User`** — a partial/hand-built user (e.g. zero `TokenVersion`) mints a token that
+  `ValidateJWT` treats as revoked. Noted on the methods and the `JWTService`/`TokenService` interfaces.
+
+- **Corrected the accessor cost guidance** (`AuthKit` service accessors): the doc no longer says
+  "either is fine" — each call allocates a fresh service (and dependency graph), so callers should
+  prefer reusing a constructed service over calling the accessor on hot paths.
+
+- **Fixed inaccurate docs**: `architecture.md` described OTP consumption as `DELETE ... RETURNING`,
+  but it is `SELECT ... FOR UPDATE` then `DELETE` in a transaction; the down migration now documents
+  the schema-name substitution rule (matching the up migration).
+
+- **`OTPService` logging** now uses `err.Error()` for the `error` field, matching the rest of the
+  package (was passing the raw error value at a few call sites).
+
+### Internal
+
+These are non-behavioral cleanups with no public API change; listed for completeness.
+
+- **Removed ~176 redundant `if s.logger != nil` guards** across the service layer. Each service
+  constructor now defaults a nil logger to a no-op logger (`ensureLogger`), so call sites log
+  unconditionally.
+- **Standardized `sanitizeError` to always receive the service logger.** Previously some paths
+  passed `nil`, so a genuine (non-sentinel) DB fault on those paths was converted to `ErrInternal`
+  with no server-side log line — now every internal fault is logged at the boundary. (Preceding
+  contextual/leveled log lines were intentionally kept, since `sanitizeError` is silent on
+  sentinels and those lines are the sole record of events like refresh-token reuse.)
+- **De-duplicated the 16-column user row scan** into a single `scanUser` helper + `userColumns`
+  constant, reused by all five user-loading paths, so a column add/reorder is one edit instead of
+  five parallel ones.
+- **De-duplicated the affected-rows check** into a `requireRowsAffected(result, notFound)` helper,
+  replacing ~15 inline copies across the entity repositories.
+
 ## [0.10.0] - 2026-06-15
 
 Security release closing a tenant-isolation gap, plus an API-ergonomics cleanup.

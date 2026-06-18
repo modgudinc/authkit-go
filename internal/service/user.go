@@ -23,7 +23,7 @@ type UserService struct {
 func NewUserService(repo *repository.Repository, logger logger.Logger) *UserService {
 	return &UserService{
 		repo:   repo,
-		logger: logger,
+		logger: ensureLogger(logger),
 	}
 }
 
@@ -62,16 +62,15 @@ func (s *UserService) Create(ctx context.Context, req model.CreateUserRequest) (
 	return id, sanitizeError(s.logger, "create user", err)
 }
 
-// Update updates a user's roles and display name within a tenant.
-//
-// The tenantID is required and the update is scoped to it, so an admin in one
-// tenant cannot modify a user in another tenant by supplying its id (IDOR).
-// It bumps the user's token_version, so any outstanding access tokens (which
-// carry roles) are invalidated and the client must refresh to obtain tokens with
-// the updated roles. The refresh token itself remains valid (the user is not
-// logged out), so the next refresh seamlessly issues correctly-scoped tokens.
-func (s *UserService) Update(ctx context.Context, userID uuid.UUID, tenantID string, req model.UpdateUserRequest) error {
-	return sanitizeError(s.logger, "update user", s.repo.UpdateByTenant(ctx, userID, tenantID, req))
+// Update updates a user's roles and/or display name. req.UserID + req.TenantID
+// identify the target; the update is tenant-scoped, so an admin in one tenant
+// cannot modify a user in another by supplying its id (IDOR). It bumps the user's
+// token_version, so any outstanding access tokens (which carry roles) are
+// invalidated and the client must refresh to obtain tokens with the updated roles.
+// The refresh token itself remains valid (the user is not logged out), so the next
+// refresh seamlessly issues correctly-scoped tokens.
+func (s *UserService) Update(ctx context.Context, req model.UpdateUserRequest) error {
+	return sanitizeError(s.logger, "update user", s.repo.UpdateByTenant(ctx, req.UserID, req.TenantID, req))
 }
 
 // Delete soft-deletes a user (sets is_enabled=false) within a tenant and revokes
@@ -80,7 +79,7 @@ func (s *UserService) Delete(ctx context.Context, userID uuid.UUID, tenantID str
 	if err := s.repo.DeleteByTenant(ctx, userID, tenantID); err != nil {
 		return sanitizeError(s.logger, "delete user", err)
 	}
-	return sanitizeError(nil, "delete user", s.revokeRefreshTokens(ctx, userID, "delete"))
+	return sanitizeError(s.logger, "delete user", s.revokeRefreshTokens(ctx, userID, "delete"))
 }
 
 // ============================================================================
@@ -141,21 +140,6 @@ func (s *UserService) GetActiveUserIDByEmail(ctx context.Context, email, tenantI
 }
 
 // ============================================================================
-// Account Status (Admin Control)
-// ============================================================================
-
-// Enable enables a user account within a tenant (scoped to prevent IDOR).
-func (s *UserService) Enable(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	return sanitizeError(s.logger, "enable user", s.repo.EnableByTenant(ctx, userID, tenantID))
-}
-
-// Disable disables a user account within a tenant and revokes its refresh tokens.
-// It is an alias for DisableByTenant; both behave identically.
-func (s *UserService) Disable(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	return s.DisableByTenant(ctx, userID, tenantID)
-}
-
-// ============================================================================
 // Account Status (Security Control)
 // ============================================================================
 
@@ -168,7 +152,7 @@ func (s *UserService) Lock(ctx context.Context, userID uuid.UUID, tenantID strin
 	if err := s.repo.LockByTenant(ctx, userID, tenantID, lockedUntil); err != nil {
 		return sanitizeError(s.logger, "lock user", err)
 	}
-	return sanitizeError(nil, "lock user", s.revokeRefreshTokens(ctx, userID, "lock"))
+	return sanitizeError(s.logger, "lock user", s.revokeRefreshTokens(ctx, userID, "lock"))
 }
 
 // Unlock unlocks a user account within a tenant (scoped to prevent IDOR).
@@ -187,7 +171,7 @@ func (s *UserService) SetPassword(ctx context.Context, userID uuid.UUID, tenantI
 	if err := s.repo.SetPasswordByTenant(ctx, userID, tenantID, hashedPassword); err != nil {
 		return sanitizeError(s.logger, "set password", err)
 	}
-	return sanitizeError(nil, "set password", s.revokeRefreshTokens(ctx, userID, "set_password"))
+	return sanitizeError(s.logger, "set password", s.revokeRefreshTokens(ctx, userID, "set_password"))
 }
 
 // VerifyPassword retrieves the password hash for verification within a tenant
@@ -230,59 +214,56 @@ func (s *UserService) IncrementTokenVersion(ctx context.Context, userID uuid.UUI
 	if err := s.repo.IncrementTokenVersionByTenant(ctx, userID, tenantID); err != nil {
 		return sanitizeError(s.logger, "increment token version", err)
 	}
-	return sanitizeError(nil, "increment token version", s.revokeRefreshTokens(ctx, userID, "increment_token_version"))
+	return sanitizeError(s.logger, "increment token version", s.revokeRefreshTokens(ctx, userID, "increment_token_version"))
 }
 
 // revokeRefreshTokens deletes all refresh tokens for a user. Used by the
 // account-status mutators that must terminate existing sessions.
 func (s *UserService) revokeRefreshTokens(ctx context.Context, userID uuid.UUID, reason string) error {
 	if err := s.repo.DeleteByUserID(ctx, userID); err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to revoke refresh tokens",
-				"user_id", userID.String(),
-				"reason", reason,
-				"error", err.Error(),
-			)
-		}
+		s.logger.Error("Failed to revoke refresh tokens",
+			"user_id", userID.String(),
+			"reason", reason,
+			"error", err.Error(),
+		)
 		return err
 	}
 	return nil
 }
 
 // ============================================================================
-// Tenant-Scoped Operations (for admin user management APIs)
+// Account Status, Roles & Counts (admin, tenant-scoped)
 // ============================================================================
 
-// CountByTenant returns the count of users in a tenant
-func (s *UserService) CountByTenant(ctx context.Context, tenantID string) (int, error) {
+// Count returns the number of users in a tenant.
+func (s *UserService) Count(ctx context.Context, tenantID string) (int, error) {
 	n, err := s.repo.CountUsersByTenant(ctx, tenantID)
-	return n, sanitizeError(s.logger, "count users by tenant", err)
+	return n, sanitizeError(s.logger, "count users", err)
 }
 
-// UpdateRolesByTenant updates user roles with tenant isolation.
-// Used by admin APIs to ensure tenant ownership before modification. It bumps the
-// user's token_version so outstanding access tokens (which carry roles) are
-// invalidated; the next refresh issues tokens with the updated roles.
-func (s *UserService) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, tenantID string, roles []string) error {
-	return sanitizeError(s.logger, "update roles by tenant", s.repo.UpdateRolesByTenant(ctx, userID, tenantID, roles))
+// UpdateRoles replaces a user's roles, scoped to the tenant (an admin in one tenant
+// cannot modify a user in another). It bumps the user's token_version so outstanding
+// access tokens (which carry roles) are invalidated; the next refresh issues tokens
+// with the updated roles.
+func (s *UserService) UpdateRoles(ctx context.Context, userID uuid.UUID, tenantID string, roles []string) error {
+	return sanitizeError(s.logger, "update roles", s.repo.UpdateRolesByTenant(ctx, userID, tenantID, roles))
 }
 
-// EnableByTenant enables a user account with tenant isolation
-// Validates tenant ownership before enabling
-func (s *UserService) EnableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	return sanitizeError(s.logger, "enable user by tenant", s.repo.EnableByTenant(ctx, userID, tenantID))
+// Enable enables a user account, scoped to the tenant (validates tenant ownership).
+func (s *UserService) Enable(ctx context.Context, userID uuid.UUID, tenantID string) error {
+	return sanitizeError(s.logger, "enable user", s.repo.EnableByTenant(ctx, userID, tenantID))
 }
 
-// DisableByTenant disables a user account with tenant isolation and revokes its
-// refresh tokens.
+// Disable disables a user account, scoped to the tenant, and revokes its refresh
+// tokens.
 //
 // repo.DisableByTenant also bumps token_version (invalidating outstanding access
 // tokens). Refresh tokens are opaque and not tied to token_version, so they are
 // deleted explicitly here — otherwise a disabled-then-re-enabled account could
 // resume old sessions from refresh tokens that were never replayed.
-func (s *UserService) DisableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (s *UserService) Disable(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	if err := s.repo.DisableByTenant(ctx, userID, tenantID); err != nil {
-		return sanitizeError(s.logger, "disable user by tenant", err)
+		return sanitizeError(s.logger, "disable user", err)
 	}
-	return sanitizeError(nil, "disable user by tenant", s.revokeRefreshTokens(ctx, userID, "disable"))
+	return sanitizeError(s.logger, "disable user", s.revokeRefreshTokens(ctx, userID, "disable"))
 }

@@ -33,7 +33,10 @@ type PasswordService struct {
 	// dummyHash is a bcrypt hash computed lazily at the configured cost, used by
 	// DummyVerify to equalize timing on paths that would otherwise skip a real
 	// password comparison (e.g. unknown user), preventing username enumeration.
-	dummyOnce sync.Once
+	// Guarded by dummyMu; computed on first use and re-attempted on a later call if
+	// a prior generation failed, rather than latching the failure (which would
+	// silently disable the timing equalizer for the process lifetime).
+	dummyMu   sync.Mutex
 	dummyHash string
 }
 
@@ -52,7 +55,7 @@ func NewPasswordService(cost int, logger logger.Logger) *PasswordService {
 
 	return &PasswordService{
 		cost:   cost,
-		logger: logger,
+		logger: ensureLogger(logger),
 	}
 }
 
@@ -71,15 +74,11 @@ func NewPasswordService(cost int, logger logger.Logger) *PasswordService {
 //	}
 //	// Store hash in database
 func (s *PasswordService) HashPassword(password string) (string, error) {
-	if s.logger != nil {
-		s.logger.Info("Hashing password", "cost", s.cost)
-	}
+	s.logger.Info("Hashing password", "cost", s.cost)
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), s.cost)
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to hash password", "error", err.Error())
-		}
+		s.logger.Error("Failed to hash password", "error", err.Error())
 		// A password over bcrypt's 72-byte limit is a caller input problem, not an
 		// internal fault; surface it as the matchable strength sentinel so callers
 		// that bypass ValidatePasswordStrength still get a clean classification.
@@ -114,21 +113,15 @@ func (s *PasswordService) VerifyPassword(password, hash string) error {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	if err != nil {
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
-			if s.logger != nil {
-				s.logger.Warn("Password verification failed: incorrect password")
-			}
+			s.logger.Warn("Password verification failed: incorrect password")
 			return fmt.Errorf("incorrect password")
 		}
 
-		if s.logger != nil {
-			s.logger.Error("Password verification error", "error", err.Error())
-		}
+		s.logger.Error("Password verification error", "error", err.Error())
 		return fmt.Errorf("password verification failed: %w", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Password verified successfully")
-	}
+	s.logger.Info("Password verified successfully")
 
 	return nil
 }
@@ -141,15 +134,33 @@ func (s *PasswordService) VerifyPassword(password, hash string) error {
 // VerifyPassword call. This closes the timing side channel that would otherwise
 // let an attacker enumerate valid accounts. The result is intentionally ignored.
 func (s *PasswordService) DummyVerify(password string) {
-	s.dummyOnce.Do(func() {
-		h, err := bcrypt.GenerateFromPassword([]byte("authkit-dummy-password-for-constant-time"), s.cost)
-		if err == nil {
-			s.dummyHash = string(h)
-		}
-	})
-	if s.dummyHash != "" {
-		_ = bcrypt.CompareHashAndPassword([]byte(s.dummyHash), []byte(password))
+	if hash := s.dummyVerifyHash(); hash != "" {
+		_ = bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	}
+}
+
+// dummyVerifySeed is the fixed input hashed to produce the throwaway hash that
+// DummyVerify compares against. Its value is irrelevant (it is never a real
+// credential) — only that hashing it yields a valid bcrypt hash at the configured cost.
+const dummyVerifySeed = "authkit-dummy-verify-seed-for-constant-time"
+
+// dummyVerifyHash returns the cached dummy bcrypt hash, generating it on first use.
+// Unlike sync.Once, it re-attempts generation on a later call if a prior attempt
+// failed, so a (near-impossible, but defensive) transient failure cannot
+// permanently disable DummyVerify's timing equalization. Returns "" only while
+// generation is still failing.
+func (s *PasswordService) dummyVerifyHash() string {
+	s.dummyMu.Lock()
+	defer s.dummyMu.Unlock()
+	if s.dummyHash == "" {
+		h, err := bcrypt.GenerateFromPassword([]byte(dummyVerifySeed), s.cost)
+		if err != nil {
+			s.logger.Error("failed to generate dummy bcrypt hash for timing equalization", "error", err.Error())
+			return ""
+		}
+		s.dummyHash = string(h)
+	}
+	return s.dummyHash
 }
 
 // ValidatePasswordStrength validates password strength against requirements
@@ -207,15 +218,11 @@ func (s *PasswordService) ValidatePasswordStrength(password string, requirements
 	}
 
 	if len(problems) > 0 {
-		if s.logger != nil {
-			s.logger.Warn("Password strength validation failed", "errors", problems)
-		}
+		s.logger.Warn("Password strength validation failed", "errors", problems)
 		return fmt.Errorf("password %s: %w", strings.Join(problems, "; "), model.ErrPasswordTooWeak)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Password meets strength requirements")
-	}
+	s.logger.Info("Password meets strength requirements")
 
 	return nil
 }

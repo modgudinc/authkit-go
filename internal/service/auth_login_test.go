@@ -22,12 +22,14 @@ type fakeAuthRepository struct {
 	getByEmailErr error
 	getByIDErr    error
 
-	lastGetByEmail    string
-	lockCalled        bool
-	unlockCalled      bool
-	incFailedCalled   int
-	updateLastLogin   int
-	lockedUntilPassed *time.Time
+	lastGetByEmail              string
+	lockCalled                  bool
+	unlockCalled                bool
+	incFailedCalled             int
+	updateLastLogin             int
+	lockedUntilPassed           *time.Time
+	getByIDFromPrimaryCalled    bool
+	getByEmailFromPrimaryCalled bool
 }
 
 func (f *fakeAuthRepository) GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error) {
@@ -38,11 +40,26 @@ func (f *fakeAuthRepository) GetByEmail(ctx context.Context, email, tenantID str
 	return f.user, nil
 }
 
+// GetByEmailFromPrimary mirrors GetByEmail for the fake; the primary/replica split
+// is a repository concern, so the in-memory fake serves both from the same record.
+func (f *fakeAuthRepository) GetByEmailFromPrimary(ctx context.Context, email, tenantID string) (*model.User, error) {
+	f.getByEmailFromPrimaryCalled = true
+	return f.GetByEmail(ctx, email, tenantID)
+}
+
 func (f *fakeAuthRepository) GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
 	if f.getByIDErr != nil {
 		return nil, f.getByIDErr
 	}
 	return f.user, nil
+}
+
+// GetByIDFromPrimary mirrors GetByID for the fake: the primary/replica split is a
+// repository concern, so the in-memory fake returns the same user from both. It
+// records that it was called so a test can assert the security gate uses it.
+func (f *fakeAuthRepository) GetByIDFromPrimary(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
+	f.getByIDFromPrimaryCalled = true
+	return f.GetByID(ctx, userID, tenantID)
 }
 
 func (f *fakeAuthRepository) Lock(ctx context.Context, userID uuid.UUID, lockedUntil *time.Time) error {
@@ -96,6 +113,14 @@ func (f *fakeAuthRepository) SetPasswordByTenant(ctx context.Context, userID uui
 	return nil
 }
 
+func (f *fakeAuthRepository) SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error {
+	if f.user != nil {
+		f.user.PasswordHash = hashedPassword
+		f.user.TokenVersion++
+	}
+	return nil
+}
+
 func (f *fakeAuthRepository) IncrementTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
 	return nil
 }
@@ -106,7 +131,7 @@ func newTestAuthService(repo *fakeAuthRepository) *AuthService {
 		repo:            repo,
 		passwordService: pw,
 		jwtService:      NewJWTService("test-access-secret", 15*time.Minute, time.Hour, nil),
-		logger:          nil,
+		logger:          ensureLogger(nil),
 	}
 }
 
@@ -170,6 +195,24 @@ func TestLoginWrongPasswordIncrementsFailedCount(t *testing.T) {
 	}
 	if repo.lockCalled {
 		t.Fatal("did not expect lock below threshold")
+	}
+}
+
+func TestLoginReadsUserFromPrimary(t *testing.T) {
+	user := makeUser(t, "Correct1!")
+	repo := &fakeAuthRepository{user: user}
+	svc := newTestAuthService(repo)
+
+	// Wrong password returns before token generation, so the unit fake (no token
+	// service) is sufficient; the gate read at step 1 is what we assert here.
+	_, _ = svc.Login(context.Background(), model.LoginRequest{
+		Email: user.Email, Password: "Wrong1!", TenantID: user.TenantID,
+	})
+
+	// The is_enabled/is_locked gate must read the primary so an admin disable/lock
+	// (or a freshly written auto-lock) takes effect without waiting for replica lag.
+	if !repo.getByEmailFromPrimaryCalled {
+		t.Fatal("Login must read the user from the primary (GetByEmailFromPrimary)")
 	}
 }
 
@@ -269,6 +312,26 @@ func TestValidateJWTRejectsDisabledAndLocked(t *testing.T) {
 			t.Fatalf("expected ErrAccountLocked, got %v", err)
 		}
 	})
+}
+
+func TestValidateJWTReadsUserFromPrimary(t *testing.T) {
+	user := makeUser(t, "Correct1!")
+	repo := &fakeAuthRepository{user: user}
+	svc := newTestAuthService(repo)
+
+	token, err := svc.jwtService.GenerateAccessToken(user)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	if _, err := svc.ValidateJWT(context.Background(), token); err != nil {
+		t.Fatalf("validate jwt: %v", err)
+	}
+
+	// The revocation / account-status gate must read the primary so token_version,
+	// disable and lock writes take effect immediately rather than lagging a replica.
+	if !repo.getByIDFromPrimaryCalled {
+		t.Fatal("ValidateJWT must read the user from the primary (GetByIDFromPrimary)")
+	}
 }
 
 func TestValidateJWTRejectsTamperedSignature(t *testing.T) {

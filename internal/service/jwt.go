@@ -67,7 +67,7 @@ func NewJWTService(
 		accessSecret:  accessSecret,
 		accessExpiry:  accessExpiry,
 		refreshExpiry: refreshExpiry,
-		logger:        logger,
+		logger:        ensureLogger(logger),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -79,6 +79,14 @@ func NewJWTService(
 //
 // Parameters:
 //   - user: User model containing ID, email, tenant, roles, token version
+//
+// The user MUST be a complete, freshly loaded record (ID, Email, TenantID, Roles,
+// and TokenVersion all populated from storage). These fields are copied verbatim
+// into the signed claims, so a hand-built or partially populated User — e.g. one
+// left with a zero TokenVersion — mints a token that AuthService.ValidateJWT will
+// immediately treat as revoked once it no longer matches the stored token_version.
+// The high-level AuthService flows load the user for you; this caveat applies when
+// calling the JWT/Token services directly.
 //
 // # Returns a signed JWT string or error
 //
@@ -100,13 +108,11 @@ func NewJWTService(
 //	}
 //	// Return token to client
 func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
-	if s.logger != nil {
-		s.logger.Info("Generating access token",
-			"user_id", user.ID.String(),
-			"email", maskEmail(user.Email),
-			"tenant_id", user.TenantID,
-		)
-	}
+	s.logger.Info("Generating access token",
+		"user_id", user.ID.String(),
+		"email", maskEmail(user.Email),
+		"tenant_id", user.TenantID,
+	)
 
 	now := time.Now()
 	expiresAt := now.Add(s.accessExpiry)
@@ -134,18 +140,14 @@ func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signedToken, err := token.SignedString([]byte(s.accessSecret))
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to sign JWT token", "error", err.Error())
-		}
+		s.logger.Error("Failed to sign JWT token", "error", err.Error())
 		return "", fmt.Errorf("failed to sign JWT token: %w", err)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("Access token generated successfully",
-			"user_id", user.ID.String(),
-			"expires_at", expiresAt.Format(time.RFC3339),
-		)
-	}
+	s.logger.Info("Access token generated successfully",
+		"user_id", user.ID.String(),
+		"expires_at", expiresAt.Format(time.RFC3339),
+	)
 
 	return signedToken, nil
 }
@@ -196,9 +198,7 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 	if err != nil {
 		// Validation failures are driven by untrusted input; log at Warn to avoid
 		// error-level log floods from clients spamming invalid tokens.
-		if s.logger != nil {
-			s.logger.Warn("Failed to parse JWT token", "error", err.Error())
-		}
+		s.logger.Warn("Failed to parse JWT token", "error", err.Error())
 		// Wrap the sentinel (not the raw jwt-lib error) so callers using this
 		// service directly can errors.Is(err, authkit.ErrInvalidToken), matching
 		// AuthService.ValidateJWT. The underlying cause is already logged above.
@@ -207,18 +207,14 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 
 	claims, ok := token.Claims.(*model.JWTClaims)
 	if !ok || !token.Valid {
-		if s.logger != nil {
-			s.logger.Warn("Invalid JWT claims or token")
-		}
+		s.logger.Warn("Invalid JWT claims or token")
 		return nil, fmt.Errorf("invalid token claims: %w", model.ErrInvalidToken)
 	}
 
-	if s.logger != nil {
-		s.logger.Info("JWT token validated successfully",
-			"user_id", claims.UserID,
-			"tenant_id", claims.TenantID,
-		)
-	}
+	s.logger.Info("JWT token validated successfully",
+		"user_id", claims.UserID,
+		"tenant_id", claims.TenantID,
+	)
 
 	return claims, nil
 }
@@ -245,25 +241,19 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 //	// Store HMAC-SHA256(refreshToken) in database (via TokenService)
 //	// Return refreshToken to client
 func (s *JWTService) GenerateRefreshToken() (string, error) {
-	if s.logger != nil {
-		s.logger.Info("Generating refresh token")
-	}
+	s.logger.Info("Generating refresh token")
 
 	// Generate 32 random bytes
 	randomBytes := make([]byte, 32)
 	if _, err := rand.Read(randomBytes); err != nil {
-		if s.logger != nil {
-			s.logger.Error("Failed to generate random bytes", "error", err.Error())
-		}
+		s.logger.Error("Failed to generate random bytes", "error", err.Error())
 		return "", fmt.Errorf("failed to generate random bytes: %w", err)
 	}
 
 	// Encode to base64 for safe transmission
 	token := base64.URLEncoding.EncodeToString(randomBytes)
 
-	if s.logger != nil {
-		s.logger.Info("Refresh token generated successfully")
-	}
+	s.logger.Info("Refresh token generated successfully")
 
 	return token, nil
 }

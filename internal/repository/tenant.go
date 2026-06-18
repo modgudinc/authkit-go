@@ -224,16 +224,7 @@ func (r *Repository) AddAllowedDomain(ctx context.Context, tenantID, domain stri
 		return fmt.Errorf("failed to add allowed domain: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound))
 }
 
 // ============================================================================
@@ -252,16 +243,7 @@ func (r *Repository) UpdateName(ctx context.Context, tenantID, name string) erro
 		return fmt.Errorf("failed to update tenant name: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound))
 }
 
 // ============================================================================
@@ -280,16 +262,7 @@ func (r *Repository) SetAllowedDomains(ctx context.Context, tenantID string, dom
 		return fmt.Errorf("failed to update allowed domains: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound))
 }
 
 // ============================================================================
@@ -309,14 +282,5 @@ func (r *Repository) UpdateSettings(ctx context.Context, tenantID, settingsJSON 
 		return fmt.Errorf("failed to update tenant settings: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("tenant %q not found: %w", tenantID, model.ErrNotFound))
 }

@@ -168,16 +168,7 @@ func (r *Repository) DeleteSecret(ctx context.Context, tenantID, key string) err
 		return fmt.Errorf("failed to delete secret: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("secret %q not found: %w", key, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("secret %q not found: %w", key, model.ErrNotFound))
 }
 
 // ============================================================================
@@ -216,14 +207,5 @@ func (r *Repository) UpdateSecretVerified(ctx context.Context, tenantID, key str
 		return fmt.Errorf("failed to update secret verified: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("secret %q not found: %w", key, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("secret %q not found: %w", key, model.ErrNotFound))
 }

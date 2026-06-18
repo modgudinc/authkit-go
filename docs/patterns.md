@@ -63,7 +63,7 @@ func RequireJWT(identity *authkit.AuthKit, next http.Handler) http.Handler {
 func RequireAPIKey(identity *authkit.AuthKit, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiKey := r.Header.Get("X-API-Key")
-		keyContext, err := identity.APIKeyService().ValidateAPIKey(r.Context(), apiKey)
+		keyContext, err := identity.APIKeyService().Validate(r.Context(), apiKey)
 		if err != nil {
 			http.Error(w, "invalid API key", http.StatusUnauthorized)
 			return
@@ -84,16 +84,16 @@ One common flow:
 3. Application validates the OTP it sent to the invited email.
 4. User submits OTP and password.
 5. Application validates the OTP, hashes the password, and calls
-   `InvitationService.AcceptInvitation`, which validates the invitation, consumes
+   `InvitationService.Accept`, which validates the invitation, consumes
    one use, and creates the user in a single transaction.
 
-Use `AcceptInvitation` for redemption — it provides atomic, all-or-nothing
+Use `Accept` for redemption — it provides atomic, all-or-nothing
 semantics, so a single-use invitation can't be over-redeemed. Composing
-`ValidateInvitation` + your own user creation + `IncrementUseCount` is non-atomic
+`Validate` + your own user creation + `IncrementUseCount` is non-atomic
 and can over-redeem under concurrency; those remain available only as lower-level
 building blocks.
 
-Note: `AcceptInvitation` checks the invitation's expiry, remaining uses, and that
+Note: `Accept` checks the invitation's expiry, remaining uses, and that
 the email matches the invitation — it does **not** check the tenant's
 `allowed_domains`. If you require invited users to stay within the tenant's domain
 list, call `TenantService.ValidateDomainAccess` before creating the invitation.
@@ -103,10 +103,10 @@ list, call `TenantService.ValidateDomainAccess` before creating the invitation.
 Run cleanup jobs periodically:
 
 ```go
-_, _ = identity.APIKeyService().CleanupExpiredKeys(ctx)
+_, _ = identity.APIKeyService().CleanupExpired(ctx)
 _, _ = identity.OTPService().CleanupExpired(ctx)
-_, _ = identity.InvitationService().CleanupExpiredInvitations(ctx)
-_, _ = identity.TokenService().CleanupExpiredTokens(ctx)
+_, _ = identity.InvitationService().CleanupExpired(ctx)
+_, _ = identity.TokenService().CleanupExpired(ctx)
 ```
 
 Choose the schedule based on your data volume. Hourly for OTPs and daily for longer-lived artifacts is a reasonable starting point.

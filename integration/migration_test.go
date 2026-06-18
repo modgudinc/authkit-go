@@ -702,9 +702,9 @@ func TestDisableByTenantRevokesRefreshTokens(t *testing.T) {
 		t.Fatal("expected an active refresh token after login")
 	}
 
-	// DisableByTenant must revoke the user's refresh tokens (parity with Disable),
+	// Disable must revoke the user's refresh tokens (parity with Disable),
 	// so a later re-enable cannot resurrect old sessions.
-	if err := authKit.UserService().DisableByTenant(ctx, userID, tenantID); err != nil {
+	if err := authKit.UserService().Disable(ctx, userID, tenantID); err != nil {
 		t.Fatalf("disable by tenant: %v", err)
 	}
 
@@ -713,7 +713,7 @@ func TestDisableByTenantRevokesRefreshTokens(t *testing.T) {
 		t.Fatalf("get tokens after disable: %v", err)
 	}
 	if len(toks) != 0 {
-		t.Fatalf("expected refresh tokens revoked after DisableByTenant, got %d", len(toks))
+		t.Fatalf("expected refresh tokens revoked after Disable, got %d", len(toks))
 	}
 }
 

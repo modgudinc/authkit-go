@@ -247,16 +247,7 @@ func (r *Repository) UpdateAPIKeyLastUsed(ctx context.Context, keyID, tenantID s
 		return fmt.Errorf("failed to update api key last used: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("api key %s not found: %w", keyID, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("api key %s not found: %w", keyID, model.ErrNotFound))
 }
 
 // ============================================================================
@@ -276,16 +267,7 @@ func (r *Repository) DeleteAPIKey(ctx context.Context, keyID, tenantID string) e
 		return fmt.Errorf("failed to delete api key: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("api key %s not found: %w", keyID, model.ErrNotFound)
-	}
-
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("api key %s not found: %w", keyID, model.ErrNotFound))
 }
 
 // ============================================================================

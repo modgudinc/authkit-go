@@ -84,6 +84,13 @@ var (
 	// opaque internal error.
 	ErrSecretEncryptionKeyMissing = errors.New("authkit: secret encryption key not configured")
 
+	// ErrValueTooLong is returned (wrapped) when a caller-supplied string exceeds the
+	// maximum length the store allows for its column (e.g. an over-length tenant_id,
+	// name, secret key, email, or display name), or when tenant settings exceed the
+	// serialized-size cap. It is a matchable input error so callers can return a 400
+	// rather than treating an over-length value as an opaque internal fault.
+	ErrValueTooLong = errors.New("authkit: value exceeds maximum allowed length")
+
 	// ErrInternal is returned (wrapped) when an unexpected internal/storage error
 	// occurs. The underlying cause is logged server-side; callers receive this
 	// generic error so driver/schema details do not leak across the API boundary.

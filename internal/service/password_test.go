@@ -116,3 +116,21 @@ func TestDummyVerifyRunsBcryptCompare(t *testing.T) {
 		t.Fatalf("dummy hash is not a valid bcrypt hash: %v", err)
 	}
 }
+
+// TestDummyVerifyHashIsStableAcrossCalls asserts the dummy hash is generated once
+// and then reused, so DummyVerify does not pay a fresh bcrypt generation on every
+// call (it should be a single compare after the first use).
+func TestDummyVerifyHashIsStableAcrossCalls(t *testing.T) {
+	s := NewPasswordService(bcrypt.MinCost, nil)
+
+	s.DummyVerify("a")
+	first := s.dummyHash
+	if first == "" {
+		t.Fatal("expected dummy hash to be computed on first use")
+	}
+
+	s.DummyVerify("b")
+	if s.dummyHash != first {
+		t.Fatal("dummy hash should be reused across calls, not regenerated")
+	}
+}

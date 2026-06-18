@@ -54,11 +54,17 @@ Best practices:
 - Restrict read access to production secrets to the smallest possible operator
   and runtime set.
 - Treat logs, panic traces, metrics labels, and error reports as hostile surfaces;
-  never include plaintext API keys, refresh tokens, OTPs, passwords, or provider
-  secrets. Minimize PII too: authkit's own logs mask email addresses (e.g.
-  `u***@acme.com`) and avoid logging an attacker-controlled lookup error alongside
-  the email, so the auth logs are not an account-enumeration list. Keep this
-  property when adding log lines, and apply the same care in your application logs.
+  never include plaintext API keys, access or refresh tokens, OTPs, passwords, or
+  provider secrets. Access tokens are signed but NOT encrypted and carry identity
+  claims (including the user's email), so a logged raw token leaks that PII in
+  addition to being a usable bearer credential. Minimize PII too: authkit's own logs
+  mask email addresses (e.g. `u***@acme.com`) and avoid logging an attacker-controlled
+  lookup error alongside the email, so the auth logs are not an account-enumeration
+  list. Keep this property when adding log lines, and apply the same care in your
+  application logs. If you inject a line-oriented logger (e.g. the standard library
+  `log` package), escape untrusted field values — authkit logs some caller-supplied
+  fields (such as tenant name and domain) verbatim; structured loggers escape field
+  values, but plain line writers do not, so control characters could forge log lines.
 
 Recommended minimum entropy:
 
@@ -108,6 +114,25 @@ If zero-downtime root-secret rotation is required, wrap this library at the
 application layer with key-version metadata or dual-read/single-write logic. For
 example, validate API keys against old and new HMAC secrets during a short
 migration window, but create only new-key hashes.
+
+## Caller-Owned Controls
+
+This library deliberately leaves some controls to the embedding application. They
+are out of scope for the library itself and must be provided by the caller:
+
+- **Login / token-refresh rate limiting.** `AuthService.Login` enforces only a
+  per-account failed-login lockout (`MaxFailedLoginAttempts`, then a timed lock).
+  That bounds guessing against a *single* account but does NOT stop password
+  spraying (one or two guesses each across many accounts) or distributed guessing,
+  and `AuthService.RefreshToken` has no throttle at all. Put IP-based and/or global
+  rate limiting in front of these endpoints. Refresh tokens themselves are 256-bit
+  random and not feasibly guessable, but the endpoint should still be throttled to
+  bound abuse and OTP/email cost amplification.
+- **Transport security.** Terminate TLS and reject plaintext transport — access and
+  refresh tokens are bearer credentials, and access tokens carry identity claims
+  (including email) that are signed but not encrypted.
+- **Authorization.** The library authenticates and scopes data by tenant, but the
+  application decides what an authenticated principal is allowed to do.
 
 ## Scope
 

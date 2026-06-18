@@ -284,25 +284,34 @@ func (r *Repository) VerifyPasswordByTenant(ctx context.Context, userID uuid.UUI
 	return hashedPassword, nil
 }
 
-// ============================================================================
-// GetByID - Retrieves a user by ID within a specific tenant
-// Scoped by tenant_id to prevent cross-tenant access
-// ============================================================================
-func (r *Repository) GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
-	query := `
-		SELECT
-			id, email, password_hash, tenant_id, display_name, roles, token_version,
-			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
-			created_at, updated_at
-		FROM {{schema}}.users
-		WHERE id = $1 AND tenant_id = $2
-	`
+// rowQuerier is the single-row read surface shared by the rw (primary) and ro
+// (replica) *sql.DB handles, so a query helper can run against either one.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
+// scannable is the row-scan surface shared by *sql.Row (single-row queries) and
+// *sql.Rows (result-set iteration), so scanUser can scan a user from either.
+type scannable interface {
+	Scan(dest ...any) error
+}
+
+// userColumns is the SELECT list, in Scan order, for a full user row. Keeping the
+// column list and the scan together (here + scanUser) means a column add/reorder is
+// one edit, not four parallel ones that must stay in lockstep.
+const userColumns = "id, email, password_hash, tenant_id, display_name, roles, token_version, " +
+	"is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login, " +
+	"created_at, updated_at"
+
+// scanUser scans a full user row (the userColumns, in order) from row, including the
+// JSONB roles unmarshal and the nullable timestamp fields. It returns the raw scan
+// error so callers can map sql.ErrNoRows to their own not-found message.
+func scanUser(row scannable) (*model.User, error) {
 	var user model.User
 	var rolesJSON []byte
 	var disabledAt, lockedUntil, lastFailedLogin, lastLogin *time.Time
 
-	err := r.ro.QueryRowContext(ctx, r.q(query), userID, tenantID).Scan(
+	if err := row.Scan(
 		&user.ID,
 		&user.Email,
 		&user.PasswordHash,
@@ -319,26 +328,62 @@ func (r *Repository) GetByID(ctx context.Context, userID uuid.UUID, tenantID str
 		&lastLogin,
 		&user.CreatedAt,
 		&user.UpdatedAt,
-	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("user not found: %w", model.ErrNotFound)
-		}
-		return nil, fmt.Errorf("failed to get user by id: %w", err)
+	); err != nil {
+		return nil, err
 	}
 
-	// Unmarshal roles from JSONB
 	if err := json.Unmarshal(rolesJSON, &user.Roles); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal roles: %w", err)
 	}
 
-	// Set nullable fields
 	user.DisabledAt = disabledAt
 	user.LockedUntil = lockedUntil
 	user.LastFailedLoginAt = lastFailedLogin
 	user.LastLoginAt = lastLogin
 
 	return &user, nil
+}
+
+// ============================================================================
+// getByID - Tenant-scoped user lookup against the supplied handle (rw or ro).
+// Shared by GetByID (replica) and GetByIDFromPrimary (primary).
+// ============================================================================
+func (r *Repository) getByID(ctx context.Context, db rowQuerier, userID uuid.UUID, tenantID string) (*model.User, error) {
+	query := `SELECT ` + userColumns + ` FROM {{schema}}.users WHERE id = $1 AND tenant_id = $2`
+
+	user, err := scanUser(db.QueryRowContext(ctx, r.q(query), userID, tenantID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("user not found: %w", model.ErrNotFound)
+		}
+		return nil, fmt.Errorf("failed to get user by id: %w", err)
+	}
+	return user, nil
+}
+
+// ============================================================================
+// GetByID - Retrieves a user by ID within a specific tenant
+// Scoped by tenant_id to prevent cross-tenant access. Reads from the read
+// replica (ro) — use GetByIDFromPrimary for security gates that must observe the
+// latest writes (see below).
+// ============================================================================
+func (r *Repository) GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
+	return r.getByID(ctx, r.ro, userID, tenantID)
+}
+
+// ============================================================================
+// GetByIDFromPrimary - Like GetByID but reads from the PRIMARY (rw).
+//
+// It backs the JWT-validation security gate (AuthService.ValidateJWT), where
+// token_version, is_enabled and is_locked must reflect the latest writes
+// immediately: LogoutAll / ChangePassword bump token_version, and disable/lock
+// write to rw. A lagging replica would otherwise let a just-revoked token (or a
+// just-disabled/locked account) keep passing validation for the replication-lag
+// window — a fail-open gap. This mirrors the same rw decision already made for
+// GetByTokenHash and GetAPIKeyByHash.
+// ============================================================================
+func (r *Repository) GetByIDFromPrimary(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
+	return r.getByID(ctx, r.rw, userID, tenantID)
 }
 
 // ============================================================================
@@ -346,113 +391,56 @@ func (r *Repository) GetByID(ctx context.Context, userID uuid.UUID, tenantID str
 // Used for refresh token validation where user_id is sufficient (UUID is unique)
 // ============================================================================
 func (r *Repository) GetByIDOnly(ctx context.Context, userID uuid.UUID) (*model.User, error) {
-	query := `
-		SELECT
-			id, email, password_hash, tenant_id, display_name, roles, token_version,
-			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
-			created_at, updated_at
-		FROM {{schema}}.users
-		WHERE id = $1
-	`
+	query := `SELECT ` + userColumns + ` FROM {{schema}}.users WHERE id = $1`
 
-	var user model.User
-	var rolesJSON []byte
-	var disabledAt, lockedUntil, lastFailedLogin, lastLogin *time.Time
-
-	err := r.ro.QueryRowContext(ctx, r.q(query), userID).Scan(
-		&user.ID,
-		&user.Email,
-		&user.PasswordHash,
-		&user.TenantID,
-		&user.DisplayName,
-		&rolesJSON,
-		&user.TokenVersion,
-		&user.IsEnabled,
-		&disabledAt,
-		&user.IsLocked,
-		&lockedUntil,
-		&user.FailedLoginCount,
-		&lastFailedLogin,
-		&lastLogin,
-		&user.CreatedAt,
-		&user.UpdatedAt,
-	)
+	user, err := scanUser(r.ro.QueryRowContext(ctx, r.q(query), userID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("user not found: %w", model.ErrNotFound)
 		}
 		return nil, fmt.Errorf("failed to get user by id: %w", err)
 	}
-
-	// Unmarshal roles from JSONB
-	if err := json.Unmarshal(rolesJSON, &user.Roles); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal roles: %w", err)
-	}
-
-	// Set nullable fields
-	user.DisabledAt = disabledAt
-	user.LockedUntil = lockedUntil
-	user.LastFailedLoginAt = lastFailedLogin
-	user.LastLoginAt = lastLogin
-
-	return &user, nil
+	return user, nil
 }
 
 // ============================================================================
-// GetByEmail - Retrieves a user by email within a specific tenant
-// Scoped by tenant_id to prevent cross-tenant access
+// getByEmail - Tenant-scoped user lookup by email against the supplied handle
+// (rw or ro). Shared by GetByEmail (replica) and GetByEmailFromPrimary (primary).
 // ============================================================================
-func (r *Repository) GetByEmail(ctx context.Context, email string, tenantID string) (*model.User, error) {
-	query := `
-		SELECT
-			id, email, password_hash, tenant_id, display_name, roles, token_version,
-			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
-			created_at, updated_at
-		FROM {{schema}}.users
-		WHERE email = $1 AND tenant_id = $2
-	`
+func (r *Repository) getByEmail(ctx context.Context, db rowQuerier, email string, tenantID string) (*model.User, error) {
+	query := `SELECT ` + userColumns + ` FROM {{schema}}.users WHERE email = $1 AND tenant_id = $2`
 
-	var user model.User
-	var rolesJSON []byte
-	var disabledAt, lockedUntil, lastFailedLogin, lastLogin *time.Time
-
-	err := r.ro.QueryRowContext(ctx, r.q(query), email, tenantID).Scan(
-		&user.ID,
-		&user.Email,
-		&user.PasswordHash,
-		&user.TenantID,
-		&user.DisplayName,
-		&rolesJSON,
-		&user.TokenVersion,
-		&user.IsEnabled,
-		&disabledAt,
-		&user.IsLocked,
-		&lockedUntil,
-		&user.FailedLoginCount,
-		&lastFailedLogin,
-		&lastLogin,
-		&user.CreatedAt,
-		&user.UpdatedAt,
-	)
+	user, err := scanUser(db.QueryRowContext(ctx, r.q(query), email, tenantID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("user not found: %w", model.ErrNotFound)
 		}
 		return nil, fmt.Errorf("failed to get user by email: %w", err)
 	}
+	return user, nil
+}
 
-	// Unmarshal roles from JSONB
-	if err := json.Unmarshal(rolesJSON, &user.Roles); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal roles: %w", err)
-	}
+// ============================================================================
+// GetByEmail - Retrieves a user by email within a specific tenant
+// Scoped by tenant_id to prevent cross-tenant access. Reads from the read
+// replica (ro) — use GetByEmailFromPrimary for the login security gate.
+// ============================================================================
+func (r *Repository) GetByEmail(ctx context.Context, email string, tenantID string) (*model.User, error) {
+	return r.getByEmail(ctx, r.ro, email, tenantID)
+}
 
-	// Set nullable fields
-	user.DisabledAt = disabledAt
-	user.LockedUntil = lockedUntil
-	user.LastFailedLoginAt = lastFailedLogin
-	user.LastLoginAt = lastLogin
-
-	return &user, nil
+// ============================================================================
+// GetByEmailFromPrimary - Like GetByEmail but reads from the PRIMARY (rw).
+//
+// It backs AuthService.Login, whose is_enabled / is_locked gate must observe an
+// admin disable/lock (or an auto-lock from RegisterFailedLogin) immediately. A
+// lagging replica would otherwise let a just-disabled/locked account pass the
+// front-door gate for the replication-lag window. The authoritative lockout
+// counter is already enforced on rw via RegisterFailedLogin, so only this gate
+// read needed hardening.
+// ============================================================================
+func (r *Repository) GetByEmailFromPrimary(ctx context.Context, email string, tenantID string) (*model.User, error) {
+	return r.getByEmail(ctx, r.rw, email, tenantID)
 }
 
 // ============================================================================
@@ -483,16 +471,11 @@ func (r *Repository) Exists(ctx context.Context, email string, tenantID string) 
 // Returns users ordered by created_at DESC (newest first)
 // ============================================================================
 func (r *Repository) List(ctx context.Context, tenantID string, limit, offset int) ([]*model.User, error) {
-	query := `
-		SELECT
-			id, email, password_hash, tenant_id, display_name, roles, token_version,
-			is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login,
-			created_at, updated_at
+	query := `SELECT ` + userColumns + `
 		FROM {{schema}}.users
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
-	`
+		LIMIT $2 OFFSET $3`
 
 	rows, err := r.ro.QueryContext(ctx, r.q(query), tenantID, limit, offset)
 	if err != nil {
@@ -504,44 +487,11 @@ func (r *Repository) List(ctx context.Context, tenantID string, limit, offset in
 
 	var users []*model.User
 	for rows.Next() {
-		var user model.User
-		var rolesJSON []byte
-		var disabledAt, lockedUntil, lastFailedLogin, lastLogin *time.Time
-
-		err := rows.Scan(
-			&user.ID,
-			&user.Email,
-			&user.PasswordHash,
-			&user.TenantID,
-			&user.DisplayName,
-			&rolesJSON,
-			&user.TokenVersion,
-			&user.IsEnabled,
-			&disabledAt,
-			&user.IsLocked,
-			&lockedUntil,
-			&user.FailedLoginCount,
-			&lastFailedLogin,
-			&lastLogin,
-			&user.CreatedAt,
-			&user.UpdatedAt,
-		)
+		user, err := scanUser(rows)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan user row: %w", err)
 		}
-
-		// Unmarshal roles from JSONB
-		if err := json.Unmarshal(rolesJSON, &user.Roles); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal roles: %w", err)
-		}
-
-		// Set nullable fields
-		user.DisabledAt = disabledAt
-		user.LockedUntil = lockedUntil
-		user.LastFailedLoginAt = lastFailedLogin
-		user.LastLoginAt = lastLogin
-
-		users = append(users, &user)
+		users = append(users, user)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -778,16 +728,7 @@ func (r *Repository) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, 
 		return fmt.Errorf("failed to update user roles: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("user not found or does not belong to tenant: %w", model.ErrNotFound)
-	}
-
-	return nil
+	return rowsAffectedOrNotFound(result)
 }
 
 // ============================================================================
@@ -858,6 +799,26 @@ func (r *Repository) SetPasswordByTenant(ctx context.Context, userID uuid.UUID, 
 	result, err := r.rw.ExecContext(ctx, r.q(query), hashedPassword, time.Now(), userID, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to set password: %w", err)
+	}
+	return rowsAffectedOrNotFound(result)
+}
+
+// ============================================================================
+// SetPasswordAndBumpTokenVersionByTenant - Sets the password hash AND increments
+// token_version in a single tenant-scoped UPDATE. Used by ChangePassword so the
+// password change and the access-token invalidation (token_version) are applied
+// atomically: they can never be left half-applied (password changed but old JWTs
+// still valid, or vice versa). Refresh-token revocation remains a separate step.
+// ============================================================================
+func (r *Repository) SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error {
+	query := `
+		UPDATE {{schema}}.users
+		SET password_hash = $1, token_version = token_version + 1, updated_at = $2
+		WHERE id = $3 AND tenant_id = $4
+	`
+	result, err := r.rw.ExecContext(ctx, r.q(query), hashedPassword, time.Now(), userID, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to set password and bump token version: %w", err)
 	}
 	return rowsAffectedOrNotFound(result)
 }
@@ -934,14 +895,7 @@ func (r *Repository) IncrementTokenVersionByTenant(ctx context.Context, userID u
 // rowsAffectedOrNotFound returns model.ErrNotFound when a tenant-scoped mutation
 // matched no row (unknown user or wrong tenant), and surfaces RowsAffected errors.
 func rowsAffectedOrNotFound(result sql.Result) error {
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("user not found or does not belong to tenant: %w", model.ErrNotFound)
-	}
-	return nil
+	return requireRowsAffected(result, fmt.Errorf("user not found or does not belong to tenant: %w", model.ErrNotFound))
 }
 
 // ============================================================================

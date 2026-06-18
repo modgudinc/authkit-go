@@ -185,10 +185,12 @@ func New(config Config) (*AuthKit, error) {
 	}, nil
 }
 
-// The accessors below each return a service interface. The returned values are
-// cheap to construct — they wrap the shared connection pool and configuration and
-// open no new resources — so callers may call an accessor per use or cache the
-// result; either is fine.
+// The accessors below each return a service interface. They open no new resources
+// — each just wraps the shared connection pool and configuration — but they are not
+// free: every call allocates a fresh service (and, for the composite ones like
+// AuthService, its whole dependency graph). Prefer constructing a service once and
+// reusing it; constructing per call is acceptable but avoid it on hot request paths.
+// The returned services are safe for concurrent use.
 
 // APIKeyService returns the API key service
 // for managing tenant-scoped API keys (creation, validation, revocation).

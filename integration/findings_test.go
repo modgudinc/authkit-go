@@ -145,7 +145,7 @@ func TestGetByTokenHashReturnsRefreshTokenSentinel(t *testing.T) {
 // TestTenantDomainMatchingIsCaseInsensitive verifies the documented
 // case-insensitive domain matching: domains are lowercased on write, so a tenant
 // configured with a mixed-case domain is matched by a lowercase lookup via both
-// ValidateDomainAccess and GetTenantByDomain.
+// ValidateDomainAccess and GetByDomain.
 func TestTenantDomainMatchingIsCaseInsensitive(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -161,7 +161,7 @@ func TestTenantDomainMatchingIsCaseInsensitive(t *testing.T) {
 	tenantSvc := authKit.TenantService()
 	tenantID := "case.test"
 
-	created, err := tenantSvc.CreateTenant(ctx, model.CreateTenantRequest{
+	created, err := tenantSvc.Create(ctx, model.CreateTenantRequest{
 		TenantID:       tenantID,
 		Name:           "Case Test",
 		AllowedDomains: []string{"Acme.COM"},
@@ -180,12 +180,12 @@ func TestTenantDomainMatchingIsCaseInsensitive(t *testing.T) {
 	}
 
 	// Lookup by lowercase domain finds the tenant.
-	got, err := tenantSvc.GetTenantByDomain(ctx, "acme.com")
+	got, err := tenantSvc.GetByDomain(ctx, "acme.com")
 	if err != nil {
 		t.Fatalf("get tenant by domain: %v", err)
 	}
 	if got.TenantID != tenantID {
-		t.Fatalf("GetTenantByDomain returned %q, want %q", got.TenantID, tenantID)
+		t.Fatalf("GetByDomain returned %q, want %q", got.TenantID, tenantID)
 	}
 }
 
@@ -228,6 +228,178 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 	// The expired row must have been deleted by the consume path.
 	if _, err := repo.GetVerificationCode(ctx, tenantID, email, "signup"); !errors.Is(err, model.ErrNotFound) {
 		t.Fatalf("expected expired code to be deleted (ErrNotFound), got %v", err)
+	}
+}
+
+// TestConsumeVerificationCodeRetainsLockedOutRow is the regression test for the
+// finding that an attempt-lockout used to DELETE the code row, which reset the
+// per-(tenant, email, purpose) generation cooldown so a burst of wrong guesses
+// could drive unlimited OTP resends. The locked-out row must now be retained so
+// its created_at keeps enforcing the rate limit.
+func TestConsumeVerificationCodeRetainsLockedOutRow(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		_ = db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "otplock.test"
+	createTenantAndUser(t, ctx, &repo, tenantID)
+	email := "locked@" + tenantID
+	const maxAttempts = 5
+	cooldown := time.Hour // long enough that the limit is clearly still in force after lockout
+
+	if _, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
+		TenantID:  tenantID,
+		Email:     email,
+		Code:      "123456",
+		Purpose:   "signup",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}, cooldown); err != nil {
+		t.Fatalf("upsert code: %v", err)
+	}
+
+	// Burn maxAttempts wrong guesses; the final one trips the lockout.
+	for i := 0; i < maxAttempts; i++ {
+		result, err := repo.ConsumeVerificationCode(ctx, tenantID, email, "000000", "signup", maxAttempts)
+		if err != nil {
+			t.Fatalf("attempt %d: consume: %v", i+1, err)
+		}
+		want := repository.OTPConsumeInvalid
+		if i == maxAttempts-1 {
+			want = repository.OTPConsumeLockedOut
+		}
+		if result != want {
+			t.Fatalf("attempt %d: result = %v, want %v", i+1, result, want)
+		}
+	}
+
+	// The locked-out row must still exist (retained as a rate-limit tombstone).
+	if _, err := repo.GetVerificationCode(ctx, tenantID, email, "signup"); err != nil {
+		t.Fatalf("expected locked-out code to be retained, got %v", err)
+	}
+
+	// And it must still enforce the generation cooldown: issuing a new code within
+	// the window is refused (stored == false), proving the lockout did not reset it.
+	stored, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
+		TenantID:  tenantID,
+		Email:     email,
+		Code:      "654321",
+		Purpose:   "signup",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}, cooldown)
+	if err != nil {
+		t.Fatalf("re-upsert after lockout: %v", err)
+	}
+	if stored {
+		t.Fatal("generation after lockout within cooldown must be rate-limited (stored=false)")
+	}
+}
+
+// TestSingleSessionLogoutEnablesReuseDetection is the regression test for the
+// finding that single-session logout used to hard-DELETE the refresh-token row, so
+// replaying a stolen-then-logged-out token read as a benign ErrInvalidRefreshToken
+// instead of tripping reuse/theft detection. Logout now soft-revokes (sets
+// revoked_at) so a later replay is detected as reuse.
+func TestSingleSessionLogoutEnablesReuseDetection(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		_ = db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "logoutreuse.test"
+	userID := createTenantAndUser(t, ctx, &repo, tenantID)
+
+	const tokenHash = "logout-reuse-hash"
+	if _, err := repo.CreateRefreshToken(ctx, repository.CreateRefreshTokenRequest{
+		UserID:    userID,
+		TokenHash: tokenHash,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("create refresh token: %v", err)
+	}
+
+	// Single-session logout soft-revokes the token (does not delete the row).
+	if err := repo.RevokeByTokenHash(ctx, tokenHash); err != nil {
+		t.Fatalf("revoke by token hash: %v", err)
+	}
+
+	// Replaying the logged-out token must be detected as reuse, not as a benign
+	// invalid token — the retained, revoked row is what makes that possible.
+	if _, _, err := repo.RotateRefreshToken(ctx, tokenHash, repository.CreateRefreshTokenRequest{
+		UserID:    userID,
+		TokenHash: "logout-reuse-replacement",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); !errors.Is(err, model.ErrRefreshTokenReuse) {
+		t.Fatalf("replay of a logged-out token: expected ErrRefreshTokenReuse, got %v", err)
+	}
+
+	// Idempotent logout: revoking an already-revoked token reports not-found (which
+	// the service layer treats as success), not an error.
+	if err := repo.RevokeByTokenHash(ctx, tokenHash); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("re-revoking an already-revoked token: expected ErrNotFound, got %v", err)
+	}
+}
+
+// TestSetPasswordAndBumpTokenVersionByTenant is the regression test for making the
+// password write and the token_version bump atomic in ChangePassword: a single
+// tenant-scoped UPDATE must change both, and must be tenant-isolated.
+func TestSetPasswordAndBumpTokenVersionByTenant(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		_ = db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+
+	repo := repository.New(db, db)
+	tenantID := "pwbump.test"
+	userID := createTenantAndUser(t, ctx, &repo, tenantID)
+
+	before, err := repo.GetByID(ctx, userID, tenantID)
+	if err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+
+	if err := repo.SetPasswordAndBumpTokenVersionByTenant(ctx, userID, tenantID, "new-hash-value"); err != nil {
+		t.Fatalf("atomic password + token_version update: %v", err)
+	}
+
+	after, err := repo.GetByID(ctx, userID, tenantID)
+	if err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if after.PasswordHash != "new-hash-value" {
+		t.Fatalf("password_hash = %q, want updated value", after.PasswordHash)
+	}
+	if after.TokenVersion != before.TokenVersion+1 {
+		t.Fatalf("token_version = %d, want %d (before+1)", after.TokenVersion, before.TokenVersion+1)
+	}
+
+	// Tenant isolation: a wrong tenant matches no row and changes nothing.
+	if err := repo.SetPasswordAndBumpTokenVersionByTenant(ctx, userID, "other.test", "attacker-hash"); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("cross-tenant update: expected ErrNotFound, got %v", err)
+	}
+	reloaded, err := repo.GetByID(ctx, userID, tenantID)
+	if err != nil {
+		t.Fatalf("reload after cross-tenant attempt: %v", err)
+	}
+	if reloaded.PasswordHash != "new-hash-value" || reloaded.TokenVersion != after.TokenVersion {
+		t.Fatal("cross-tenant update must not modify the victim's password or token_version")
 	}
 }
 
@@ -602,7 +774,7 @@ func TestNotFoundMutatorsWrapErrNotFound(t *testing.T) {
 		"Update":       repo.UpdateByTenant(ctx, missingUser, "no-such-tenant", model.UpdateUserRequest{DisplayName: &newName, Roles: &newRoles}),
 		"UpdateName":   repo.UpdateName(ctx, "no-such-tenant", "x"),
 		"DeleteAPIKey": repo.DeleteAPIKey(ctx, uuid.Must(uuid.NewV7()).String(), "no-such-tenant"),
-		"DeleteSecret": repo.DeleteSecret(ctx, "no-such-tenant", "no-such-key"),
+		"Delete":       repo.DeleteSecret(ctx, "no-such-tenant", "no-such-key"),
 		"DeleteInvite": repo.DeleteInvitation(ctx, "NOSUCHCODE"),
 	}
 	for name, err := range cases {
@@ -632,7 +804,7 @@ func TestValidateInvitationKnownInvalidIsFalseNil(t *testing.T) {
 	svc := service.NewInvitationService(&repo, nil)
 
 	// Unknown code: not usable, not a fault.
-	if valid, err := svc.ValidateInvitation(ctx, "DOESNOTEXISTCODE0001"); valid || err != nil {
+	if valid, err := svc.Validate(ctx, "DOESNOTEXISTCODE0001"); valid || err != nil {
 		t.Fatalf("unknown code: got (valid=%v, err=%v), want (false, nil)", valid, err)
 	}
 
@@ -654,12 +826,12 @@ func TestValidateInvitationKnownInvalidIsFalseNil(t *testing.T) {
 	if err := repo.IncrementUseCount(ctx, code); err != nil {
 		t.Fatalf("exhaust invitation: %v", err)
 	}
-	if valid, err := svc.ValidateInvitation(ctx, code); valid || err != nil {
+	if valid, err := svc.Validate(ctx, code); valid || err != nil {
 		t.Fatalf("exhausted code: got (valid=%v, err=%v), want (false, nil)", valid, err)
 	}
 }
 
-// TestCreateAPIKeyExpiresInDuration covers the service-level CreateAPIKey path
+// TestCreateAPIKeyExpiresInDuration covers the service-level Create path
 // with ExpiresIn now a *time.Duration: a provided duration yields ExpiresAt ≈
 // now+duration, and a nil duration yields a never-expiring key (nil ExpiresAt).
 func TestCreateAPIKeyExpiresInDuration(t *testing.T) {
@@ -679,7 +851,7 @@ func TestCreateAPIKeyExpiresInDuration(t *testing.T) {
 	svc := service.NewAPIKeyService(&repo, "test-api-key-hmac-secret-0123456789", nil)
 
 	ttl := 48 * time.Hour
-	resp, err := svc.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
+	resp, err := svc.Create(ctx, model.CreateAPIKeyRequest{
 		TenantID: tenantID, CreatedBy: createdBy, Name: "dur-key", ExpiresIn: &ttl,
 	})
 	if err != nil {
@@ -692,7 +864,7 @@ func TestCreateAPIKeyExpiresInDuration(t *testing.T) {
 		t.Fatalf("ExpiresAt is %s away, want ~%s", time.Until(*resp.ExpiresAt), ttl)
 	}
 
-	resp2, err := svc.CreateAPIKey(ctx, model.CreateAPIKeyRequest{
+	resp2, err := svc.Create(ctx, model.CreateAPIKeyRequest{
 		TenantID: tenantID, CreatedBy: createdBy, Name: "no-exp-key",
 	})
 	if err != nil {
