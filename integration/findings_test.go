@@ -321,7 +321,7 @@ func TestSingleSessionLogoutEnablesReuseDetection(t *testing.T) {
 	tenantID := "logoutreuse.test"
 	userID := createTenantAndUser(t, ctx, &repo, tenantID)
 
-	const tokenHash = "logout-reuse-hash"
+	const tokenHash = "logout-reuse-hash" //nolint:gosec // G101 false positive: fixed test token-hash literal, not a credential
 	if _, err := repo.CreateRefreshToken(ctx, repository.CreateRefreshTokenRequest{
 		UserID:    userID,
 		TokenHash: tokenHash,
@@ -413,7 +413,7 @@ func TestRefreshTokenIPRoundTrip(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
@@ -463,7 +463,7 @@ func TestAPIKeyUUIDKeyIDRoundTripAndIndex(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
@@ -526,7 +526,7 @@ func TestUpsertVerificationCodeAtomicRateLimit(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
@@ -578,7 +578,7 @@ func TestUserStatusAuditWrittenInGo(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
@@ -616,7 +616,7 @@ func TestUserStatusAuditWrittenInGo(t *testing.T) {
 		if err != nil {
 			t.Fatalf("list status changes: %v", err)
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		var out []change
 		for rows.Next() {
 			var c change
@@ -624,6 +624,9 @@ func TestUserStatusAuditWrittenInGo(t *testing.T) {
 				t.Fatalf("scan status change: %v", err)
 			}
 			out = append(out, c)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate status changes: %v", err)
 		}
 		return out
 	}
@@ -670,7 +673,7 @@ func TestRegisterFailedLoginAuditsSystemLock(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
@@ -713,7 +716,7 @@ func TestAdminLockIsAdminAttributedAndKeepsFailedCount(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
@@ -760,7 +763,7 @@ func TestNotFoundMutatorsWrapErrNotFound(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
@@ -792,7 +795,7 @@ func TestValidateInvitationKnownInvalidIsFalseNil(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
@@ -839,7 +842,7 @@ func TestCreateAPIKeyExpiresInDuration(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
@@ -883,7 +886,7 @@ func TestUpdateByTenantPartialUpdate(t *testing.T) {
 	db := openTestDB(t)
 	defer func() {
 		applyMigration(t, db, "000001_identity_schema.down.sql")
-		db.Close()
+		_ = db.Close()
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")

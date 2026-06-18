@@ -8,6 +8,25 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-18
+
+A patch release with internal-only cleanups — no public API, behavior, or schema
+change. Safe to upgrade from v0.11.0 with no code changes.
+
+### Internal
+
+These are non-behavioral cleanups (no public API or schema change).
+
+- **The integration test suite is now lint-clean and gated.** Fixed pre-existing
+  `errcheck` (`db.Close`/`rows.Close`), a missing `rows.Err()` check, and gosec
+  G304/G101 false-positives in the `//go:build integration` tests, and set
+  `run.build-tags: [integration]` in `.golangci.yml` so `golangci-lint run` (CI and
+  `make lint`) now also lints those files instead of skipping them.
+- **Split the user status-change audit machinery out of `identity.go`** into
+  `identity_audit.go` (the `statusChangeActor`/`userStatusSnapshot` types and the
+  `withUserStatusAudit`/`readUserStatusForUpdate`/`recordStatusChange`/
+  `insertUserStatusChange` helpers), reducing `identity.go` to user CRUD/queries.
+
 ## [0.11.0] - 2026-06-18
 
 Breaking API-ergonomics cleanup — service methods are renamed to bare, namespaced
