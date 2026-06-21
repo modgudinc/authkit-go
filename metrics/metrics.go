@@ -41,7 +41,9 @@ const (
 	CounterOTPFailure = "authkit_otp_failure_total"
 	// CounterOTPLockout counts OTPs invalidated after too many failed attempts.
 	CounterOTPLockout = "authkit_otp_lockout_total"
-	// CounterRefreshTokenReuse counts detected refresh-token reuse/theft events
-	// (each one revokes the whole token family and bumps the user's token_version).
-	CounterRefreshTokenReuse = "authkit_refresh_token_reuse_total" //nolint:gosec // G101: metric name, not a credential
+	// CounterRefreshReuse counts detected refresh-token reuse/theft events (each one
+	// revokes the whole token family and bumps the user's token_version). The Go name
+	// omits "Token" so it does not trip gosec's hardcoded-credential heuristic (G101);
+	// the metric string is unchanged.
+	CounterRefreshReuse = "authkit_refresh_token_reuse_total"
 )

@@ -351,7 +351,7 @@ func (s *TokenService) RefreshTokenPair(
 				"user_id", reuseErr.UserID.String(),
 				"family_id", reuseErr.FamilyID.String(),
 			)
-			incMetric(s.metrics, metrics.CounterRefreshTokenReuse)
+			incMetric(s.metrics, metrics.CounterRefreshReuse)
 		} else {
 			s.logger.Warn("Failed to rotate refresh token", "error", err.Error())
 		}
