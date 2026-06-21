@@ -8,6 +8,75 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-21
+
+Production-readiness hardening from a multi-dimension audit: closes the medium-
+severity policy/observability gaps and a high-severity documentation defect. Includes
+breaking changes (a new required-when-used config secret, a schema change, and two new
+`UserService` interface methods), so this is a minor (`0.x`) bump.
+
+### Security
+
+- **OTP codes are now stored as a keyed HMAC-SHA256, never in plaintext.** A new
+  `OTPConfig.HMACSecret` keys the hash (mirroring refresh tokens and API keys), so a
+  read-only database/backup/replica disclosure no longer yields usable codes. The
+  `verification_codes.code` column is renamed to `code_hash` (`VARCHAR(64)`).
+- **Refresh-token reuse detection now invalidates outstanding access tokens.** On a
+  detected reuse/theft, the rotation transaction bumps the user's `token_version`
+  (in addition to revoking the whole token family), so `ValidateJWT` rejects every
+  already-issued access token immediately instead of letting them live to their `exp`.
+- **`ChangePassword` now gates on account status.** A disabled or locked account can no
+  longer rotate its own password mid-freeze (returns `ErrAccountDisabled` /
+  `ErrAccountLocked`), matching the `Login` and `ValidateJWT` gates.
+
+### Added
+
+- **Optional metrics seam (`metrics` package + `Config.Metrics`).** A minimal, no-op-by-
+  default `Metrics` interface, called at key decision points: login success/failure,
+  account lockout, OTP failure/lockout, and refresh-token reuse. Canonical counter names
+  are exported as `metrics.Counter*`. Survives independently of log level — recommended
+  for alerting.
+- **`UserService.StatusHistory`** reads a user's status-change audit trail (tenant-scoped),
+  and **`UserService.CleanupStatusChanges`** prunes it by age — the `user_status_changes`
+  table previously had no read API and no retention method (unbounded growth).
+- **Distinguishable refresh-reuse event.** Reuse/theft is now logged as a dedicated
+  elevated event (`event=refresh_token_reuse`, with user/family ids via the new
+  `model.RefreshTokenReuseError`) and metered, instead of a generic warning.
+- **`ErrOTPSecretMissing`** sentinel, returned by `OTPService.Generate`/`Validate` when
+  no `OTPConfig.HMACSecret` is configured.
+
+### Changed (breaking)
+
+- **`OTPConfig.HMACSecret` is required when `OTPService` is used.** It is validated for
+  length at construction when set; `Generate`/`Validate` return `ErrOTPSecretMissing`
+  when absent. Callers using OTP must configure it.
+- **Schema change — re-apply migration `000001`.** `verification_codes.code` →
+  `code_hash VARCHAR(64)`, and the unused `idx_user_status_changes_changed_by` index is
+  dropped. (Any existing OTP rows are ephemeral and need not be migrated.)
+- **`UserService` interface gains `StatusHistory` and `CleanupStatusChanges`.** Code that
+  implements/mocks the interface must add these methods.
+
+### Fixed
+
+- **README showed `tokenService.RevokeAllUserTokens`**, a method intentionally removed
+  from the public `TokenService` (it scoped by `user_id` with no tenant check). Replaced
+  with the tenant-safe `authService.LogoutAll`.
+- **The integration CI job now runs with `-race`**, so the detached `last_used` fan-out
+  (the only concurrent goroutine in non-test source, exercised only by the integration
+  suite) is covered by the race detector.
+- Doc drift: `model` package overview named a non-existent `RefreshToken` type and the
+  pre-0.11 `GetTenant` method; the README sentinel list omitted `ErrValueTooLong`.
+
+### Documentation
+
+- Documented that several security signals (OTP lockout, refresh-token reuse, sub-
+  threshold failed logins) are logger-only and lost if no `Logger`/`Metrics` is injected.
+- Documented required connection-pool limits and server-side `statement_timeout`/
+  `lock_timeout` as caller-owned controls (README + SECURITY.md), moved pool config into
+  the primary quickstart, and added OTP-storage / OTP-secret / metrics guidance.
+- Replaced the drift-prone supported-versions table in SECURITY.md with a "latest minor
+  only" policy statement.
+
 ## [0.11.1] - 2026-06-18
 
 A patch release with internal-only cleanups — no public API, behavior, or schema

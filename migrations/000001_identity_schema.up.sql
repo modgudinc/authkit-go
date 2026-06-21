@@ -170,10 +170,14 @@ CREATE INDEX IF NOT EXISTS idx_refresh_tokens_device_name ON authkit.refresh_tok
 -- purpose so codes for distinct flows (signup vs reset) do not evict each other.
 -- attempts tracks failed validation attempts to enforce lockout against online
 -- brute force of the short numeric code.
+-- code_hash stores a keyed HMAC-SHA256 of the OTP (64 hex chars), never the
+-- plaintext, so a read-only DB/backup/replica disclosure does not expose usable
+-- codes (the validating server holds the HMAC secret) — mirroring refresh_tokens
+-- and api_keys.
 CREATE TABLE IF NOT EXISTS authkit.verification_codes (
     tenant_id VARCHAR(255) NOT NULL REFERENCES authkit.tenants(tenant_id) ON DELETE CASCADE,
     email VARCHAR(255) NOT NULL,
-    code VARCHAR(10) NOT NULL,
+    code_hash VARCHAR(64) NOT NULL,
     purpose VARCHAR(50) NOT NULL DEFAULT 'signup',
     attempts INTEGER NOT NULL DEFAULT 0,
     expires_at TIMESTAMPTZ NOT NULL,
@@ -188,6 +192,16 @@ CREATE INDEX IF NOT EXISTS idx_verification_codes_purpose ON authkit.verificatio
 
 -- Account status-change audit trail. Written by the application in Go (id is a
 -- uuid.NewV7()) on every is_enabled/is_locked transition; there is no DB trigger.
+-- The table has no expiry column and grows for the life of the deployment; prune
+-- it per a retention policy via UserService.CleanupStatusChanges. Read it via
+-- UserService.StatusHistory. The user_id FK is ON DELETE CASCADE intentionally:
+-- an audit row is meaningful only alongside the user it describes, and the library
+-- soft-deletes users (sets is_enabled=false) rather than removing the row, so the
+-- trail is retained for the account's lifetime. An operator who hard-deletes a
+-- user/tenant should archive these rows first if they are needed for compliance.
+-- changed_by/reason are reserved for callers that extend the trail (the library
+-- leaves them NULL and conveys provenance via changed_by_type), so there is no
+-- index on changed_by.
 CREATE TABLE IF NOT EXISTS authkit.user_status_changes (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
@@ -201,7 +215,6 @@ CREATE TABLE IF NOT EXISTS authkit.user_status_changes (
 
 CREATE INDEX IF NOT EXISTS idx_user_status_changes_user_id ON authkit.user_status_changes(user_id, changed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_status_changes_status_type ON authkit.user_status_changes(status_type, changed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_user_status_changes_changed_by ON authkit.user_status_changes(changed_by);
 CREATE INDEX IF NOT EXISTS idx_user_status_changes_changed_at ON authkit.user_status_changes(changed_at DESC);
 
 DO $$

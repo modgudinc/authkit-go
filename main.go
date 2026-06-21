@@ -29,6 +29,7 @@ import (
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/internal/service"
 	"github.com/modgudinc/authkit-go/logger"
+	"github.com/modgudinc/authkit-go/metrics"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -64,15 +65,19 @@ type AuthKit struct {
 	apiKeyHMACSecret     string
 	passwordBcryptCost   int
 	otpRateLimitDuration time.Duration
+	otpHMACSecret        string // HMAC-SHA256 secret for hashing OTP codes in storage
 	secretEncryptionKey  []byte // 32-byte AES-256 key for encrypting secrets
 	identitySchema       string
 	logger               logger.Logger
+	metrics              metrics.Metrics
 }
 
 // New validates the Config and returns a configured AuthKit. It fails fast if a
 // required connection or secret is missing, a secret is shorter than
-// MinSecretLength, the identity schema is not a valid identifier, or the secret
-// encryption key (when provided) is not a base64-encoded 32-byte key.
+// MinSecretLength, the identity schema is not a valid identifier, the secret
+// encryption key (when provided) is not a base64-encoded 32-byte key, or the OTP
+// HMAC secret (when provided) is shorter than MinSecretLength. The OTP HMAC secret
+// is only required at use time (OTPService.Generate/Validate), not at construction.
 func New(config Config) (*AuthKit, error) {
 	if config.DBConnection.IdentityRWDB == nil {
 		return nil, errors.New("RW db connection for identity schema is required")
@@ -107,6 +112,14 @@ func New(config Config) (*AuthKit, error) {
 		if len(s.value) < MinSecretLength {
 			return nil, fmt.Errorf("%s must be at least %d bytes of high-entropy random data", s.name, MinSecretLength)
 		}
+	}
+
+	// OTP HMAC secret is optional at construction (only required when OTPService is
+	// used — see OTPConfig.HMACSecret), but if provided it must meet the same
+	// entropy bar as the other HMAC secrets. OTPService.Generate/Validate fail with
+	// ErrOTPSecretMissing when it is absent.
+	if config.OTPConfig.HMACSecret != "" && len(config.OTPConfig.HMACSecret) < MinSecretLength {
+		return nil, fmt.Errorf("OTP HMAC secret must be at least %d bytes of high-entropy random data", MinSecretLength)
 	}
 
 	identitySchema := config.DBConnection.IdentitySchema
@@ -164,6 +177,13 @@ func New(config Config) (*AuthKit, error) {
 		libLogger = logger.NopLogger{}
 	}
 
+	// Default to a no-op metrics sink, mirroring the logger default, so the library
+	// can increment counters unconditionally.
+	libMetrics := config.Metrics
+	if libMetrics == nil {
+		libMetrics = metrics.NopMetrics{}
+	}
+
 	return &AuthKit{
 		rwConnection: config.DBConnection.IdentityRWDB,
 		roConnection: config.DBConnection.IdentityRODB,
@@ -179,9 +199,11 @@ func New(config Config) (*AuthKit, error) {
 		apiKeyHMACSecret:     config.APIKeyConfig.HMACSecret,
 		passwordBcryptCost:   passwordBcryptCost,
 		otpRateLimitDuration: otpRateLimitDuration,
+		otpHMACSecret:        config.OTPConfig.HMACSecret,
 		secretEncryptionKey:  secretEncryptionKey,
 		identitySchema:       identitySchema,
 		logger:               libLogger,
+		metrics:              libMetrics,
 	}, nil
 }
 
@@ -221,7 +243,7 @@ func (k *AuthKit) TokenService() TokenService {
 // for complete authentication flows (login, logout, token refresh, JWT validation).
 func (k *AuthKit) AuthService() AuthService {
 	repo := k.repository()
-	return service.NewAuthService(&repo, k.newPasswordService(), k.newTokenService(), k.newJWTService(), k.logger)
+	return service.NewAuthService(&repo, k.newPasswordService(), k.newTokenService(), k.newJWTService(), k.logger, k.metrics)
 }
 
 // newPasswordService / newJWTService / newTokenService return the concrete
@@ -244,14 +266,14 @@ func (k *AuthKit) newJWTService() *service.JWTService {
 
 func (k *AuthKit) newTokenService() *service.TokenService {
 	repo := k.repository()
-	return service.NewTokenService(&repo, k.newJWTService(), k.refreshTokenExpiry, k.refreshTokenHMACSecret, k.logger)
+	return service.NewTokenService(&repo, k.newJWTService(), k.refreshTokenExpiry, k.refreshTokenHMACSecret, k.logger, k.metrics)
 }
 
 // OTPService returns the OTP service
 // for OTP generation, validation, and lifecycle management with rate limiting.
 func (k *AuthKit) OTPService() OTPService {
 	repo := k.repository()
-	return service.NewOTPService(&repo, k.otpRateLimitDuration, k.logger)
+	return service.NewOTPService(&repo, k.otpRateLimitDuration, k.otpHMACSecret, k.logger, k.metrics)
 }
 
 // TenantService returns the tenant service

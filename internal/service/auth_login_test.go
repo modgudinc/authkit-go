@@ -334,6 +334,39 @@ func TestValidateJWTReadsUserFromPrimary(t *testing.T) {
 	}
 }
 
+func TestChangePasswordRejectsDisabledOrLocked(t *testing.T) {
+	// A disabled or locked account must not be able to rotate its own password
+	// mid-freeze, even with the correct old password. The status gate runs before
+	// password verification, so these return before any token-service call.
+	t.Run("disabled", func(t *testing.T) {
+		user := makeUser(t, "Correct1!")
+		user.IsEnabled = false
+		svc := newTestAuthService(&fakeAuthRepository{user: user})
+
+		err := svc.ChangePassword(context.Background(), model.ChangePasswordRequest{
+			UserID: user.ID, TenantID: user.TenantID, OldPassword: "Correct1!", NewPassword: "NewStrong1!",
+		})
+		if !errors.Is(err, model.ErrAccountDisabled) {
+			t.Fatalf("expected ErrAccountDisabled, got %v", err)
+		}
+	})
+
+	t.Run("locked", func(t *testing.T) {
+		user := makeUser(t, "Correct1!")
+		user.IsLocked = true
+		future := time.Now().Add(time.Hour)
+		user.LockedUntil = &future
+		svc := newTestAuthService(&fakeAuthRepository{user: user})
+
+		err := svc.ChangePassword(context.Background(), model.ChangePasswordRequest{
+			UserID: user.ID, TenantID: user.TenantID, OldPassword: "Correct1!", NewPassword: "NewStrong1!",
+		})
+		if !errors.Is(err, model.ErrAccountLocked) {
+			t.Fatalf("expected ErrAccountLocked, got %v", err)
+		}
+	})
+}
+
 func TestValidateJWTRejectsTamperedSignature(t *testing.T) {
 	user := makeUser(t, "Correct1!")
 	svc := newTestAuthService(&fakeAuthRepository{user: user})

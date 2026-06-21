@@ -211,7 +211,7 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 	if _, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
-		Code:      "123456",
+		CodeHash:  "123456",
 		Purpose:   "signup",
 		ExpiresAt: time.Now().Add(-time.Minute),
 	}, 0); err != nil {
@@ -257,7 +257,7 @@ func TestConsumeVerificationCodeRetainsLockedOutRow(t *testing.T) {
 	if _, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
-		Code:      "123456",
+		CodeHash:  "123456",
 		Purpose:   "signup",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}, cooldown); err != nil {
@@ -289,7 +289,7 @@ func TestConsumeVerificationCodeRetainsLockedOutRow(t *testing.T) {
 	stored, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
-		Code:      "654321",
+		CodeHash:  "654321",
 		Purpose:   "signup",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}, cooldown)
@@ -539,7 +539,7 @@ func TestUpsertVerificationCodeAtomicRateLimit(t *testing.T) {
 	req := repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     "u@" + tenantID,
-		Code:      "111111",
+		CodeHash:  "111111",
 		Purpose:   "signup",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
@@ -553,7 +553,7 @@ func TestUpsertVerificationCodeAtomicRateLimit(t *testing.T) {
 	// Second issuance within the window: the active code is too recent, so the
 	// conditional update affects no rows — rate-limited, code unchanged.
 	req2 := req
-	req2.Code = "222222"
+	req2.CodeHash = "222222"
 	stored, err = repo.UpsertVerificationCode(ctx, req2, time.Minute)
 	if err != nil {
 		t.Fatalf("second upsert err: %v", err)

@@ -1,0 +1,47 @@
+// Copyright 2026 Modgud, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+// Package metrics defines a minimal, optional instrumentation seam for authkit-go.
+//
+// It mirrors the logger package: the library calls a small Metrics interface at a
+// few security-relevant decision points (login success/failure, account lockout,
+// OTP failure/lockout, refresh-token reuse) and never depends on a concrete
+// telemetry library. Inject your own implementation via Config.Metrics to bridge
+// these counters to Prometheus, OpenTelemetry, statsd, etc. When no implementation
+// is injected the calls are no-ops (see NopMetrics), so there is zero overhead and
+// no dependency for callers that do not want metrics.
+//
+// The canonical counter names the library emits are exported as Counter* constants
+// so callers can register/alert on them without hardcoding strings.
+package metrics
+
+// Metrics is the optional sink the library increments at key auth decision points.
+// Implementations MUST be safe for concurrent use (the library calls them from
+// multiple goroutines). Label semantics are a flat, even-length list of
+// alternating key/value strings (e.g. "reason", "account_locked"), matching the
+// structured-logging field convention; implementations that do not support labels
+// may ignore them.
+type Metrics interface {
+	// IncCounter increments the named counter by one, with optional labels.
+	IncCounter(name string, labels ...string)
+}
+
+// Canonical counter names emitted by the library. Values are stable, snake_case,
+// and namespaced with the "authkit_" prefix so they slot directly into a metrics
+// backend.
+const (
+	// CounterLoginSuccess counts successful AuthService.Login calls.
+	CounterLoginSuccess = "authkit_login_success_total"
+	// CounterLoginFailure counts failed AuthService.Login calls. Emitted with a
+	// "reason" label (not_found, account_disabled, account_locked, bad_password).
+	CounterLoginFailure = "authkit_login_failure_total"
+	// CounterAccountLockout counts accounts auto-locked after too many failed logins.
+	CounterAccountLockout = "authkit_account_lockout_total"
+	// CounterOTPFailure counts failed OTP validations (wrong/expired/missing code).
+	CounterOTPFailure = "authkit_otp_failure_total"
+	// CounterOTPLockout counts OTPs invalidated after too many failed attempts.
+	CounterOTPLockout = "authkit_otp_lockout_total"
+	// CounterRefreshTokenReuse counts detected refresh-token reuse/theft events
+	// (each one revokes the whole token family and bumps the user's token_version).
+	CounterRefreshTokenReuse = "authkit_refresh_token_reuse_total" //nolint:gosec // G101: metric name, not a credential
+)

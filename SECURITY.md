@@ -5,14 +5,10 @@ report suspected vulnerabilities privately before opening a public issue.
 
 ## Supported Versions
 
-This library is pre-1.0; only the latest minor release receives security fixes.
-Until 1.0, a minor release may include breaking changes when required to fix a
-security issue.
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.10.x  | :white_check_mark: |
-| < 0.10  | :x:                |
+This library is pre-1.0. Only the **latest published minor (`0.y`) release line**
+receives security fixes; all earlier minor lines are unsupported. Pin a version and
+track the latest minor to stay supported. Until 1.0, a minor release may include
+breaking changes when required to fix a security issue.
 
 ## Reporting
 
@@ -41,6 +37,9 @@ secrets:
 - `JWTConfig.AccessSecret`: signs access-token JWTs
 - `JWTConfig.RefreshTokenHMACSecret`: hashes refresh tokens before storage
 - `APIKeyConfig.HMACSecret`: hashes API keys before storage
+- `OTPConfig.HMACSecret`: hashes OTP codes before storage (required when OTPService
+  is used). OTP codes are persisted only as this keyed HMAC, never in plaintext, so
+  a read-only database/backup/replica disclosure does not yield usable codes.
 - `SecretConfig.EncryptionKey`: encrypts provider secrets with AES-256-GCM
 
 Best practices:
@@ -98,6 +97,9 @@ Rotation impact:
 - Rotating `APIKeyConfig.HMACSecret` makes existing stored API key hashes
   unverifiable. Reissue API keys or support a planned dual-secret migration in
   application code.
+- Rotating `OTPConfig.HMACSecret` makes outstanding OTP codes unverifiable; affected
+  users must request a new code. OTPs are short-lived, so this clears on its own
+  within the code TTL.
 - Rotating `SecretConfig.EncryptionKey` requires decrypting stored secrets with
   the old key and re-encrypting them with the new key.
 
@@ -133,6 +135,15 @@ are out of scope for the library itself and must be provided by the caller:
   (including email) that are signed but not encrypted.
 - **Authorization.** The library authenticates and scopes data by tenant, but the
   application decides what an authenticated principal is allowed to do.
+- **Database resource limits.** The library uses the caller-provided `*sql.DB`
+  handles as-is and issues no server-side timeout. Configure connection-pool bounds
+  (`SetMaxOpenConns`/`SetMaxIdleConns`/`SetConnMaxLifetime`) and a server-side
+  `statement_timeout`/`lock_timeout`, and pass deadline-bearing contexts — otherwise
+  a request under `FOR UPDATE` lock contention (e.g. a failed-login storm against one
+  account) can pin connections/row locks and exhaust the pool. See the README
+  ("Performance Considerations").
+- **Audit retention.** The `user_status_changes` audit table has no expiry; schedule
+  `UserService.CleanupStatusChanges` per your retention policy to bound its growth.
 
 ## Scope
 

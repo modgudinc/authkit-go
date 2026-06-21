@@ -86,7 +86,10 @@ jobs:
           cache: true
 
       - name: Run integration tests
-        run: go test -v -count=1 -tags=integration -coverpkg=./... -coverprofile=coverage.integration.out ./...
+        # -race here covers the detached last_used fan-out (the only concurrent
+        # goroutine in non-test source), which is exercised only by the integration
+        # suite — the unit job's -race never reaches it.
+        run: go test -v -race -count=1 -tags=integration -coverpkg=./... -coverprofile=coverage.integration.out ./...
 
       - name: Enforce coverage threshold
         run: |

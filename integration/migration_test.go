@@ -460,7 +460,7 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 	if _, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
-		Code:      "123456",
+		CodeHash:  "123456",
 		Purpose:   "signup",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}, 0); err != nil {

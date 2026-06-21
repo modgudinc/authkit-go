@@ -172,6 +172,12 @@ type UserService interface {
 	IncrementTokenVersion(ctx context.Context, userID uuid.UUID, tenantID string) error
 	UpdateRoles(ctx context.Context, userID uuid.UUID, tenantID string, roles []string) error
 	Count(ctx context.Context, tenantID string) (int, error)
+	// StatusHistory returns a user's account status-change audit trail (newest
+	// first), tenant-scoped. CleanupStatusChanges deletes audit rows older than
+	// olderThan (which must be positive) and returns the count removed; run it
+	// periodically to bound the otherwise unbounded audit table.
+	StatusHistory(ctx context.Context, userID uuid.UUID, tenantID string) ([]*model.UserStatusChange, error)
+	CleanupStatusChanges(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
 // Compile-time guarantees that each concrete service satisfies its public
