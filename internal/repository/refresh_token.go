@@ -138,20 +138,34 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 
 	// Reuse/theft: an already-consumed token is being presented again. Revoke the
 	// entire family (every still-active token descended from the same login) so
-	// neither the legitimate holder nor an attacker can keep refreshing.
+	// neither the legitimate holder nor an attacker can keep refreshing, AND bump
+	// the user's token_version in the same transaction so every already-issued
+	// access token minted from this family is immediately rejected by ValidateJWT
+	// (otherwise live access tokens would remain valid until their own exp).
 	if revokedAt != nil {
+		now := time.Now()
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.refresh_tokens
 			SET revoked_at = $1
 			WHERE family_id = $2 AND revoked_at IS NULL
-		`), time.Now(), familyID); err != nil {
+		`), now, familyID); err != nil {
 			return nil, uuid.Nil, fmt.Errorf("failed to revoke reused token family: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, r.q(`
+			UPDATE {{schema}}.users
+			SET token_version = token_version + 1, updated_at = $1
+			WHERE id = $2
+		`), now, userID); err != nil {
+			return nil, uuid.Nil, fmt.Errorf("failed to bump token version on reuse: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
 			return nil, uuid.Nil, fmt.Errorf("failed to commit token family revocation: %w", err)
 		}
 		committed = true
-		return nil, uuid.Nil, fmt.Errorf("refresh token reuse detected: %w", model.ErrRefreshTokenReuse)
+		// Return a typed error carrying the user/family so the service layer can log
+		// and meter the theft event; it unwraps to model.ErrRefreshTokenReuse so
+		// errors.Is callers and sanitizeError keep working unchanged.
+		return nil, uuid.Nil, &model.RefreshTokenReuseError{UserID: userID, FamilyID: familyID}
 	}
 
 	now := time.Now()

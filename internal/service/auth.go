@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
+	"github.com/modgudinc/authkit-go/metrics"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -39,6 +40,7 @@ type AuthService struct {
 	tokenService    *TokenService
 	jwtService      *JWTService
 	logger          logger.Logger
+	metrics         metrics.Metrics
 }
 
 const (
@@ -56,12 +58,14 @@ const (
 //   - tokenService: Token generation and management service
 //   - jwtService: JWT validation service
 //   - logger: Optional logger for structured logging
+//   - metrics: Optional counter sink for login/lockout events (may be nil)
 func NewAuthService(
 	repo *repository.Repository,
 	passwordService *PasswordService,
 	tokenService *TokenService,
 	jwtService *JWTService,
 	logger logger.Logger,
+	metrics metrics.Metrics,
 ) *AuthService {
 	return &AuthService{
 		repo:            repo,
@@ -69,6 +73,7 @@ func NewAuthService(
 		tokenService:    tokenService,
 		jwtService:      jwtService,
 		logger:          ensureLogger(logger),
+		metrics:         metrics,
 	}
 }
 
@@ -135,6 +140,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 			"email", maskEmail(email),
 			"tenant_id", req.TenantID,
 		)
+		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "not_found")
 		return nil, model.ErrInvalidCredentials
 	}
 
@@ -147,6 +153,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 			"user_id", user.ID.String(),
 			"email", maskEmail(email),
 		)
+		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_disabled")
 		return nil, model.ErrInvalidCredentials
 	}
 
@@ -175,6 +182,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 				"user_id", user.ID.String(),
 				"locked_until", user.LockedUntil,
 			)
+			incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_locked")
 			return nil, model.ErrInvalidCredentials
 		}
 	}
@@ -202,6 +210,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 				"user_id", user.ID.String(),
 				"failed_attempts", count,
 			)
+			incMetric(s.metrics, metrics.CounterAccountLockout)
 		default:
 			s.logger.Info("Failed login attempt recorded",
 				"user_id", user.ID.String(),
@@ -209,6 +218,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 			)
 		}
 
+		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "bad_password")
 		return nil, model.ErrInvalidCredentials
 	}
 
@@ -239,6 +249,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		"email", maskEmail(email),
 		"tenant_id", req.TenantID,
 	)
+	incMetric(s.metrics, metrics.CounterLoginSuccess)
 
 	// 8. Return LoginResponse
 	return &model.LoginResponse{
@@ -476,12 +487,13 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 //   - Error if password change fails
 //
 // Flow:
-//  1. Read the current password hash (tenant-scoped)
-//  2. Verify old password
-//  3. Validate new password strength
-//  4. Hash new password
-//  5. Atomically update the password AND bump token_version (invalidate all JWTs)
-//  6. Revoke all refresh tokens (logout from all devices)
+//  1. Load the user (tenant-scoped, from the primary)
+//  2. Reject if the account is disabled or locked (incident-response freeze)
+//  3. Verify old password
+//  4. Validate new password strength
+//  5. Hash new password
+//  6. Atomically update the password AND bump token_version (invalidate all JWTs)
+//  7. Revoke all refresh tokens (logout from all devices)
 //
 // Example:
 //
@@ -497,22 +509,38 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswordRequest) error {
 	s.logger.Info("Changing password", "user_id", req.UserID)
 
-	// 1. Get current password hash, scoped to the tenant so a caller-supplied user
-	// id from another tenant cannot be targeted (returns ErrNotFound on mismatch).
-	currentHash, err := s.repo.VerifyPasswordByTenant(ctx, req.UserID, req.TenantID)
+	// 1. Load the user, scoped to the tenant so a caller-supplied user id from
+	// another tenant cannot be targeted (returns ErrNotFound on mismatch). Read from
+	// the PRIMARY so a just-committed disable/lock is observed by the status gate
+	// below rather than lagging a read replica.
+	user, err := s.repo.GetByIDFromPrimary(ctx, req.UserID, req.TenantID)
 	if err != nil {
-		s.logger.Error("Failed to get current password hash", "error", err.Error())
-		return sanitizeError(s.logger, "retrieve user password", err)
+		s.logger.Error("Failed to load user for password change", "error", err.Error())
+		return sanitizeError(s.logger, "retrieve user", err)
 	}
 
-	// 2. Verify old password
-	err = s.passwordService.VerifyPassword(req.OldPassword, currentHash)
-	if err != nil {
+	// 2. Gate on account status. A disabled or locked account must not be able to
+	// rotate its own password mid-freeze (e.g. during incident response), even with
+	// the correct old password — mirroring the Login and ValidateJWT gates. Login
+	// still rejects these accounts, so this is account-freeze completeness, not an
+	// auth bypass. A lock whose locked_until has elapsed is treated as expired (see
+	// isUserLocked), so a stale lock does not permanently block a legitimate change.
+	if !user.IsEnabled {
+		s.logger.Warn("Password change rejected: account disabled", "user_id", req.UserID)
+		return model.ErrAccountDisabled
+	}
+	if isUserLocked(user) {
+		s.logger.Warn("Password change rejected: account locked", "user_id", req.UserID)
+		return model.ErrAccountLocked
+	}
+
+	// 3. Verify old password against the loaded hash.
+	if err := s.passwordService.VerifyPassword(req.OldPassword, user.PasswordHash); err != nil {
 		s.logger.Warn("Old password verification failed", "user_id", req.UserID)
 		return fmt.Errorf("incorrect old password: %w", model.ErrIncorrectPassword)
 	}
 
-	// 3. Validate new password strength (optional - can be disabled if not needed)
+	// 4. Validate new password strength (optional - can be disabled if not needed)
 	requirements := model.DefaultPasswordRequirements()
 	err = s.passwordService.ValidatePasswordStrength(req.NewPassword, requirements)
 	if err != nil {
@@ -520,14 +548,14 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		return sanitizeError(s.logger, "validate password strength", err)
 	}
 
-	// 4. Hash new password
+	// 5. Hash new password
 	newHash, err := s.passwordService.HashPassword(req.NewPassword)
 	if err != nil {
 		s.logger.Error("Failed to hash new password", "error", err.Error())
 		return sanitizeError(s.logger, "hash password", err)
 	}
 
-	// 5. Atomically update the password AND bump token_version in a single
+	// 6. Atomically update the password AND bump token_version in a single
 	// tenant-scoped UPDATE. Doing both at once means the change can never be left
 	// half-applied — there is no window where the password is changed but old access
 	// tokens (<=15m) still validate, or vice versa.
@@ -536,8 +564,8 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		return sanitizeError(s.logger, "update password", err)
 	}
 
-	// 6. Revoke all refresh tokens. The password change and JWT invalidation are
-	// already durably committed by step 5; this removes the refresh tokens so a
+	// 7. Revoke all refresh tokens. The password change and JWT invalidation are
+	// already durably committed by step 6; this removes the refresh tokens so a
 	// leftover one cannot mint fresh access tokens against the new password. It is a
 	// follow-up step rather than part of the atomic write, but its failure is still
 	// surfaced (NOT reported as success), since an undeleted refresh token stays

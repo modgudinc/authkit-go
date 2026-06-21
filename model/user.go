@@ -41,6 +41,32 @@ type CreateUserRequest struct {
 	Roles        []string
 }
 
+// UserStatusChange is one row of the account status-change audit trail, returned
+// by UserService.StatusHistory. The library records one on every is_enabled /
+// is_locked transition (admin enable/disable/lock/unlock and the automatic
+// failed-login lockout). It is a read-back snapshot; treat it as read-only.
+type UserStatusChange struct {
+	ID uuid.UUID `json:"id"`
+	// UserID is the account whose status changed.
+	UserID uuid.UUID `json:"user_id"`
+	// StatusType is the transition: "enable", "disable", "lock", or "unlock".
+	StatusType string `json:"status_type"`
+	// ChangedBy identifies the actor when known; the library leaves it nil (the
+	// provenance is conveyed by ChangedByType) but it is available for callers that
+	// extend the audit trail.
+	ChangedBy *uuid.UUID `json:"changed_by,omitempty"`
+	// ChangedByType is the provenance of the change: "admin" (an explicit mutator)
+	// or "system" (the automatic failed-login lockout).
+	ChangedByType string `json:"changed_by_type"`
+	// ChangedAt is when the transition was recorded.
+	ChangedAt time.Time `json:"changed_at"`
+	// Reason is an optional free-text reason; the library leaves it nil.
+	Reason *string `json:"reason,omitempty"`
+	// Metadata is the JSONB detail recorded for the transition (previous/new state,
+	// lock window, failed-attempt count, etc.); nil when none was recorded.
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
 // UpdateUserRequest updates a user's display name and/or roles. UserID and TenantID
 // identify the target and are required; the update is tenant-scoped (a cross-tenant
 // UserID matches no row). DisplayName and Roles are each optional — a nil pointer

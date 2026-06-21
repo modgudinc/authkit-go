@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
+	"github.com/modgudinc/authkit-go/metrics"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -71,6 +72,7 @@ type TokenService struct {
 	refreshExpiry          time.Duration
 	refreshTokenHMACSecret string // Secret for HMAC-SHA256 hashing of refresh tokens
 	logger                 logger.Logger
+	metrics                metrics.Metrics
 }
 
 // NewTokenService creates a new TokenService instance
@@ -81,12 +83,14 @@ type TokenService struct {
 //   - refreshExpiry: Refresh token expiration duration
 //   - refreshTokenHMACSecret: Secret for HMAC-SHA256 hashing of refresh tokens
 //   - logger: Optional logger for structured logging
+//   - metrics: Optional counter sink for refresh-token reuse events (may be nil)
 func NewTokenService(
 	repo *repository.Repository,
 	jwtService *JWTService,
 	refreshExpiry time.Duration,
 	refreshTokenHMACSecret string,
 	logger logger.Logger,
+	metrics metrics.Metrics,
 ) *TokenService {
 	return &TokenService{
 		jwtService:             jwtService,
@@ -94,6 +98,7 @@ func NewTokenService(
 		refreshExpiry:          refreshExpiry,
 		refreshTokenHMACSecret: refreshTokenHMACSecret,
 		logger:                 ensureLogger(logger),
+		metrics:                metrics,
 	}
 }
 
@@ -331,7 +336,25 @@ func (s *TokenService) RefreshTokenPair(
 		ExpiresAt:  expiresAt,
 	})
 	if err != nil {
-		s.logger.Warn("Failed to rotate refresh token", "error", err.Error())
+		// Surface refresh-token reuse/theft as a distinguishable, elevated security
+		// event (separate from routine invalid/expired-token failures) so operators
+		// can alert on it via log level/event name and the metrics counter rather
+		// than substring-matching. RotateRefreshToken has already revoked the whole
+		// family and bumped the user's token_version. NOTE: this also fires on a
+		// benign lost-response retry (the client never received the rotated token),
+		// which is an inherent property of strict reuse detection — treat the counter
+		// as "possible theft", not "confirmed theft".
+		var reuseErr *model.RefreshTokenReuseError
+		if errors.As(err, &reuseErr) {
+			s.logger.Error("SECURITY: refresh token reuse detected; token family revoked and all sessions invalidated",
+				"event", "refresh_token_reuse",
+				"user_id", reuseErr.UserID.String(),
+				"family_id", reuseErr.FamilyID.String(),
+			)
+			incMetric(s.metrics, metrics.CounterRefreshTokenReuse)
+		} else {
+			s.logger.Warn("Failed to rotate refresh token", "error", err.Error())
+		}
 		// Preserve the underlying sentinel (model.ErrInvalidRefreshToken or
 		// model.ErrRefreshTokenReuse) so callers can distinguish a benign
 		// invalid/expired token from a detected reuse/theft event.

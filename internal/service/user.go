@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -239,6 +240,28 @@ func (s *UserService) revokeRefreshTokens(ctx context.Context, userID uuid.UUID,
 func (s *UserService) Count(ctx context.Context, tenantID string) (int, error) {
 	n, err := s.repo.CountUsersByTenant(ctx, tenantID)
 	return n, sanitizeError(s.logger, "count users", err)
+}
+
+// StatusHistory returns a user's account status-change audit trail (enable/disable/
+// lock/unlock, including automatic failed-login lockouts), newest first. It is
+// tenant-scoped: a cross-tenant userID yields an empty result, not another tenant's
+// audit rows.
+func (s *UserService) StatusHistory(ctx context.Context, userID uuid.UUID, tenantID string) ([]*model.UserStatusChange, error) {
+	changes, err := s.repo.ListUserStatusChanges(ctx, userID, tenantID)
+	return changes, sanitizeError(s.logger, "list status history", err)
+}
+
+// CleanupStatusChanges deletes status-change audit rows older than olderThan and
+// returns the number removed. The audit table has no expiry, so run this
+// periodically (e.g. a daily job) per your retention policy to bound its growth.
+// olderThan must be positive — a non-positive value is rejected rather than
+// silently deleting the entire audit trail.
+func (s *UserService) CleanupStatusChanges(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		return 0, fmt.Errorf("status-change retention period must be positive (got %s)", olderThan)
+	}
+	n, err := s.repo.CleanupStatusChanges(ctx, time.Now().Add(-olderThan))
+	return n, sanitizeError(s.logger, "cleanup status changes", err)
 }
 
 // UpdateRoles replaces a user's roles, scoped to the tenant (an admin in one tenant

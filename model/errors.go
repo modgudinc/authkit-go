@@ -56,6 +56,13 @@ var (
 	// before the per-(tenant, email, purpose) rate-limit window has elapsed.
 	ErrOTPRateLimited = errors.New("authkit: OTP rate limit exceeded")
 
+	// ErrOTPSecretMissing is returned by OTPService.Generate/Validate when no OTP
+	// HMAC secret was configured (OTPConfig.HMACSecret). OTP codes are stored as a
+	// keyed HMAC, so the secret is required to use the OTP service — analogous to
+	// ErrSecretEncryptionKeyMissing for SecretService. It surfaces a construction-
+	// time misconfiguration as a matchable sentinel instead of an opaque error.
+	ErrOTPSecretMissing = errors.New("authkit: OTP HMAC secret not configured")
+
 	// ErrInvalidAPIKey is returned when an API key is malformed, unknown, or expired.
 	ErrInvalidAPIKey = errors.New("authkit: invalid API key")
 

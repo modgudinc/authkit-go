@@ -59,6 +59,21 @@ func main() {
     }
     defer roDB.Close()
 
+    // REQUIRED for production: bound the connection pools. database/sql defaults to
+    // unlimited open connections and infinite lifetime, so an unconfigured pool can
+    // exhaust Postgres max_connections under load and pin connections across
+    // failovers. The library does NOT set these for you (it does not own the *sql.DB).
+    for _, db := range []*sql.DB{rwDB, roDB} {
+        db.SetMaxOpenConns(25)
+        db.SetMaxIdleConns(5)
+        db.SetConnMaxLifetime(5 * time.Minute)
+    }
+    // ALSO set a server-side statement_timeout / lock_timeout (e.g. via the DSN:
+    // "...&statement_timeout=3000&lock_timeout=3000") and pass deadline-bearing
+    // contexts. The library issues no server-side timeout, so without one a request
+    // arriving with a non-deadline context can pin a row lock indefinitely under
+    // contention. See "Performance Considerations".
+
     // Initialize the library
     identity, err := authkit.New(authkit.Config{
         DBConnection: authkit.DatabaseConnection{
@@ -79,7 +94,8 @@ func main() {
             BcryptCost: 12, // Optional, defaults to 12
         },
         OTPConfig: authkit.OTPConfig{
-            RateLimitDuration: time.Minute * 1, // Optional, defaults to 1 minute
+            RateLimitDuration: time.Minute * 1,            // Optional, defaults to 1 minute
+            HMACSecret:        os.Getenv("OTP_HMAC_SECRET"), // Required when OTPService is used
         },
         Logger: nil, // Optional: inject your logger (zap, logrus, etc.)
     })
@@ -430,8 +446,11 @@ if err != nil {
 // Revoke specific refresh token (single session logout)
 err := tokenService.RevokeRefreshToken(ctx, refreshToken)
 
-// Revoke all refresh tokens for user (logout from all devices)
-err := tokenService.RevokeAllUserTokens(ctx, userID)
+// Revoke all sessions for a user (logout from all devices): use AuthService.LogoutAll,
+// which is tenant-scoped and ALSO invalidates outstanding access tokens by bumping
+// token_version. TokenService intentionally exposes no RevokeAllUserTokens — it would
+// scope by user_id only, with no tenant-ownership check (see the Logout section).
+err := authService.LogoutAll(ctx, userID, tenantID)
 
 // Cleanup expired tokens (periodic maintenance job)
 count, err := tokenService.CleanupExpired(ctx)
@@ -1247,7 +1266,7 @@ fmt.Printf("Deleted %d expired OTPs\n", count)
 - **Single-use enforcement** (deleted after validation)
 
 **Security Considerations:**
-- OTP stored in plaintext at rest (needed for validation); validation uses a constant-time comparison
+- OTP codes are stored only as a keyed HMAC-SHA256 (`OTPConfig.HMACSecret`), never in plaintext, so a read-only database/backup/replica disclosure does not expose usable codes; validation hashes the supplied code and compares in constant time
 - Generation rate limiting deters spam; **online brute force is bounded by the per-code attempt lockout**, not by the generation rate limit
 - Because the code is only 6 digits, prefer a short expiration window and the default attempt lockout; consider a longer code for higher-risk flows
 - Short expiration window limits exposure
@@ -1278,12 +1297,14 @@ identity, err := authkit.New(authkit.Config{
         BcryptCost: 12, // Optional: defaults to 12
     },
     OTPConfig: authkit.OTPConfig{
-        RateLimitDuration: time.Minute, // Optional: defaults to 1 minute
+        RateLimitDuration: time.Minute,                  // Optional: defaults to 1 minute
+        HMACSecret:        os.Getenv("OTP_HMAC_SECRET"), // Required when OTPService is used
     },
     SecretConfig: authkit.SecretConfig{
         EncryptionKey: os.Getenv("SECRET_ENCRYPTION_KEY"), // Optional unless using SecretService
     },
-    Logger: logger, // Optional
+    Logger:  logger,  // Optional (but recommended — some security signals are logger-only)
+    Metrics: metrics, // Optional: counter sink for login/lockout/OTP/refresh-reuse events
 })
 if err != nil {
     return err
@@ -1300,7 +1321,8 @@ The JWT/HMAC secrets must be at least 32 bytes of high-entropy random data, and
 always generate these with a CSPRNG, never type them by hand:
 
 ```bash
-# JWT access secret, refresh-token HMAC secret, API-key HMAC secret (one each):
+# JWT access secret, refresh-token HMAC secret, API-key HMAC secret, and (when using
+# OTPService) the OTP HMAC secret — one distinct value each:
 openssl rand -base64 32
 
 # SecretConfig.EncryptionKey — must DECODE to 32 bytes, so use base64 of 32 random
@@ -1318,6 +1340,7 @@ Use a distinct value for each field and a different set per environment. See
 - **`JWTConfig.AccessSecret`**: Secret for access token signing (required)
 - **`JWTConfig.RefreshTokenHMACSecret`**: Secret for HMAC-SHA256 hashing of refresh tokens in storage (required)
 - **`APIKeyConfig.HMACSecret`**: Secret for API key hashing (required)
+- **`OTPConfig.HMACSecret`**: Secret for HMAC-SHA256 hashing of OTP codes in storage (required **when `OTPService` is used**; validated for length at construction when set, and `Generate`/`Validate` return `ErrOTPSecretMissing` if absent)
 
 ### Optional Configuration
 
@@ -1327,7 +1350,8 @@ Use a distinct value for each field and a different set per environment. See
 - **`OTPConfig.RateLimitDuration`**: Minimum time between OTP generation attempts (default: 1 minute)
 - **`DatabaseConnection.IdentitySchema`**: PostgreSQL schema name (default: `authkit`)
 - **`SecretConfig.EncryptionKey`**: Base64-encoded 32-byte AES-256 key for `SecretService`
-- **`Logger`**: Logger implementation (default: nil, no logging)
+- **`Logger`**: Logger implementation (default: nil, no logging). Some security signals (OTP lockout, refresh-token reuse, sub-threshold failed logins) are logger-only — inject one in production.
+- **`Metrics`**: Counter sink for login/lockout/OTP/refresh-reuse events (default: nil, no metrics). Survives independently of log level; recommended for alerting. See the `metrics` package.
 
 ### Expiration Duration
 
@@ -1482,9 +1506,12 @@ default:
 Exported sentinels include `ErrInvalidCredentials`, `ErrAccountDisabled`,
 `ErrAccountLocked`, `ErrInvalidToken`, `ErrTokenRevoked`, `ErrInvalidRefreshToken`,
 `ErrRefreshTokenReuse`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrOTPRateLimited`,
-`ErrInvalidAPIKey`, `ErrIncorrectPassword`, `ErrInvitationInvalid`, `ErrUserExists`,
-`ErrPasswordTooWeak`, `ErrSecretEncryptionKeyMissing`, `ErrNotFound`, and
-`ErrInternal`. `ErrPasswordTooWeak` covers strength failures (too short, too long,
+`ErrOTPSecretMissing`, `ErrInvalidAPIKey`, `ErrIncorrectPassword`,
+`ErrInvitationInvalid`, `ErrUserExists`, `ErrPasswordTooWeak`,
+`ErrSecretEncryptionKeyMissing`, `ErrValueTooLong`, `ErrNotFound`, and
+`ErrInternal`. `ErrValueTooLong` (maps to a 400) is returned when a caller-supplied
+value exceeds the column/size limit; `ErrOTPSecretMissing` is returned by
+`OTPService` when no `OTPConfig.HMACSecret` was configured. `ErrPasswordTooWeak` covers strength failures (too short, too long,
 or a missing character class) from `ChangePassword`/`ValidatePasswordStrength`/
 `HashPassword`; `ErrSecretEncryptionKeyMissing` is returned by `SecretService`
 operations when no valid encryption key was configured. `Login` deliberately
@@ -1507,9 +1534,12 @@ context, err := apiKeyService.Validate(ctx, apiKey)
 // last_used_at updated in background goroutine
 ```
 
-### Database Connection Pooling
+### Database Connection Pooling (required in production)
 
-Configure connection pools for optimal performance:
+The library uses the caller-provided `*sql.DB` handles as-is and never configures
+their pools. `database/sql` defaults to **unlimited** open connections and infinite
+connection lifetime, so an unconfigured pool can exceed Postgres `max_connections`
+under load and pin stale connections across a failover. Always bound both pools:
 
 ```go
 rwDB.SetMaxOpenConns(25)
@@ -1520,6 +1550,20 @@ roDB.SetMaxOpenConns(50)  // More read connections
 roDB.SetMaxIdleConns(10)
 roDB.SetConnMaxLifetime(time.Minute * 5)
 ```
+
+### Statement and lock timeouts (required in production)
+
+The library issues no server-side timeout and injects no deadline of its own (only
+the best-effort `last_used_at` background write is bounded). With Postgres'
+default `statement_timeout = 0`, a request that arrives with a non-deadline context
+can pin a pooled connection — and, on the `FOR UPDATE` paths (login lockout, refresh
+rotation, OTP consume), a row lock — indefinitely under contention. Defend against
+head-of-line blocking and pool exhaustion by **both**:
+
+- Setting server-side timeouts on the rw/ro DSNs, e.g.
+  `postgres://.../db?statement_timeout=3000&lock_timeout=3000` (milliseconds), and
+- Always passing a deadline-bearing `context.Context` (e.g. `context.WithTimeout`)
+  to the service methods.
 
 ## Testing
 

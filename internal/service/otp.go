@@ -5,7 +5,10 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
+	"github.com/modgudinc/authkit-go/metrics"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -27,7 +31,9 @@ const MaxOTPValidationAttempts = 5
 type OTPService struct {
 	repo              otpRepository
 	rateLimitDuration time.Duration // Minimum time between OTP generation attempts
+	hmacSecret        string        // HMAC-SHA256 secret for hashing OTP codes at rest
 	logger            logger.Logger
+	metrics           metrics.Metrics
 }
 
 type otpRepository interface {
@@ -38,13 +44,31 @@ type otpRepository interface {
 	DeleteExpiredVerificationCodes(ctx context.Context) (int64, error)
 }
 
-// NewOTPService creates a new OTP service instance
-func NewOTPService(repo *repository.Repository, rateLimitDuration time.Duration, logger logger.Logger) *OTPService {
+// NewOTPService creates a new OTP service instance.
+//
+// hmacSecret keys the HMAC-SHA256 used to hash OTP codes at rest; when empty,
+// Generate and Validate return model.ErrOTPSecretMissing. metrics is optional and
+// may be nil.
+func NewOTPService(repo *repository.Repository, rateLimitDuration time.Duration, hmacSecret string, logger logger.Logger, metrics metrics.Metrics) *OTPService {
 	return &OTPService{
 		repo:              repo,
 		rateLimitDuration: rateLimitDuration,
+		hmacSecret:        hmacSecret,
 		logger:            ensureLogger(logger),
+		metrics:           metrics,
 	}
+}
+
+// hashOTP returns the hex HMAC-SHA256 of an OTP code under the configured secret.
+// OTP codes are stored and compared only as this keyed hash, so a read-only
+// database/backup/replica disclosure does not expose usable codes — mirroring how
+// refresh tokens and API keys are stored. The keyspace of a 6-digit code is tiny,
+// so a *keyed* HMAC (server secret never in the DB) is what provides the
+// protection; an unkeyed hash would be trivially brute-forced.
+func (s *OTPService) hashOTP(code string) string {
+	h := hmac.New(sha256.New, []byte(s.hmacSecret))
+	h.Write([]byte(code))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Generate creates a new OTP or replaces an existing one (upsert behavior)
@@ -65,6 +89,13 @@ func NewOTPService(repo *repository.Repository, rateLimitDuration time.Duration,
 func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest) (*model.GenerateResponse, error) {
 	tenantID, purpose, expirationDuration := req.TenantID, req.Purpose, req.ExpirationDuration
 	email := normalizeEmail(req.Email)
+
+	// OTP codes are stored as a keyed HMAC, so the secret is mandatory. Fail with a
+	// matchable sentinel (analogous to SecretService) rather than silently hashing
+	// with an empty key.
+	if s.hmacSecret == "" {
+		return nil, model.ErrOTPSecretMissing
+	}
 
 	// Reject a non-positive expiration up front. A zero (the zero value, so an
 	// omitted field) or negative duration would mint a code that is already expired
@@ -120,11 +151,13 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 	// Calculate expiration timestamp
 	expiresAt := time.Now().Add(expirationDuration)
 
-	// Upsert OTP to database (create or replace)
+	// Upsert OTP to database (create or replace). Only the keyed HMAC of the code is
+	// persisted; the plaintext is returned to the caller (below) for delivery and is
+	// never stored.
 	upsertReq := repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
-		Code:      code,
+		CodeHash:  s.hashOTP(code),
 		Purpose:   purpose,
 		ExpiresAt: expiresAt,
 	}
@@ -188,7 +221,14 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest) error {
 	tenantID, code, purpose := req.TenantID, req.Code, req.Purpose
 	email := normalizeEmail(req.Email)
-	result, err := s.repo.ConsumeVerificationCode(ctx, tenantID, email, code, purpose, MaxOTPValidationAttempts)
+
+	if s.hmacSecret == "" {
+		return model.ErrOTPSecretMissing
+	}
+
+	// Hash the supplied code under the same secret used at generation; the stored
+	// value is the HMAC, so the repository compares hash-to-hash (constant-time).
+	result, err := s.repo.ConsumeVerificationCode(ctx, tenantID, email, s.hashOTP(code), purpose, MaxOTPValidationAttempts)
 	if err != nil {
 		s.logger.Error("OTP validation failed",
 			"tenant_id", tenantID,
@@ -213,6 +253,7 @@ func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest)
 			"email", maskEmail(email),
 			"purpose", purpose,
 		)
+		incMetric(s.metrics, metrics.CounterOTPLockout)
 		return fmt.Errorf("too many invalid attempts; request a new OTP: %w", model.ErrOTPLockedOut)
 	default: // repository.OTPConsumeInvalid
 		s.logger.Warn("OTP validation failed",
@@ -220,6 +261,7 @@ func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest)
 			"email", maskEmail(email),
 			"purpose", purpose,
 		)
+		incMetric(s.metrics, metrics.CounterOTPFailure)
 		return fmt.Errorf("invalid or expired OTP: %w", model.ErrInvalidOTP)
 	}
 }

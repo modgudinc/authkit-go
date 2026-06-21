@@ -20,6 +20,7 @@ var (
 	ErrInvalidOTP                 = model.ErrInvalidOTP
 	ErrOTPLockedOut               = model.ErrOTPLockedOut
 	ErrOTPRateLimited             = model.ErrOTPRateLimited
+	ErrOTPSecretMissing           = model.ErrOTPSecretMissing
 	ErrInvalidAPIKey              = model.ErrInvalidAPIKey
 	ErrIncorrectPassword          = model.ErrIncorrectPassword
 	ErrInvitationInvalid          = model.ErrInvitationInvalid

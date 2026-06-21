@@ -137,6 +137,71 @@ func (r *Repository) insertUserStatusChange(ctx context.Context, tx *sql.Tx, use
 	return nil
 }
 
+// ListUserStatusChanges returns a user's account status-change audit trail, newest
+// first. It is tenant-scoped via a JOIN to users, so a caller-supplied id from
+// another tenant matches no rows (and a hard-deleted user has none). Reads from the
+// replica (ro): the audit trail is an admin/report read, not a security gate.
+func (r *Repository) ListUserStatusChanges(ctx context.Context, userID uuid.UUID, tenantID string) ([]*model.UserStatusChange, error) {
+	query := `
+		SELECT sc.id, sc.user_id, sc.status_type, sc.changed_by, sc.changed_by_type, sc.changed_at, sc.reason, sc.metadata
+		FROM {{schema}}.user_status_changes sc
+		JOIN {{schema}}.users u ON u.id = sc.user_id
+		WHERE sc.user_id = $1 AND u.tenant_id = $2
+		ORDER BY sc.changed_at DESC
+	`
+	rows, err := r.ro.QueryContext(ctx, r.q(query), userID, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list user status changes: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var changes []*model.UserStatusChange
+	for rows.Next() {
+		var (
+			c         model.UserStatusChange
+			changedBy uuid.NullUUID
+			reason    *string
+			metaJSON  []byte
+		)
+		if err := rows.Scan(&c.ID, &c.UserID, &c.StatusType, &changedBy, &c.ChangedByType, &c.ChangedAt, &reason, &metaJSON); err != nil {
+			return nil, fmt.Errorf("failed to scan user status change row: %w", err)
+		}
+		if changedBy.Valid {
+			id := changedBy.UUID
+			c.ChangedBy = &id
+		}
+		c.Reason = reason
+		if len(metaJSON) > 0 {
+			if err := json.Unmarshal(metaJSON, &c.Metadata); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal status change metadata: %w", err)
+			}
+		}
+		changes = append(changes, &c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating user status change rows: %w", err)
+	}
+	return changes, nil
+}
+
+// CleanupStatusChanges deletes status-change audit rows recorded before cutoff and
+// returns the number removed. The user_status_changes table has no expiry column
+// and grows for the life of the deployment, so callers should run this periodically
+// (like the other CleanupExpired jobs) per their retention policy.
+func (r *Repository) CleanupStatusChanges(ctx context.Context, cutoff time.Time) (int64, error) {
+	result, err := r.rw.ExecContext(ctx, r.q(`DELETE FROM {{schema}}.user_status_changes WHERE changed_at < $1`), cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete old status changes: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // withUserStatusAudit runs a status-changing user UPDATE and its audit row(s) in
 // one transaction: it locks the target row (model.ErrNotFound if absent / wrong
 // tenant), calls apply (which performs the UPDATE and returns the resulting

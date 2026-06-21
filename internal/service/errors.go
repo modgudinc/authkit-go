@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/modgudinc/authkit-go/logger"
+	"github.com/modgudinc/authkit-go/metrics"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -30,6 +31,7 @@ var publicSentinels = []error{
 	model.ErrInvalidOTP,
 	model.ErrOTPLockedOut,
 	model.ErrOTPRateLimited,
+	model.ErrOTPSecretMissing,
 	model.ErrInvalidAPIKey,
 	model.ErrIncorrectPassword,
 	model.ErrInvitationInvalid,
@@ -78,4 +80,14 @@ func ensureLogger(l logger.Logger) logger.Logger {
 		return logger.NopLogger{}
 	}
 	return l
+}
+
+// incMetric increments a counter on m unless m is nil. Services hold an optional
+// metrics.Metrics that may be nil (e.g. when constructed via a struct literal in a
+// test), so emit sites call this helper rather than m.IncCounter directly to stay
+// nil-safe without a per-call-site guard.
+func incMetric(m metrics.Metrics, name string, labels ...string) {
+	if m != nil {
+		m.IncCounter(name, labels...)
+	}
 }
