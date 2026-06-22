@@ -85,6 +85,11 @@ a minor bump, not a patch.
   modest 20% floor to the unit job.
 - The `gosec` SARIF is now uploaded to GitHub code scanning (Security tab), not just as
   a build artifact (`security-events: write` + `github/codeql-action/upload-sarif`).
+- Simplified the branch-naming CI convention to
+  `(feature|fix|bugfix|hotfix|docs|chore|refactor)/<lowercase-dashes>` (dropped the
+  `release/*`, `test/`, and `renovate/*` patterns; `dependabot/*` stays exempt);
+  releases now land on `main` via a conventionally-named PR branch rather than a
+  `release/*` branch.
 
 ### Documentation
 
