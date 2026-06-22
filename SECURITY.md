@@ -76,6 +76,17 @@ Example secret generation:
 openssl rand -base64 32
 ```
 
+### Secrets in memory
+
+The library does not (and in idiomatic Go cannot reliably) zeroize secret material
+after use: decrypted provider secrets, passwords, and the root signing/HMAC/encryption
+secrets live in process memory as Go strings/byte slices, which are immutable and may
+be copied by the garbage collector, so they cannot be deterministically scrubbed. They
+may therefore appear in core dumps, swap, or heap snapshots. If your threat model
+requires in-memory secrecy, mitigate at the OS/deployment layer: disable core dumps,
+use encrypted swap, prefer short-lived processes, and keep the highest-value keys in a
+KMS/HSM rather than passing them in as long-lived process configuration.
+
 ## Rotation Expectations
 
 This library supports credential revocation and refresh-token rotation, but it

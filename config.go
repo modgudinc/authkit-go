@@ -35,6 +35,20 @@ type Config struct {
 	// counter names. Unlike the logger, these survive independently of log level,
 	// so they are the recommended basis for alerting.
 	Metrics metrics.Metrics
+
+	// VerifyConnectivity, when true, makes New ping both database handles (with a
+	// short internal timeout) and fail if either is unreachable, instead of
+	// deferring the first connection error to the first query. Off by default so
+	// construction stays cheap and offline-testable; turn it on for fail-fast
+	// startup, or call AuthKit.Ping from a readiness probe.
+	VerifyConnectivity bool
+
+	// RateLimiter is an optional pluggable throttle consulted by AuthService.Login,
+	// RefreshToken, and OTPService.Generate before they do work. It is the
+	// recommended place to enforce the IP/global rate limiting the library does not
+	// do itself (the per-account lockout is not enough — see SECURITY.md). Defaults
+	// to no limiting. See the RateLimiter interface for the key convention.
+	RateLimiter RateLimiter
 }
 
 // DatabaseConnection holds the PostgreSQL handles and schema for the identity

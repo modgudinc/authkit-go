@@ -46,6 +46,13 @@ jobs:
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
 
+      - name: Enforce coverage threshold
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
+          threshold=20.0
+          echo "Unit coverage: ${total}% (threshold ${threshold}%)"
+          awk -v t="$total" -v th="$threshold" 'BEGIN { if (t+0 < th+0) { printf "FAIL: unit coverage %.1f%% is below threshold %.1f%%\n", t, th; exit 1 } }'
+
       - name: Upload coverage report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -94,6 +101,6 @@ jobs:
       - name: Enforce coverage threshold
         run: |
           total=$(go tool cover -func=coverage.integration.out | awk '/^total:/ {print $3}' | tr -d '%')
-          threshold=30.0
+          threshold=50.0
           echo "Total coverage: ${total}% (threshold ${threshold}%)"
           awk -v t="$total" -v th="$threshold" 'BEGIN { if (t+0 < th+0) { printf "FAIL: coverage %.1f%% is below threshold %.1f%%\n", t, th; exit 1 } }'

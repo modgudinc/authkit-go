@@ -4,6 +4,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/metrics"
 	"github.com/modgudinc/authkit-go/model"
+	"github.com/modgudinc/authkit-go/ratelimit"
 )
 
 // pgStringDataRightTruncation is the PostgreSQL SQLSTATE for a value that is too
@@ -38,6 +40,8 @@ var publicSentinels = []error{
 	model.ErrUserExists,
 	model.ErrPasswordTooWeak,
 	model.ErrSecretEncryptionKeyMissing,
+	model.ErrRateLimited,
+	model.ErrInvalidInput,
 	model.ErrValueTooLong,
 }
 
@@ -46,7 +50,7 @@ var publicSentinels = []error{
 // any other error (a genuine DB/driver fault) is logged in full server-side and
 // replaced with model.ErrInternal so driver/schema/constraint details are not
 // exposed to callers that may render err.Error() to end users.
-func sanitizeError(log logger.Logger, op string, err error) error {
+func sanitizeError(ctx context.Context, log logger.Logger, op string, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -62,12 +66,12 @@ func sanitizeError(log logger.Logger, op string, err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == pgStringDataRightTruncation {
 		if log != nil {
-			log.Warn("input value too long", "op", op, "error", err.Error())
+			log.Warn(ctx, "input value too long", "op", op, "error", err.Error())
 		}
 		return fmt.Errorf("%s: %w", op, model.ErrValueTooLong)
 	}
 	if log != nil {
-		log.Error("internal error", "op", op, "error", err.Error())
+		log.Error(ctx, "internal error", "op", op, "error", err.Error())
 	}
 	return fmt.Errorf("%s: %w", op, model.ErrInternal)
 }
@@ -90,4 +94,28 @@ func incMetric(m metrics.Metrics, name string, labels ...string) {
 	if m != nil {
 		m.IncCounter(name, labels...)
 	}
+}
+
+// checkRateLimit consults rl (if non-nil) for key and returns model.ErrRateLimited
+// when the operation should be rejected. A nil limiter means no limiting. A limiter
+// error is logged and treated as "allow" (fail open) so a limiter-backend outage
+// degrades to no-limiting rather than a hard auth outage; an implementation that
+// wants fail-closed should return (false, nil) from Allow on its own errors.
+func checkRateLimit(ctx context.Context, rl ratelimit.RateLimiter, m metrics.Metrics, log logger.Logger, key string) error {
+	if rl == nil {
+		return nil
+	}
+	allowed, err := rl.Allow(ctx, key)
+	if err != nil {
+		if log != nil {
+			log.Warn(ctx, "rate limiter error; allowing (fail open)", "key", key, "error", err.Error())
+		}
+		incMetric(m, metrics.CounterRateLimiterError)
+		return nil
+	}
+	if !allowed {
+		incMetric(m, metrics.CounterRateLimited, "key", key)
+		return model.ErrRateLimited
+	}
+	return nil
 }

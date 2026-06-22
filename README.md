@@ -128,35 +128,27 @@ request paths. The returned services are safe for concurrent use.
 
 ### 2. Custom Logger Implementation
 
-Implement the `Logger` interface to integrate with your logging library:
+Implement the `Logger` interface to integrate with your logging library. Each
+method receives the call's `context.Context` first, so you can attach
+request/trace/correlation IDs from it (as `log/slog`'s `*Context` methods do):
 
 ```go
-import "go.uber.org/zap"
+import (
+    "context"
+    "log/slog"
+)
 
-// ZapLogger wraps zap.Logger to implement authkit.Logger
-type ZapLogger struct {
-    logger *zap.Logger
-}
+// SlogLogger adapts log/slog to authkit.Logger. The *Context variants let slog
+// handlers pull values (request_id, trace_id, …) out of ctx onto each record.
+type SlogLogger struct{ l *slog.Logger }
 
-func (z *ZapLogger) Debug(msg string, fields ...interface{}) {
-    z.logger.Sugar().Debugw(msg, fields...)
-}
-
-func (z *ZapLogger) Info(msg string, fields ...interface{}) {
-    z.logger.Sugar().Infow(msg, fields...)
-}
-
-func (z *ZapLogger) Error(msg string, fields ...interface{}) {
-    z.logger.Sugar().Errorw(msg, fields...)
-}
-
-func (z *ZapLogger) Warn(msg string, fields ...interface{}) {
-    z.logger.Sugar().Warnw(msg, fields...)
-}
+func (s SlogLogger) Debug(ctx context.Context, msg string, fields ...any) { s.l.DebugContext(ctx, msg, fields...) }
+func (s SlogLogger) Info(ctx context.Context, msg string, fields ...any)  { s.l.InfoContext(ctx, msg, fields...) }
+func (s SlogLogger) Warn(ctx context.Context, msg string, fields ...any)  { s.l.WarnContext(ctx, msg, fields...) }
+func (s SlogLogger) Error(ctx context.Context, msg string, fields ...any) { s.l.ErrorContext(ctx, msg, fields...) }
 
 // Use it
-zapLogger, _ := zap.NewProduction()
-logger := &ZapLogger{logger: zapLogger}
+logger := SlogLogger{l: slog.Default()}
 
 identity, err := authkit.New(authkit.Config{
     // ... other config
@@ -1333,6 +1325,34 @@ openssl rand -base64 32
 Use a distinct value for each field and a different set per environment. See
 [SECURITY.md](SECURITY.md) for storage and rotation guidance.
 
+### Environment variables
+
+**The library itself reads no environment variables** — it is configured entirely
+through the `Config` struct passed to `New`. The variables below are the convention
+used by the examples in this README: your application reads them (e.g. with
+`os.Getenv`) and wires them into `Config`. Names are yours to choose; these are just
+what the snippets use.
+
+| Variable | Maps to | Required | Notes |
+|----------|---------|----------|-------|
+| `RW_DATABASE_URL` | `DBConnection.IdentityRWDB` | Yes | PostgreSQL DSN for the read-write (primary) pool. Append `?statement_timeout=3000&lock_timeout=3000` (see "Performance Considerations"). |
+| `RO_DATABASE_URL` | `DBConnection.IdentityRODB` | Yes | DSN for the read-only (replica) pool. May be the same DSN as RW for a single-database deployment. |
+| `JWT_ACCESS_SECRET` | `JWTConfig.AccessSecret` | Yes | Access-token signing secret. ≥ 32 bytes of CSPRNG output. |
+| `REFRESH_TOKEN_HMAC_SECRET` | `JWTConfig.RefreshTokenHMACSecret` | Yes | HMAC secret for refresh-token storage. ≥ 32 bytes. |
+| `API_KEY_HMAC_SECRET` | `APIKeyConfig.HMACSecret` | Yes | HMAC secret for API-key storage. ≥ 32 bytes. |
+| `OTP_HMAC_SECRET` | `OTPConfig.HMACSecret` | When `OTPService` is used | HMAC secret for OTP storage. ≥ 32 bytes. Omit only if you never call `OTPService`. |
+| `SECRET_ENCRYPTION_KEY` | `SecretConfig.EncryptionKey` | When `SecretService` is used | Base64 of exactly 32 random bytes (AES-256). |
+
+All five `*_SECRET`/`*_HMAC_SECRET` values and the encryption key must be high-entropy
+CSPRNG output (`openssl rand -base64 32`), distinct from one another, and distinct per
+environment — see "Generating secrets" above and [SECURITY.md](SECURITY.md). The
+issuer/audience and the various durations have safe defaults and are typically set in
+code rather than via environment.
+
+> **Tests/CI only:** the integration suite reads `IDENTITY_TEST_DATABASE_URL` (a
+> PostgreSQL DSN). It defaults to the local `docker compose` database in the Makefile;
+> see [CONTRIBUTING.md](CONTRIBUTING.md) and `make postgres-up`.
+
 ### Required Configuration
 
 - **`IdentityRWDB`**: Database connection for write operations (required)
@@ -1352,6 +1372,8 @@ Use a distinct value for each field and a different set per environment. See
 - **`SecretConfig.EncryptionKey`**: Base64-encoded 32-byte AES-256 key for `SecretService`
 - **`Logger`**: Logger implementation (default: nil, no logging). Some security signals (OTP lockout, refresh-token reuse, sub-threshold failed logins) are logger-only — inject one in production.
 - **`Metrics`**: Counter sink for login/lockout/OTP/refresh-reuse events (default: nil, no metrics). Survives independently of log level; recommended for alerting. See the `metrics` package.
+- **`RateLimiter`**: Optional throttle (`ratelimit.RateLimiter`) consulted by `Login`/`RefreshToken`/`OTPService.Generate` (default: nil, no limiting). The recommended place to enforce IP/global rate limiting — see "Rate Limiting" below.
+- **`VerifyConnectivity`**: When `true`, `New` pings both DB handles and fails fast if either is unreachable (default: `false`, lazy connection). See "Health Checks".
 
 ### Expiration Duration
 
@@ -1508,10 +1530,14 @@ Exported sentinels include `ErrInvalidCredentials`, `ErrAccountDisabled`,
 `ErrRefreshTokenReuse`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrOTPRateLimited`,
 `ErrOTPSecretMissing`, `ErrInvalidAPIKey`, `ErrIncorrectPassword`,
 `ErrInvitationInvalid`, `ErrUserExists`, `ErrPasswordTooWeak`,
-`ErrSecretEncryptionKeyMissing`, `ErrValueTooLong`, `ErrNotFound`, and
-`ErrInternal`. `ErrValueTooLong` (maps to a 400) is returned when a caller-supplied
-value exceeds the column/size limit; `ErrOTPSecretMissing` is returned by
-`OTPService` when no `OTPConfig.HMACSecret` was configured. `ErrPasswordTooWeak` covers strength failures (too short, too long,
+`ErrSecretEncryptionKeyMissing`, `ErrRateLimited`, `ErrInvalidInput`,
+`ErrValueTooLong`, `ErrNotFound`, and `ErrInternal`. `ErrValueTooLong` and
+`ErrInvalidInput` both map to a 400 — the former when a caller-supplied value exceeds
+the column/size limit, the latter when input is otherwise malformed (e.g. tenant
+settings that cannot be serialized to JSON); `ErrRateLimited` maps to a 429 and is
+returned by `Login`/`RefreshToken`/`OTPService.Generate` when a configured
+`RateLimiter` rejects the call; `ErrOTPSecretMissing` is returned by `OTPService` when
+no `OTPConfig.HMACSecret` was configured. `ErrPasswordTooWeak` covers strength failures (too short, too long,
 or a missing character class) from `ChangePassword`/`ValidatePasswordStrength`/
 `HashPassword`; `ErrSecretEncryptionKeyMissing` is returned by `SecretService`
 operations when no valid encryption key was configured. `Login` deliberately
@@ -1564,6 +1590,59 @@ head-of-line blocking and pool exhaustion by **both**:
   `postgres://.../db?statement_timeout=3000&lock_timeout=3000` (milliseconds), and
 - Always passing a deadline-bearing `context.Context` (e.g. `context.WithTimeout`)
   to the service methods.
+
+## Rate Limiting
+
+The library does **not** rate-limit on its own — the per-account failed-login lockout
+does not stop password spraying, distributed guessing, refresh abuse, or OTP-email
+fan-out (see [SECURITY.md](SECURITY.md)). Plug in your own throttle via
+`Config.RateLimiter`; it is consulted by `Login`, `RefreshToken`, and
+`OTPService.Generate` before they do work, and a rejection surfaces as
+`authkit.ErrRateLimited` (map it to HTTP 429):
+
+```go
+// A token-bucket / Redis / in-memory limiter, adapted to the ratelimit.RateLimiter
+// interface. key is one of "login:<tenant>:<ip|email:...>", "refresh:<ip>",
+// "otp:<tenant>:<email>:<purpose>" — bucket on it directly.
+type myLimiter struct{ /* ... */ }
+
+func (l *myLimiter) Allow(ctx context.Context, key string) (bool, error) {
+    return l.bucket.Allow(key), nil // false => rejected (ErrRateLimited)
+}
+
+identity, _ := authkit.New(authkit.Config{ /* ... */, RateLimiter: &myLimiter{} })
+```
+
+If `Allow` returns an error the library **fails open** (the operation proceeds and the
+error is logged + metered via `authkit_rate_limiter_error_total`), so a limiter-backend
+outage degrades to "no limiting" rather than a hard auth outage. Implement `Allow` to
+return `(false, nil)` on your own backend errors if you prefer fail-closed.
+
+## Health Checks
+
+`New` does not contact the database unless `Config.VerifyConnectivity` is `true`
+(connection errors otherwise surface on the first query). For readiness/liveness
+probes, call `AuthKit.Ping(ctx)`, which pings **both** the read-write and read-only
+handles:
+
+```go
+identity, _ := authkit.New(authkit.Config{ /* ... */, VerifyConnectivity: true }) // fail fast at startup
+
+// In a readiness handler:
+if err := identity.Ping(ctx); err != nil {
+    http.Error(w, "not ready", http.StatusServiceUnavailable)
+    return
+}
+```
+
+**Behavior under database outage:** the security-critical read paths (`ValidateJWT`,
+`Login`'s status gate, refresh-token lookup) read from the **read-write primary** and
+**fail closed** — a primary outage rejects authentication rather than allowing it. A
+read-only replica outage affects only replica-served reads (lists/queries); the
+auth-decision paths do not depend on the replica. Best-effort writes (last-login,
+failed-count reset, auto-unlock) are swallowed so a transient primary write hiccup does
+not fail an otherwise-valid login — those failures are surfaced via
+`authkit_best_effort_write_failure_total` for alerting.
 
 ## Testing
 

@@ -91,6 +91,16 @@ var (
 	// opaque internal error.
 	ErrSecretEncryptionKeyMissing = errors.New("authkit: secret encryption key not configured")
 
+	// ErrRateLimited is returned by Login, RefreshToken, and OTP generation when a
+	// configured RateLimiter rejects the operation. Callers should map it to HTTP 429.
+	ErrRateLimited = errors.New("authkit: rate limited")
+
+	// ErrInvalidInput is returned (wrapped) when caller-supplied data is malformed in
+	// a way that is the caller's fault rather than an internal fault — e.g. tenant
+	// settings that cannot be serialized to JSON. It is a matchable input error so
+	// callers can return a 400 instead of treating it as an opaque ErrInternal (500).
+	ErrInvalidInput = errors.New("authkit: invalid input")
+
 	// ErrValueTooLong is returned (wrapped) when a caller-supplied string exceeds the
 	// maximum length the store allows for its column (e.g. an over-length tenant_id,
 	// name, secret key, email, or display name), or when tenant settings exceed the

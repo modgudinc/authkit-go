@@ -3,45 +3,40 @@
 
 package logger
 
+import "context"
+
 // Logger defines a minimal logging interface that can be implemented by
-// any logging library (zap, logrus, standard log, etc.)
+// any logging library (zap, logrus, log/slog, etc.)
 //
 // Consumers of authkit-go can inject their own logger implementation
 // to receive structured logs from the library.
 //
-// Example implementation with zap:
+// Each method takes the call's context.Context as its first argument so an
+// implementation can pull request/trace/correlation IDs out of it and attach them
+// to the line (as log/slog's *Context methods do). The library passes the
+// operation's context where it has one; the pure-CPU services (password, JWT) do
+// no I/O and have no request context, so they pass context.Background().
 //
-//	type ZapLogger struct {
-//	    logger *zap.Logger
-//	}
+// Example implementation with log/slog:
 //
-//	func (z *ZapLogger) Debug(msg string, fields ...interface{}) {
-//	    z.logger.Sugar().Debugw(msg, fields...)
-//	}
+//	type SlogLogger struct{ l *slog.Logger }
 //
-//	func (z *ZapLogger) Info(msg string, fields ...interface{}) {
-//	    z.logger.Sugar().Infow(msg, fields...)
-//	}
-//
-//	func (z *ZapLogger) Error(msg string, fields ...interface{}) {
-//	    z.logger.Sugar().Errorw(msg, fields...)
-//	}
-//
-//	func (z *ZapLogger) Warn(msg string, fields ...interface{}) {
-//	    z.logger.Sugar().Warnw(msg, fields...)
-//	}
+//	func (s SlogLogger) Debug(ctx context.Context, msg string, fields ...any) { s.l.DebugContext(ctx, msg, fields...) }
+//	func (s SlogLogger) Info(ctx context.Context, msg string, fields ...any)  { s.l.InfoContext(ctx, msg, fields...) }
+//	func (s SlogLogger) Warn(ctx context.Context, msg string, fields ...any)  { s.l.WarnContext(ctx, msg, fields...) }
+//	func (s SlogLogger) Error(ctx context.Context, msg string, fields ...any) { s.l.ErrorContext(ctx, msg, fields...) }
 type Logger interface {
 	// Debug logs verbose diagnostic messages with optional key-value fields.
 	// Use it for high-volume or lower-sensitivity detail that should be
 	// suppressible in production.
-	Debug(msg string, fields ...interface{})
+	Debug(ctx context.Context, msg string, fields ...interface{})
 
 	// Info logs informational messages with optional key-value fields
-	Info(msg string, fields ...interface{})
+	Info(ctx context.Context, msg string, fields ...interface{})
 
 	// Error logs error messages with optional key-value fields
-	Error(msg string, fields ...interface{})
+	Error(ctx context.Context, msg string, fields ...interface{})
 
 	// Warn logs warning messages with optional key-value fields
-	Warn(msg string, fields ...interface{})
+	Warn(ctx context.Context, msg string, fields ...interface{})
 }

@@ -10,7 +10,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/internal/service"
 	"github.com/modgudinc/authkit-go/model"
+	"github.com/modgudinc/authkit-go/ratelimit"
 )
+
+// RateLimiter is the optional throttle injected via Config.RateLimiter. It is an
+// alias for ratelimit.RateLimiter so callers can refer to authkit.RateLimiter.
+type RateLimiter = ratelimit.RateLimiter
 
 // The interfaces below are the public contracts for the services returned by
 // AuthKit's accessors. They exist so consumers can name the returned values —
@@ -48,6 +53,15 @@ type AuthService interface {
 }
 
 // InvitationService manages invitation lifecycle and redemption.
+//
+// The by-code operations (Get, Validate, Accept, Revoke, Delete, IncrementUseCount)
+// are keyed only by the invitation code, which is a high-entropy (~103-bit),
+// non-enumerable bearer capability — possession of the code is the authorization to
+// act on it, and the library does NOT additionally check the caller's tenant. Accept
+// derives the new user's tenant and roles from the invitation row (not from caller
+// input), so there is no privilege escalation. If your model requires that an admin
+// may only manage invitations within their own tenant, resolve the code first with
+// Get and check the returned TenantID before calling Revoke/Delete/IncrementUseCount.
 type InvitationService interface {
 	Create(ctx context.Context, req model.CreateInvitationRequest) (*model.Invitation, error)
 	Get(ctx context.Context, code string) (*model.Invitation, error)

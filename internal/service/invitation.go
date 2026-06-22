@@ -90,7 +90,7 @@ func (s *InvitationService) Create(ctx context.Context, req model.CreateInvitati
 		return nil, fmt.Errorf("invitation max_uses must not exceed %d (got %d)", MaxInvitationUses, *req.MaxUses)
 	}
 
-	s.logger.Info("Creating invitation",
+	s.logger.Info(ctx, "Creating invitation",
 		"tenant_id", req.TenantID,
 		"created_by", req.CreatedBy,
 		"roles", req.Roles,
@@ -100,10 +100,10 @@ func (s *InvitationService) Create(ctx context.Context, req model.CreateInvitati
 	// Generate secure invitation code
 	code, err := s.generateInvitationCode()
 	if err != nil {
-		s.logger.Error("Failed to generate invitation code",
+		s.logger.Error(ctx, "Failed to generate invitation code",
 			"error", err.Error(),
 		)
-		return nil, sanitizeError(s.logger, "generate invitation code", err)
+		return nil, sanitizeError(ctx, s.logger, "generate invitation code", err)
 	}
 
 	// Set max uses (default 1)
@@ -130,25 +130,25 @@ func (s *InvitationService) Create(ctx context.Context, req model.CreateInvitati
 		MaxUses:   uses,
 	})
 	if err != nil {
-		s.logger.Error("Failed to create invitation",
+		s.logger.Error(ctx, "Failed to create invitation",
 			"tenant_id", req.TenantID,
 			"roles", req.Roles,
 			"error", err.Error(),
 		)
-		return nil, sanitizeError(s.logger, "create invitation", err)
+		return nil, sanitizeError(ctx, s.logger, "create invitation", err)
 	}
 
 	// Retrieve created invitation
 	invitation, err := s.repo.GetInvitation(ctx, code)
 	if err != nil {
-		s.logger.Error("Failed to retrieve created invitation",
+		s.logger.Error(ctx, "Failed to retrieve created invitation",
 			"code", maskCode(code),
 			"error", err.Error(),
 		)
-		return nil, sanitizeError(s.logger, "retrieve created invitation", err)
+		return nil, sanitizeError(ctx, s.logger, "retrieve created invitation", err)
 	}
 
-	s.logger.Info("Invitation created successfully",
+	s.logger.Info(ctx, "Invitation created successfully",
 		"code", maskCode(code),
 		"tenant_id", req.TenantID,
 		"roles", req.Roles,
@@ -167,20 +167,20 @@ func (s *InvitationService) Create(ctx context.Context, req model.CreateInvitati
 //
 // Returns the invitation or error if not found
 func (s *InvitationService) Get(ctx context.Context, code string) (*model.Invitation, error) {
-	s.logger.Info("Retrieving invitation",
+	s.logger.Info(ctx, "Retrieving invitation",
 		"code", maskCode(code),
 	)
 
 	invitation, err := s.repo.GetInvitation(ctx, code)
 	if err != nil {
-		s.logger.Error("Failed to retrieve invitation",
+		s.logger.Error(ctx, "Failed to retrieve invitation",
 			"code", maskCode(code),
 			"error", err.Error(),
 		)
-		return nil, sanitizeError(s.logger, "get invitation", err)
+		return nil, sanitizeError(ctx, s.logger, "get invitation", err)
 	}
 
-	s.logger.Info("Invitation retrieved successfully",
+	s.logger.Info(ctx, "Invitation retrieved successfully",
 		"code", maskCode(code),
 		"tenant_id", invitation.TenantID,
 	)
@@ -206,7 +206,7 @@ func (s *InvitationService) Get(ctx context.Context, code string) (*model.Invita
 //
 // Returns (true, nil) if usable, (false, nil) if not usable, (false, err) on fault.
 func (s *InvitationService) Validate(ctx context.Context, code string) (bool, error) {
-	s.logger.Info("Validating invitation",
+	s.logger.Info(ctx, "Validating invitation",
 		"code", maskCode(code),
 	)
 
@@ -216,11 +216,11 @@ func (s *InvitationService) Validate(ctx context.Context, code string) (bool, er
 		if errors.Is(err, model.ErrNotFound) {
 			return false, nil
 		}
-		s.logger.Error("Failed to load invitation for validation",
+		s.logger.Error(ctx, "Failed to load invitation for validation",
 			"code", maskCode(code),
 			"error", err.Error(),
 		)
-		return false, sanitizeError(s.logger, "validate invitation", err)
+		return false, sanitizeError(ctx, s.logger, "validate invitation", err)
 	}
 
 	// Validate using repository logic. Expired/exhausted is a known not-usable
@@ -230,14 +230,14 @@ func (s *InvitationService) Validate(ctx context.Context, code string) (bool, er
 		if errors.Is(err, model.ErrInvitationInvalid) {
 			return false, nil
 		}
-		s.logger.Error("Invitation validation failed",
+		s.logger.Error(ctx, "Invitation validation failed",
 			"code", maskCode(code),
 			"error", err.Error(),
 		)
-		return false, sanitizeError(s.logger, "validate invitation", err)
+		return false, sanitizeError(ctx, s.logger, "validate invitation", err)
 	}
 
-	s.logger.Info("Invitation validation completed",
+	s.logger.Info(ctx, "Invitation validation completed",
 		"code", maskCode(code),
 		"valid", valid,
 	)
@@ -266,22 +266,22 @@ func (s *InvitationService) Validate(ctx context.Context, code string) (bool, er
 // Returns the new user's ID, or an error wrapping model.ErrInvitationInvalid if
 // the invitation is unknown, expired, exhausted, or the email does not match.
 func (s *InvitationService) Accept(ctx context.Context, req model.AcceptInvitationRequest) (uuid.UUID, error) {
-	s.logger.Info("Accepting invitation",
+	s.logger.Info(ctx, "Accepting invitation",
 		"code", maskCode(req.Code),
 		"email", maskEmail(req.Email),
 	)
 
 	userID, err := s.repo.AcceptInvitation(ctx, req.Code, req.Email, req.DisplayName, req.PasswordHash)
 	if err != nil {
-		s.logger.Warn("Failed to accept invitation",
+		s.logger.Warn(ctx, "Failed to accept invitation",
 			"code", maskCode(req.Code),
 			"email", maskEmail(req.Email),
 			"error", err.Error(),
 		)
-		return uuid.Nil, sanitizeError(s.logger, "accept invitation", err)
+		return uuid.Nil, sanitizeError(ctx, s.logger, "accept invitation", err)
 	}
 
-	s.logger.Info("Invitation accepted successfully",
+	s.logger.Info(ctx, "Invitation accepted successfully",
 		"code", maskCode(req.Code),
 		"user_id", userID.String(),
 	)
@@ -297,20 +297,20 @@ func (s *InvitationService) Accept(ctx context.Context, req model.AcceptInvitati
 //
 // Returns a list of all invitations ordered by created_at DESC
 func (s *InvitationService) List(ctx context.Context, tenantID string) ([]*model.Invitation, error) {
-	s.logger.Info("Listing all invitations",
+	s.logger.Info(ctx, "Listing all invitations",
 		"tenant_id", tenantID,
 	)
 
 	invitations, err := s.repo.ListInvitations(ctx, tenantID)
 	if err != nil {
-		s.logger.Error("Failed to list invitations",
+		s.logger.Error(ctx, "Failed to list invitations",
 			"tenant_id", tenantID,
 			"error", err.Error(),
 		)
-		return nil, sanitizeError(s.logger, "list invitations", err)
+		return nil, sanitizeError(ctx, s.logger, "list invitations", err)
 	}
 
-	s.logger.Info("Invitations listed successfully",
+	s.logger.Info(ctx, "Invitations listed successfully",
 		"tenant_id", tenantID,
 		"count", len(invitations),
 	)
@@ -326,20 +326,20 @@ func (s *InvitationService) List(ctx context.Context, tenantID string) ([]*model
 //
 // Returns a list of active invitations ordered by created_at DESC
 func (s *InvitationService) ListActive(ctx context.Context, tenantID string) ([]*model.Invitation, error) {
-	s.logger.Info("Listing active invitations",
+	s.logger.Info(ctx, "Listing active invitations",
 		"tenant_id", tenantID,
 	)
 
 	invitations, err := s.repo.ListActiveInvitations(ctx, tenantID)
 	if err != nil {
-		s.logger.Error("Failed to list active invitations",
+		s.logger.Error(ctx, "Failed to list active invitations",
 			"tenant_id", tenantID,
 			"error", err.Error(),
 		)
-		return nil, sanitizeError(s.logger, "list active invitations", err)
+		return nil, sanitizeError(ctx, s.logger, "list active invitations", err)
 	}
 
-	s.logger.Info("Active invitations listed successfully",
+	s.logger.Info(ctx, "Active invitations listed successfully",
 		"tenant_id", tenantID,
 		"count", len(invitations),
 	)
@@ -359,20 +359,20 @@ func (s *InvitationService) ListActive(ctx context.Context, tenantID string) ([]
 //
 // Returns error if revocation fails
 func (s *InvitationService) Revoke(ctx context.Context, code string) error {
-	s.logger.Info("Revoking invitation",
+	s.logger.Info(ctx, "Revoking invitation",
 		"code", maskCode(code),
 	)
 
 	err := s.repo.InvalidateInvitation(ctx, code)
 	if err != nil {
-		s.logger.Error("Failed to revoke invitation",
+		s.logger.Error(ctx, "Failed to revoke invitation",
 			"code", maskCode(code),
 			"error", err.Error(),
 		)
-		return sanitizeError(s.logger, "revoke invitation", err)
+		return sanitizeError(ctx, s.logger, "revoke invitation", err)
 	}
 
-	s.logger.Info("Invitation revoked successfully",
+	s.logger.Info(ctx, "Invitation revoked successfully",
 		"code", maskCode(code),
 	)
 
@@ -387,20 +387,20 @@ func (s *InvitationService) Revoke(ctx context.Context, code string) error {
 //
 // Returns error if deletion fails
 func (s *InvitationService) Delete(ctx context.Context, code string) error {
-	s.logger.Info("Deleting invitation",
+	s.logger.Info(ctx, "Deleting invitation",
 		"code", maskCode(code),
 	)
 
 	err := s.repo.DeleteInvitation(ctx, code)
 	if err != nil {
-		s.logger.Error("Failed to delete invitation",
+		s.logger.Error(ctx, "Failed to delete invitation",
 			"code", maskCode(code),
 			"error", err.Error(),
 		)
-		return sanitizeError(s.logger, "delete invitation", err)
+		return sanitizeError(ctx, s.logger, "delete invitation", err)
 	}
 
-	s.logger.Info("Invitation deleted successfully",
+	s.logger.Info(ctx, "Invitation deleted successfully",
 		"code", maskCode(code),
 	)
 
@@ -419,20 +419,20 @@ func (s *InvitationService) Delete(ctx context.Context, code string) error {
 //
 // Returns error if increment fails or max uses exceeded
 func (s *InvitationService) IncrementUseCount(ctx context.Context, code string) error {
-	s.logger.Info("Incrementing invitation use count",
+	s.logger.Info(ctx, "Incrementing invitation use count",
 		"code", maskCode(code),
 	)
 
 	err := s.repo.IncrementUseCount(ctx, code)
 	if err != nil {
-		s.logger.Error("Failed to increment use count",
+		s.logger.Error(ctx, "Failed to increment use count",
 			"code", maskCode(code),
 			"error", err.Error(),
 		)
-		return sanitizeError(s.logger, "increment use count", err)
+		return sanitizeError(ctx, s.logger, "increment use count", err)
 	}
 
-	s.logger.Info("Invitation use count incremented successfully",
+	s.logger.Info(ctx, "Invitation use count incremented successfully",
 		"code", maskCode(code),
 	)
 
@@ -448,17 +448,17 @@ func (s *InvitationService) IncrementUseCount(ctx context.Context, code string) 
 //
 // Returns the number of expired invitations deleted
 func (s *InvitationService) CleanupExpired(ctx context.Context) (int64, error) {
-	s.logger.Info("Cleaning up expired invitations")
+	s.logger.Info(ctx, "Cleaning up expired invitations")
 
 	count, err := s.repo.CleanupExpiredInvitations(ctx)
 	if err != nil {
-		s.logger.Error("Failed to cleanup expired invitations",
+		s.logger.Error(ctx, "Failed to cleanup expired invitations",
 			"error", err.Error(),
 		)
-		return 0, sanitizeError(s.logger, "cleanup expired invitations", err)
+		return 0, sanitizeError(ctx, s.logger, "cleanup expired invitations", err)
 	}
 
-	s.logger.Info("Expired invitations cleaned up successfully",
+	s.logger.Info(ctx, "Expired invitations cleaned up successfully",
 		"count", count,
 	)
 
@@ -480,12 +480,12 @@ func (s *InvitationService) HasPending(ctx context.Context, email, tenantID stri
 
 	hasPending, err := s.repo.HasPending(ctx, normalizedEmail, tenantID)
 	if err != nil {
-		s.logger.Error("Failed to check for pending invitation",
+		s.logger.Error(ctx, "Failed to check for pending invitation",
 			"email", maskEmail(normalizedEmail),
 			"tenant_id", tenantID,
 			"error", err.Error(),
 		)
-		return false, sanitizeError(s.logger, "check pending invitation", err)
+		return false, sanitizeError(ctx, s.logger, "check pending invitation", err)
 	}
 
 	return hasPending, nil
