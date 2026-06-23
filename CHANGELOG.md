@@ -66,7 +66,6 @@ a minor bump, not a patch.
   account, rotated-token cleanup on an access-token error) now run on a short context
   detached from the request's cancellation, so a client disconnect cannot leave them
   half-done.
-- Pinned the Go toolchain (`toolchain go1.25.3`) in `go.mod`.
 
 ### Fixed
 
@@ -81,10 +80,10 @@ a minor bump, not a patch.
 - Added unit tests for the bounded `last_used` fan-out (`runBoundedLastUsedUpdate`,
   driven concurrently so the unit job's `-race` covers the shared semaphore and the
   detached-goroutine lifecycle), plus `isUserLocked` and the refresh-token `hashToken`.
-- CI coverage is reported (the unit job uploads the profile) but no longer gated by a
-  hard threshold — the per-job threshold steps were environment-fragile and broke CI;
-  they can be reinstated once calibrated against the CI runner. Both the unit and
-  integration jobs run under `-race`.
+- Raised the integration coverage floor from 30% to 50% (actual ~55%) and added a
+  modest 20% floor to the unit job. Both the unit and integration jobs run under
+  `-race`, and each job prints a toolchain-info (`go version` / `go env`) line for
+  easier CI diagnosis.
 - The `gosec` SARIF is now uploaded to GitHub code scanning (Security tab), not just as
   a build artifact (`security-events: write` + `github/codeql-action/upload-sarif`).
 - Simplified the branch-naming CI convention to

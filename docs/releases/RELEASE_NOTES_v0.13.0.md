@@ -85,7 +85,6 @@ schema):
   account, rotated-token cleanup on an access-token error) now run on a context
   detached from the request's cancellation, so a client disconnect cannot leave them
   half-applied.
-- Pinned the Go toolchain (`toolchain go1.25.3`) in `go.mod`.
 
 ## Fixed
 
@@ -101,9 +100,8 @@ schema):
   driven concurrently so the unit job's `-race` covers the shared semaphore and the
   detached-goroutine lifecycle), `isUserLocked`, `hashToken`, and the rate-limiter
   wiring (rejection, key format, fail-open).
-- CI coverage is reported (profile uploaded) but not gated by a hard threshold (the
-  per-job thresholds were environment-fragile in CI). Both the unit and integration
-  jobs run under `-race`.
+- Raised the integration coverage floor from 30% to 50% (actual ~55%) and added a 20%
+  floor to the unit job. Both the unit and integration jobs run under `-race`.
 - The `gosec` SARIF is now uploaded to GitHub code scanning (Security tab), not just as
   a build artifact.
 
