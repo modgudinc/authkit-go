@@ -31,9 +31,10 @@ type Config struct {
 	Logger logger.Logger
 	// Metrics is an optional counter sink for auth security/operational events
 	// (login success/failure, account lockout, OTP failure/lockout, refresh-token
-	// reuse). Defaults to a no-op. See the metrics package for the canonical
-	// counter names. Unlike the logger, these survive independently of log level,
-	// so they are the recommended basis for alerting.
+	// reuse, rate-limit rejections/limiter errors, and best-effort write failures).
+	// Defaults to a no-op. See the metrics package Counter* constants for the full,
+	// authoritative list. Unlike the logger, these survive independently of log
+	// level, so they are the recommended basis for alerting.
 	Metrics metrics.Metrics
 
 	// VerifyConnectivity, when true, makes New ping both database handles (with a

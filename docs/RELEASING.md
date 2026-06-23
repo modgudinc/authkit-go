@@ -41,44 +41,66 @@ git config --get user.signingkey   # -> path to your .pub
 ssh-add -l                         # signing key present
 ```
 
+## Repository protections
+
+Two independent rulesets shape the flow below:
+
+- **`main` is protected:** all changes land via a **pull request** (direct
+  `git push origin main` is rejected), and the **`gosec` status check must pass**
+  before merge. So releases are cut from `main` *after* a release PR merges — there
+  are no long-lived `release/*` branches (and `release/*` is not even an allowed
+  branch name; see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+- **Tags must be signed** (require-signed-tags ruleset). Tag refs are **not**
+  branch-rule-gated, so a signed tag is pushed directly once `main` has the release
+  commit.
+
 ## Per-release checklist
 
-1. **Green `main`.**
+1. **`main` is green and ready.**
    ```bash
    make lint
    make test
    make postgres-up && make test-integration && make postgres-down
    ```
-   (`gosec` and `govulncheck` also run in CI via `.github/workflows/security.yml`.)
+   (`gosec` and `govulncheck` also run in CI via `.github/workflows/security.yml`;
+   `gosec` is a required merge gate.)
 
 2. **Update `CHANGELOG.md`.** Move the `[Unreleased]` items into a new
-   `## [X.Y.Z] - YYYY-MM-DD` section, flag any breaking change, and update the
-   compare/tag links at the bottom of the file. Choose `X.Y.Z` per SemVer (see above).
+   `## [X.Y.Z] - YYYY-MM-DD` section (the date is the day the tag is cut), flag any
+   breaking change, and update any compare/tag links. Choose `X.Y.Z` per SemVer (see above).
 
 3. **Write release notes:** `docs/releases/RELEASE_NOTES_vX.Y.Z.md` (follow the
    existing files — highlights, breaking changes, security, upgrade notes).
 
-4. **Commit and push** the changelog + notes to `main` (commit is signed via the
-   one-time setup):
+4. **Open a release PR** from a conventionally-named branch (a `release/*` branch is
+   NOT allowed — use a `chore/` branch; the commit is signed via the one-time setup):
    ```bash
+   git switch -c chore/release-X-Y-Z          # dashes, not dots (branch-naming rule)
    git add CHANGELOG.md docs/releases/RELEASE_NOTES_vX.Y.Z.md
    git commit -m "Release vX.Y.Z"
-   git push origin main
+   git push -u origin chore/release-X-Y-Z
+   gh pr create --base main --title "Release vX.Y.Z" --body-file docs/releases/RELEASE_NOTES_vX.Y.Z.md
    ```
 
-5. **Create the signed tag on the release commit, and verify BEFORE pushing**
-   (the push is irreversible — the tag is immutable):
+5. **Merge the PR** once CI is green (the required `gosec` check must pass). Use a
+   merge or squash merge per repo preference; the result is the release commit on `main`.
+
+6. **Sync `main`, then create the signed tag on the merged release commit and verify
+   BEFORE pushing** (the push is irreversible — the tag is immutable):
    ```bash
+   git switch main && git pull --ff-only
    git tag -s vX.Y.Z -m "authkit-go vX.Y.Z"
    git cat-file -p vX.Y.Z | grep -q "BEGIN SSH SIGNATURE" && echo "signed ✓"
    ```
+   Do NOT create/push the tag before the PR merges — a tag pushed early points at a
+   commit that isn't on `main` and would have to be deleted and recreated.
 
-6. **Push the tag:**
+7. **Push the tag** (tag refs are not branch-rule-gated):
    ```bash
    git push origin vX.Y.Z
    ```
 
-7. **Publish the GitHub Release** from the existing tag:
+8. **Publish the GitHub Release** from the existing tag:
    ```bash
    gh release create vX.Y.Z \
      --title "authkit-go vX.Y.Z" \
@@ -88,7 +110,7 @@ ssh-add -l                         # signing key present
    ```
    `--verify-tag` makes `gh` use your signed tag instead of creating a new one.
 
-8. **Verify:** the tag shows **Verified** on GitHub, and
+9. **Verify:** the tag shows **Verified** on GitHub, and
    `go get github.com/modgudinc/authkit-go@vX.Y.Z` resolves.
 
 ## Alternative: let GitHub create the tag

@@ -4,7 +4,10 @@
 
 ## Layers
 
-- `model/`: Public request, response, and database entity structs.
+- `model/`: Public request, response, and database entity structs, plus the sentinel errors (`Err*`) callers branch on.
+- `logger/`: Public, optional `Logger` interface (context-first) plus `NopLogger`. Injected via `Config.Logger`.
+- `metrics/`: Public, optional `Metrics` interface plus a no-op default and the canonical `Counter*` names. Injected via `Config.Metrics`.
+- `ratelimit/`: Public, optional `RateLimiter` interface (aliased as `authkit.RateLimiter`). Injected via `Config.RateLimiter`; consulted before `Login`, `RefreshToken`, and `OTPService.Generate`, with a rejection surfacing as `authkit.ErrRateLimited` (HTTP 429). Key formats are documented in the package.
 - `internal/repository/`: PostgreSQL data access (not importable by consumers). Queries are schema-qualified with `authkit.` and rewritten when `DatabaseConnection.IdentitySchema` is configured.
 - `internal/service/`: Business logic for tokens, passwords, API keys, invitations, tenants, OTPs, and encrypted secrets (not importable by consumers; the public contracts are the service interfaces in package `authkit`).
 - `migrations/`: PostgreSQL schema used by the default `authkit` schema.
@@ -19,7 +22,7 @@ Core tables:
 - `refresh_tokens`: Stored refresh token hashes and session metadata.
 - `api_keys`: Tenant-scoped API key hashes and metadata.
 - `invitations`: Invitation codes, target email, roles, expiry, and usage limits.
-- `verification_codes`: OTP codes, purpose, expiry, and creation time.
+- `verification_codes`: OTPs stored as a keyed HMAC-SHA256 (`code_hash`), never in plaintext, plus purpose, failed-attempt count, expiry, and creation time; scoped by `(tenant_id, email, purpose)`.
 - `provider_keys`: Tenant-scoped encrypted secrets.
 - `user_status_changes`: Audit trail of account enable/disable and lock/unlock
   transitions. Written by the library in Go, in the same transaction as the
@@ -37,6 +40,15 @@ SQL-side UUID generation.
 - Security-sensitive validation paths that must see revocations immediately use `IdentityRWDB`, including API key validation and refresh-token validation/rotation.
 
 This allows applications to use read replicas while avoiding replica-lag acceptance for revoked credentials.
+
+## Health Checks
+
+`New` does not contact the database by default — connection errors surface lazily on
+the first query. For readiness/liveness probes, `AuthKit.Ping(ctx)` issues a
+`PingContext` to **both** the read-write and read-only handles and wraps the error to
+identify which is unreachable. Set `Config.VerifyConnectivity = true` to make `New`
+run that check at construction (with a short internal timeout) and fail fast; it is off
+by default so construction stays cheap and offline-testable.
 
 ## Schema Configuration
 
@@ -63,7 +75,7 @@ Library guarantees:
 - API keys are generated with `crypto/rand` and stored only as HMAC-SHA256 hashes.
 - Refresh tokens are random opaque strings and stored only as HMAC-SHA256 hashes.
 - Refresh-token rotation consumes the old token and stores the replacement in one transaction.
-- OTP validation consumes the code atomically within a transaction (`SELECT ... FOR UPDATE`, then `DELETE`).
+- OTPs are stored only as a keyed HMAC-SHA256 (never plaintext); validation consumes the code atomically within a transaction (`SELECT ... FOR UPDATE`, then `DELETE`).
 - Secrets are encrypted with AES-256-GCM before storage.
 - Passwords are hashed with bcrypt.
 

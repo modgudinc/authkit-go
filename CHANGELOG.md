@@ -8,7 +8,7 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
-## [0.13.0] - 2026-06-22
+## [0.13.0] - 2026-06-23
 
 Operational hardening plus test/CI improvements. Contains one **breaking change** —
 the `logger.Logger` interface is now context-first — so per the pre-1.0 policy this is
@@ -79,7 +79,8 @@ a minor bump, not a patch.
 
 - Added unit tests for the bounded `last_used` fan-out (`runBoundedLastUsedUpdate`,
   driven concurrently so the unit job's `-race` covers the shared semaphore and the
-  detached-goroutine lifecycle), plus `isUserLocked` and the refresh-token `hashToken`.
+  detached-goroutine lifecycle), `isUserLocked`, the refresh-token `hashToken`, and the
+  rate-limiter wiring (rejection → `ErrRateLimited`, key format, fail-open).
 - Raised the integration coverage floor from 30% to 50% (actual ~55%) and added a
   modest 20% floor to the unit job. Both the unit and integration jobs run under
   `-race`, and each job prints a toolchain-info (`go version` / `go env`) line for
@@ -100,6 +101,12 @@ a minor bump, not a patch.
   behavior-under-database-outage), and documented on the `InvitationService` interface
   that the by-code operations are bearer-capability-based and not additionally tenant-
   checked (resolve via `Get` and check `TenantID` first if your model requires it).
+
+### Dependencies
+
+- Bumped `github.com/jackc/pgx/v5` 5.9.2 → 5.10.0, and the SHA-pinned GitHub Actions
+  `actions/checkout`, `actions/setup-go`, `actions/upload-artifact`, and
+  `golangci/golangci-lint-action` to their latest releases (via Dependabot).
 
 ## [0.12.0] - 2026-06-21
 
