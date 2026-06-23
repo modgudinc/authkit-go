@@ -4,6 +4,7 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -15,9 +16,10 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
-// clockSkewLeeway is the tolerance applied to time-based claim checks (exp/iat)
+// clockSkewLeeway is the tolerance applied to the time-based expiry check (exp)
 // so that small clock differences between issuing and validating hosts do not
-// spuriously reject otherwise-valid tokens.
+// spuriously reject otherwise-valid tokens. iat is stamped but informational only
+// (not validated), and nbf is never issued, so neither is leeway-adjusted.
 const clockSkewLeeway = 30 * time.Second
 
 // JWTService handles JWT token generation and validation
@@ -108,7 +110,7 @@ func NewJWTService(
 //	}
 //	// Return token to client
 func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
-	s.logger.Info("Generating access token",
+	s.logger.Info(context.Background(), "Generating access token",
 		"user_id", user.ID.String(),
 		"email", maskEmail(user.Email),
 		"tenant_id", user.TenantID,
@@ -140,11 +142,11 @@ func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signedToken, err := token.SignedString([]byte(s.accessSecret))
 	if err != nil {
-		s.logger.Error("Failed to sign JWT token", "error", err.Error())
+		s.logger.Error(context.Background(), "Failed to sign JWT token", "error", err.Error())
 		return "", fmt.Errorf("failed to sign JWT token: %w", err)
 	}
 
-	s.logger.Info("Access token generated successfully",
+	s.logger.Info(context.Background(), "Access token generated successfully",
 		"user_id", user.ID.String(),
 		"expires_at", expiresAt.Format(time.RFC3339),
 	)
@@ -198,7 +200,7 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 	if err != nil {
 		// Validation failures are driven by untrusted input; log at Warn to avoid
 		// error-level log floods from clients spamming invalid tokens.
-		s.logger.Warn("Failed to parse JWT token", "error", err.Error())
+		s.logger.Warn(context.Background(), "Failed to parse JWT token", "error", err.Error())
 		// Wrap the sentinel (not the raw jwt-lib error) so callers using this
 		// service directly can errors.Is(err, authkit.ErrInvalidToken), matching
 		// AuthService.ValidateJWT. The underlying cause is already logged above.
@@ -207,11 +209,11 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 
 	claims, ok := token.Claims.(*model.JWTClaims)
 	if !ok || !token.Valid {
-		s.logger.Warn("Invalid JWT claims or token")
+		s.logger.Warn(context.Background(), "Invalid JWT claims or token")
 		return nil, fmt.Errorf("invalid token claims: %w", model.ErrInvalidToken)
 	}
 
-	s.logger.Info("JWT token validated successfully",
+	s.logger.Info(context.Background(), "JWT token validated successfully",
 		"user_id", claims.UserID,
 		"tenant_id", claims.TenantID,
 	)
@@ -241,19 +243,19 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 //	// Store HMAC-SHA256(refreshToken) in database (via TokenService)
 //	// Return refreshToken to client
 func (s *JWTService) GenerateRefreshToken() (string, error) {
-	s.logger.Info("Generating refresh token")
+	s.logger.Info(context.Background(), "Generating refresh token")
 
 	// Generate 32 random bytes
 	randomBytes := make([]byte, 32)
 	if _, err := rand.Read(randomBytes); err != nil {
-		s.logger.Error("Failed to generate random bytes", "error", err.Error())
+		s.logger.Error(context.Background(), "Failed to generate random bytes", "error", err.Error())
 		return "", fmt.Errorf("failed to generate random bytes: %w", err)
 	}
 
 	// Encode to base64 for safe transmission
 	token := base64.URLEncoding.EncodeToString(randomBytes)
 
-	s.logger.Info("Refresh token generated successfully")
+	s.logger.Info(context.Background(), "Refresh token generated successfully")
 
 	return token, nil
 }

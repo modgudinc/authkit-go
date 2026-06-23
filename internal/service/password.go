@@ -4,6 +4,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -74,11 +75,11 @@ func NewPasswordService(cost int, logger logger.Logger) *PasswordService {
 //	}
 //	// Store hash in database
 func (s *PasswordService) HashPassword(password string) (string, error) {
-	s.logger.Info("Hashing password", "cost", s.cost)
+	s.logger.Info(context.Background(), "Hashing password", "cost", s.cost)
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), s.cost)
 	if err != nil {
-		s.logger.Error("Failed to hash password", "error", err.Error())
+		s.logger.Error(context.Background(), "Failed to hash password", "error", err.Error())
 		// A password over bcrypt's 72-byte limit is a caller input problem, not an
 		// internal fault; surface it as the matchable strength sentinel so callers
 		// that bypass ValidatePasswordStrength still get a clean classification.
@@ -113,15 +114,15 @@ func (s *PasswordService) VerifyPassword(password, hash string) error {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	if err != nil {
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
-			s.logger.Warn("Password verification failed: incorrect password")
+			s.logger.Warn(context.Background(), "Password verification failed: incorrect password")
 			return fmt.Errorf("incorrect password")
 		}
 
-		s.logger.Error("Password verification error", "error", err.Error())
+		s.logger.Error(context.Background(), "Password verification error", "error", err.Error())
 		return fmt.Errorf("password verification failed: %w", err)
 	}
 
-	s.logger.Info("Password verified successfully")
+	s.logger.Info(context.Background(), "Password verified successfully")
 
 	return nil
 }
@@ -155,7 +156,7 @@ func (s *PasswordService) dummyVerifyHash() string {
 	if s.dummyHash == "" {
 		h, err := bcrypt.GenerateFromPassword([]byte(dummyVerifySeed), s.cost)
 		if err != nil {
-			s.logger.Error("failed to generate dummy bcrypt hash for timing equalization", "error", err.Error())
+			s.logger.Error(context.Background(), "failed to generate dummy bcrypt hash for timing equalization", "error", err.Error())
 			return ""
 		}
 		s.dummyHash = string(h)
@@ -218,11 +219,11 @@ func (s *PasswordService) ValidatePasswordStrength(password string, requirements
 	}
 
 	if len(problems) > 0 {
-		s.logger.Warn("Password strength validation failed", "errors", problems)
+		s.logger.Warn(context.Background(), "Password strength validation failed", "errors", problems)
 		return fmt.Errorf("password %s: %w", strings.Join(problems, "; "), model.ErrPasswordTooWeak)
 	}
 
-	s.logger.Info("Password meets strength requirements")
+	s.logger.Info(context.Background(), "Password meets strength requirements")
 
 	return nil
 }

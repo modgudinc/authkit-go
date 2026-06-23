@@ -334,6 +334,39 @@ func TestValidateJWTReadsUserFromPrimary(t *testing.T) {
 	}
 }
 
+func TestChangePasswordRejectsDisabledOrLocked(t *testing.T) {
+	// A disabled or locked account must not be able to rotate its own password
+	// mid-freeze, even with the correct old password. The status gate runs before
+	// password verification, so these return before any token-service call.
+	t.Run("disabled", func(t *testing.T) {
+		user := makeUser(t, "Correct1!")
+		user.IsEnabled = false
+		svc := newTestAuthService(&fakeAuthRepository{user: user})
+
+		err := svc.ChangePassword(context.Background(), model.ChangePasswordRequest{
+			UserID: user.ID, TenantID: user.TenantID, OldPassword: "Correct1!", NewPassword: "NewStrong1!",
+		})
+		if !errors.Is(err, model.ErrAccountDisabled) {
+			t.Fatalf("expected ErrAccountDisabled, got %v", err)
+		}
+	})
+
+	t.Run("locked", func(t *testing.T) {
+		user := makeUser(t, "Correct1!")
+		user.IsLocked = true
+		future := time.Now().Add(time.Hour)
+		user.LockedUntil = &future
+		svc := newTestAuthService(&fakeAuthRepository{user: user})
+
+		err := svc.ChangePassword(context.Background(), model.ChangePasswordRequest{
+			UserID: user.ID, TenantID: user.TenantID, OldPassword: "Correct1!", NewPassword: "NewStrong1!",
+		})
+		if !errors.Is(err, model.ErrAccountLocked) {
+			t.Fatalf("expected ErrAccountLocked, got %v", err)
+		}
+	})
+}
+
 func TestValidateJWTRejectsTamperedSignature(t *testing.T) {
 	user := makeUser(t, "Correct1!")
 	svc := newTestAuthService(&fakeAuthRepository{user: user})
@@ -347,5 +380,54 @@ func TestValidateJWTRejectsTamperedSignature(t *testing.T) {
 
 	if _, err := svc.ValidateJWT(context.Background(), token); !errors.Is(err, model.ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken, got %v", err)
+	}
+}
+
+// fakeRateLimiter records the keys it is asked about and returns a configured verdict.
+type fakeRateLimiter struct {
+	allow bool
+	err   error
+	keys  []string
+}
+
+func (f *fakeRateLimiter) Allow(_ context.Context, key string) (bool, error) {
+	f.keys = append(f.keys, key)
+	return f.allow, f.err
+}
+
+func TestLoginRateLimited(t *testing.T) {
+	user := makeUser(t, "Correct1!")
+	rl := &fakeRateLimiter{allow: false}
+	svc := newTestAuthService(&fakeAuthRepository{user: user})
+	svc.rateLimiter = rl
+
+	_, err := svc.Login(context.Background(), model.LoginRequest{
+		Email: user.Email, Password: "Correct1!", TenantID: user.TenantID,
+		SessionInfo: &model.SessionInfo{IPAddress: "203.0.113.5"},
+	})
+	if !errors.Is(err, model.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+	// Keyed by tenant + client IP, and checked before any password work.
+	if want := "login:" + user.TenantID + ":203.0.113.5"; len(rl.keys) != 1 || rl.keys[0] != want {
+		t.Fatalf("rate-limit key = %v, want [%q]", rl.keys, want)
+	}
+}
+
+func TestLoginRateLimiterFailsOpen(t *testing.T) {
+	user := makeUser(t, "Correct1!")
+	svc := newTestAuthService(&fakeAuthRepository{user: user})
+	svc.rateLimiter = &fakeRateLimiter{allow: false, err: errors.New("limiter backend down")}
+
+	// A limiter error must fail OPEN: the request proceeds (and here fails on the
+	// wrong password) rather than being rejected as rate-limited.
+	_, err := svc.Login(context.Background(), model.LoginRequest{
+		Email: user.Email, Password: "WrongPassword1!", TenantID: user.TenantID,
+	})
+	if errors.Is(err, model.ErrRateLimited) {
+		t.Fatal("a limiter error must fail open, not return ErrRateLimited")
+	}
+	if !errors.Is(err, model.ErrInvalidCredentials) {
+		t.Fatalf("expected ErrInvalidCredentials (proceeded past the limiter), got %v", err)
 	}
 }

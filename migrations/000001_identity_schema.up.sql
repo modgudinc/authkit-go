@@ -61,12 +61,16 @@ CREATE TABLE IF NOT EXISTS authkit.users (
     CONSTRAINT users_tenant_email_unique UNIQUE (tenant_id, email)
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_email ON authkit.users(email);
-CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON authkit.users(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_users_is_enabled ON authkit.users(is_enabled);
-CREATE INDEX IF NOT EXISTS idx_users_is_locked ON authkit.users(is_locked);
-CREATE INDEX IF NOT EXISTS idx_users_locked_until ON authkit.users(locked_until) WHERE locked_until IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_users_created_at ON authkit.users(created_at DESC);
+-- Index strategy: the UNIQUE (tenant_id, email) constraint serves exact email
+-- lookups, and its tenant_id prefix serves tenant-scoped reads and the tenant FK
+-- cascade; the composite below serves List (tenant-scoped, ordered by created_at).
+-- The boolean/locked_until columns were indexed but never filtered on in SQL (the
+-- status checks happen in Go after loading the row), so those indexes are dropped.
+CREATE INDEX IF NOT EXISTS idx_users_tenant_created ON authkit.users(tenant_id, created_at DESC);
+-- Defense in depth: a functional UNIQUE on lower(email) so that even a writer which
+-- bypasses the Go-side email normalization cannot create case-variant duplicate
+-- accounts within a tenant. Exact lookups still use users_tenant_email_unique.
+CREATE UNIQUE INDEX IF NOT EXISTS users_tenant_email_lower_unique ON authkit.users(tenant_id, lower(email));
 
 DROP TRIGGER IF EXISTS trigger_users_updated_at ON authkit.users;
 CREATE TRIGGER trigger_users_updated_at
@@ -88,11 +92,13 @@ CREATE TABLE IF NOT EXISTS authkit.invitations (
     CONSTRAINT invitations_expires_after_created_check CHECK (expires_at > created_at)
 );
 
-CREATE INDEX IF NOT EXISTS idx_invitations_tenant_id ON authkit.invitations (tenant_id);
+-- Composite (tenant_id, created_at DESC) serves the tenant-scoped list endpoints
+-- (and its tenant_id prefix the tenant FK cascade), replacing the separate
+-- (tenant_id) and (created_at) indexes.
+CREATE INDEX IF NOT EXISTS idx_invitations_tenant_created ON authkit.invitations (tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_invitations_email ON authkit.invitations (email);
 CREATE INDEX IF NOT EXISTS idx_invitations_expires_at ON authkit.invitations (expires_at);
 CREATE INDEX IF NOT EXISTS idx_invitations_created_by ON authkit.invitations (created_by);
-CREATE INDEX IF NOT EXISTS idx_invitations_created_at ON authkit.invitations (created_at DESC);
 
 -- key_id holds an application-minted UUIDv7. key_hash is UNIQUE, which already
 -- provides the index used by the hash lookup in ValidateAPIKey (no separate
@@ -108,9 +114,10 @@ CREATE TABLE IF NOT EXISTS authkit.api_keys (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_id ON authkit.api_keys (tenant_id);
+-- Composite (tenant_id, created_at DESC) serves ListAPIKeys and CountAPIKeysByTenant
+-- (and the tenant FK cascade via its prefix), replacing separate (tenant_id) + (created_at).
+CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_created ON authkit.api_keys (tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_api_keys_created_by ON authkit.api_keys (created_by);
-CREATE INDEX IF NOT EXISTS idx_api_keys_created_at ON authkit.api_keys (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON authkit.api_keys (expires_at) WHERE expires_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS authkit.provider_keys (
@@ -126,8 +133,9 @@ CREATE TABLE IF NOT EXISTS authkit.provider_keys (
     PRIMARY KEY (tenant_id, provider)
 );
 
-CREATE INDEX IF NOT EXISTS idx_provider_keys_tenant_id ON authkit.provider_keys (tenant_id);
-CREATE INDEX IF NOT EXISTS idx_provider_keys_provider ON authkit.provider_keys (provider);
+-- (tenant_id) and (tenant_id, provider) lookups — including ListSecrets'
+-- "WHERE tenant_id ORDER BY provider" — are served by the PRIMARY KEY
+-- (tenant_id, provider), so no separate tenant_id/provider index is needed.
 CREATE INDEX IF NOT EXISTS idx_provider_keys_created_at ON authkit.provider_keys (created_at DESC);
 
 DROP TRIGGER IF EXISTS trigger_provider_keys_updated_at ON authkit.provider_keys;
@@ -157,12 +165,13 @@ CREATE TABLE IF NOT EXISTS authkit.refresh_tokens (
 
 -- token_hash is declared UNIQUE (above), which already creates the index used by
 -- the hot GetByTokenHash / RotateRefreshToken lookups — no separate token_hash index.
+-- user_id (logout-all / list), family_id (reuse-family revoke), and expires_at
+-- (cleanup) are the indexed access paths; token_hash uses its UNIQUE index. The
+-- ip_address/last_used_at/device_name columns are session metadata, never filtered
+-- on, so they are not indexed.
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON authkit.refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family_id ON authkit.refresh_tokens(family_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON authkit.refresh_tokens(expires_at);
-CREATE INDEX IF NOT EXISTS idx_refresh_tokens_ip_address ON authkit.refresh_tokens(ip_address);
-CREATE INDEX IF NOT EXISTS idx_refresh_tokens_last_used_at ON authkit.refresh_tokens(last_used_at DESC);
-CREATE INDEX IF NOT EXISTS idx_refresh_tokens_device_name ON authkit.refresh_tokens(device_name);
 
 -- One-time verification codes (OTP).
 -- Scoped by tenant_id so the same email in different tenants gets independent
@@ -170,10 +179,14 @@ CREATE INDEX IF NOT EXISTS idx_refresh_tokens_device_name ON authkit.refresh_tok
 -- purpose so codes for distinct flows (signup vs reset) do not evict each other.
 -- attempts tracks failed validation attempts to enforce lockout against online
 -- brute force of the short numeric code.
+-- code_hash stores a keyed HMAC-SHA256 of the OTP (64 hex chars), never the
+-- plaintext, so a read-only DB/backup/replica disclosure does not expose usable
+-- codes (the validating server holds the HMAC secret) — mirroring refresh_tokens
+-- and api_keys.
 CREATE TABLE IF NOT EXISTS authkit.verification_codes (
     tenant_id VARCHAR(255) NOT NULL REFERENCES authkit.tenants(tenant_id) ON DELETE CASCADE,
     email VARCHAR(255) NOT NULL,
-    code VARCHAR(10) NOT NULL,
+    code_hash VARCHAR(64) NOT NULL,
     purpose VARCHAR(50) NOT NULL DEFAULT 'signup',
     attempts INTEGER NOT NULL DEFAULT 0,
     expires_at TIMESTAMPTZ NOT NULL,
@@ -183,11 +196,22 @@ CREATE TABLE IF NOT EXISTS authkit.verification_codes (
 
 -- (tenant_id, email) lookups are served by the left prefix of the PRIMARY KEY
 -- (tenant_id, email, purpose) — no separate (tenant_id, email) index needed.
+-- expires_at drives DeleteExpired; (tenant_id, email[, purpose]) lookups use the
+-- PRIMARY KEY. purpose is never filtered on alone, so it is not separately indexed.
 CREATE INDEX IF NOT EXISTS idx_verification_codes_expires_at ON authkit.verification_codes(expires_at);
-CREATE INDEX IF NOT EXISTS idx_verification_codes_purpose ON authkit.verification_codes(purpose);
 
 -- Account status-change audit trail. Written by the application in Go (id is a
 -- uuid.NewV7()) on every is_enabled/is_locked transition; there is no DB trigger.
+-- The table has no expiry column and grows for the life of the deployment; prune
+-- it per a retention policy via UserService.CleanupStatusChanges. Read it via
+-- UserService.StatusHistory. The user_id FK is ON DELETE CASCADE intentionally:
+-- an audit row is meaningful only alongside the user it describes, and the library
+-- soft-deletes users (sets is_enabled=false) rather than removing the row, so the
+-- trail is retained for the account's lifetime. An operator who hard-deletes a
+-- user/tenant should archive these rows first if they are needed for compliance.
+-- changed_by/reason are reserved for callers that extend the trail (the library
+-- leaves them NULL and conveys provenance via changed_by_type), so there is no
+-- index on changed_by.
 CREATE TABLE IF NOT EXISTS authkit.user_status_changes (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
@@ -201,7 +225,6 @@ CREATE TABLE IF NOT EXISTS authkit.user_status_changes (
 
 CREATE INDEX IF NOT EXISTS idx_user_status_changes_user_id ON authkit.user_status_changes(user_id, changed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_status_changes_status_type ON authkit.user_status_changes(status_type, changed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_user_status_changes_changed_by ON authkit.user_status_changes(changed_by);
 CREATE INDEX IF NOT EXISTS idx_user_status_changes_changed_at ON authkit.user_status_changes(changed_at DESC);
 
 DO $$

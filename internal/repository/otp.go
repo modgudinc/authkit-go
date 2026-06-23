@@ -14,22 +14,25 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
-// VerificationCode represents an OTP code for email verification
+// VerificationCode represents an OTP code for email verification. The OTP itself
+// is stored only as a keyed HMAC (CodeHash), never in plaintext.
 type VerificationCode struct {
 	TenantID  string    `json:"tenant_id" db:"tenant_id"`
 	Email     string    `json:"email" db:"email"`
-	Code      string    `json:"-" db:"code"` // Never expose the plaintext code in JSON
+	CodeHash  string    `json:"-" db:"code_hash"` // HMAC-SHA256 of the code; never the plaintext
 	Purpose   string    `json:"purpose" db:"purpose"`
 	Attempts  int       `json:"attempts" db:"attempts"`
 	ExpiresAt time.Time `json:"expires_at" db:"expires_at"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
 
-// CreateVerificationCodeRequest contains the data needed to create a new OTP code
+// CreateVerificationCodeRequest contains the data needed to create a new OTP code.
+// CodeHash is the keyed HMAC of the plaintext code (the service hashes it before
+// calling); the repository never sees or stores the plaintext.
 type CreateVerificationCodeRequest struct {
 	TenantID  string
 	Email     string
-	Code      string
+	CodeHash  string
 	Purpose   string
 	ExpiresAt time.Time
 }
@@ -78,12 +81,12 @@ const (
 func (r *Repository) UpsertVerificationCode(ctx context.Context, req CreateVerificationCodeRequest, rateLimit time.Duration) (stored bool, err error) {
 	query := `
 		INSERT INTO {{schema}}.verification_codes (
-			tenant_id, email, code, purpose, attempts, expires_at, created_at
+			tenant_id, email, code_hash, purpose, attempts, expires_at, created_at
 		)
 		VALUES ($1, $2, $3, $4, 0, $5, $6)
 		ON CONFLICT (tenant_id, email, purpose)
 		DO UPDATE SET
-			code = EXCLUDED.code,
+			code_hash = EXCLUDED.code_hash,
 			attempts = 0,
 			expires_at = EXCLUDED.expires_at,
 			created_at = EXCLUDED.created_at
@@ -95,7 +98,7 @@ func (r *Repository) UpsertVerificationCode(ctx context.Context, req CreateVerif
 	result, err := r.rw.ExecContext(ctx, r.q(query),
 		req.TenantID,
 		req.Email,
-		req.Code,
+		req.CodeHash,
 		req.Purpose,
 		req.ExpiresAt,
 		now,
@@ -122,10 +125,9 @@ func (r *Repository) UpsertVerificationCode(ctx context.Context, req CreateVerif
 // replication lag hide a just-issued code and bypass the limit. Returns
 // model.ErrNotFound (wrapped) when no code exists for the key.
 //
-// The plaintext code is deliberately NOT selected here — the rate-limit check
-// only needs created_at, and the code is only ever read back under a FOR UPDATE
-// row lock by ConsumeVerificationCode for the constant-time match. Keeping the
-// code out of this read narrows where the plaintext value is exposed.
+// The code hash is deliberately NOT selected here — the rate-limit check only
+// needs created_at, and the stored hash is only ever read back under a FOR UPDATE
+// row lock by ConsumeVerificationCode for the constant-time match.
 // ============================================================================
 func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*VerificationCode, error) {
 	query := `
@@ -174,9 +176,11 @@ func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, p
 // DeleteExpiredVerificationCodes at expiry.
 //
 // The code comparison is constant-time to avoid leaking match progress via timing.
-// maxAttempts <= 0 disables lockout (attempts are not enforced).
+// codeHash is the keyed HMAC of the user-supplied code (the service hashes it
+// before calling); the stored value is the same HMAC, so the compare is
+// hash-to-hash. maxAttempts <= 0 disables lockout (attempts are not enforced).
 // ============================================================================
-func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (OTPConsumeResult, error) {
+func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, email, codeHash, purpose string, maxAttempts int) (OTPConsumeResult, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
 		return OTPConsumeInvalid, fmt.Errorf("failed to begin verification code consumption: %w", err)
@@ -190,7 +194,7 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 	}()
 
 	selectQuery := `
-		SELECT code, attempts, expires_at
+		SELECT code_hash, attempts, expires_at
 		FROM {{schema}}.verification_codes
 		WHERE tenant_id = $1
 		  AND email = $2
@@ -198,10 +202,10 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 		FOR UPDATE
 	`
 
-	var storedCode string
+	var storedHash string
 	var attempts int
 	var expiresAt time.Time
-	err = tx.QueryRowContext(ctx, r.q(selectQuery), tenantID, email, purpose).Scan(&storedCode, &attempts, &expiresAt)
+	err = tx.QueryRowContext(ctx, r.q(selectQuery), tenantID, email, purpose).Scan(&storedHash, &attempts, &expiresAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// No active code for this (tenant, email, purpose); nothing to consume.
@@ -250,8 +254,8 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 		return OTPConsumeLockedOut, nil
 	}
 
-	// Constant-time comparison to avoid timing side channels.
-	if subtle.ConstantTimeCompare([]byte(storedCode), []byte(code)) == 1 {
+	// Constant-time comparison to avoid timing side channels (both sides are HMACs).
+	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(codeHash)) == 1 {
 		if err := deleteAndCommit(); err != nil {
 			return OTPConsumeInvalid, fmt.Errorf("failed to consume verification code: %w", err)
 		}

@@ -30,6 +30,15 @@ jobs:
   gosec:
     name: gosec
     runs-on: ubuntu-latest
+    # security-events: write lets the SARIF be uploaded to GitHub code scanning so
+    # findings surface in the Security tab; actions: read is required by
+    # codeql-action/upload-sarif to look up the workflow run (private repos);
+    # contents: read is restated because a job-level permissions block replaces
+    # (not merges with) the workflow default.
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
 
     steps:
       - name: Checkout
@@ -42,10 +51,21 @@ jobs:
           # exits non-zero on findings, so the job fails — the SARIF is uploaded below
           # regardless via if: always().
           args: '-severity low -confidence low -fmt sarif -out gosec-results.sarif ./...'
-      - name: Upload gosec SARIF report
+      - name: Upload gosec SARIF report (artifact)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gosec-sarif
           path: gosec-results.sarif
           if-no-files-found: warn
+      - name: Upload gosec SARIF to code scanning
+        if: always()
+        # Best-effort: gosec itself (the step above) is the gate. Surfacing findings in
+        # the Security tab is a bonus, so a code-scanning hiccup (permissions, or
+        # Advanced Security not enabled) must not red the gosec job. The SARIF is still
+        # kept as a build artifact above.
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        with:
+          sarif_file: gosec-results.sarif
+          category: gosec
