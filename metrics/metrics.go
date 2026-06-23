@@ -5,8 +5,9 @@
 //
 // It mirrors the logger package: the library calls a small Metrics interface at a
 // few security-relevant decision points (login success/failure, account lockout,
-// OTP failure/lockout, refresh-token reuse) and never depends on a concrete
-// telemetry library. Inject your own implementation via Config.Metrics to bridge
+// OTP failure/lockout, refresh-token reuse, rate-limit rejections and limiter errors,
+// and best-effort write failures — see the Counter* constants for the full set) and
+// never depends on a concrete telemetry library. Inject your own implementation via Config.Metrics to bridge
 // these counters to Prometheus, OpenTelemetry, statsd, etc. When no implementation
 // is injected the calls are no-ops (see NopMetrics), so there is zero overhead and
 // no dependency for callers that do not want metrics.

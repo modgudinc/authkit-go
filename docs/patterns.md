@@ -98,6 +98,59 @@ the email matches the invitation — it does **not** check the tenant's
 `allowed_domains`. If you require invited users to stay within the tenant's domain
 list, call `TenantService.ValidateDomainAccess` before creating the invitation.
 
+## Rate Limiting
+
+The library does not rate-limit itself. Inject a `Config.RateLimiter` and it is
+consulted before `Login`, `RefreshToken`, and `OTPService.Generate`; a rejection
+surfaces as `authkit.ErrRateLimited` (HTTP 429). `ValidateJWT` is a local check and is
+**not** rate-limited, so handle 429 in the login/refresh/OTP handlers, not the JWT
+middleware.
+
+```go
+type bucketLimiter struct{ /* redis or in-memory token bucket */ }
+
+// Return (false, nil) to reject; return an error ONLY for a backend fault — the
+// library fails open on errors (and counts authkit_rate_limiter_error_total).
+func (l *bucketLimiter) Allow(ctx context.Context, key string) (bool, error) {
+	return l.bucket.Allow(key), nil
+}
+
+identity, _ := authkit.New(authkit.Config{ /* ... */, RateLimiter: &bucketLimiter{} })
+
+// In a login handler:
+resp, err := identity.AuthService().Login(r.Context(), req)
+switch {
+case errors.Is(err, authkit.ErrRateLimited):
+	http.Error(w, "too many requests", http.StatusTooManyRequests) // 429
+case errors.Is(err, authkit.ErrInvalidCredentials):
+	http.Error(w, "invalid credentials", http.StatusUnauthorized)  // 401
+case err != nil:
+	http.Error(w, "internal error", http.StatusInternalServerError)
+}
+```
+
+The `key` passed to `Allow` is `login:<tenant>:<ip|email:...>`, `refresh:<ip>`, or
+`otp:<tenant>:<email>:<purpose>` — bucket on it directly.
+
+## Health Checks
+
+`New` does not contact the database unless `Config.VerifyConnectivity` is set (so a bad
+DSN otherwise surfaces on the first query). Set it for fail-fast startup, and call
+`AuthKit.Ping` from a readiness probe — it pings both the RW and RO handles:
+
+```go
+identity, err := authkit.New(authkit.Config{ /* ... */, VerifyConnectivity: true })
+if err != nil { log.Fatal(err) } // unreachable DB fails construction
+
+func readyz(w http.ResponseWriter, r *http.Request) {
+	if err := identity.Ping(r.Context()); err != nil {
+		http.Error(w, "not ready", http.StatusServiceUnavailable) // 503
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+```
+
 ## Cleanup Jobs
 
 Run cleanup jobs periodically:
@@ -107,9 +160,12 @@ _, _ = identity.APIKeyService().CleanupExpired(ctx)
 _, _ = identity.OTPService().CleanupExpired(ctx)
 _, _ = identity.InvitationService().CleanupExpired(ctx)
 _, _ = identity.TokenService().CleanupExpired(ctx)
+// The account status-change audit table has no expiry and grows unbounded — prune it
+// per your retention policy (olderThan must be positive):
+_, _ = identity.UserService().CleanupStatusChanges(ctx, 90*24*time.Hour)
 ```
 
-Choose the schedule based on your data volume. Hourly for OTPs and daily for longer-lived artifacts is a reasonable starting point.
+Choose the schedule based on your data volume. Hourly for OTPs and daily for longer-lived artifacts (including the status-change audit trim) is a reasonable starting point.
 
 ## Secret Rotation
 

@@ -46,6 +46,41 @@ if err != nil {
 _ = userID
 ```
 
+## Account Status And Audit Trail
+
+```go
+userService := identity.UserService()
+
+// Status controls (each tenant-scoped; Disable/Lock also revoke the user's sessions).
+if err := userService.Disable(ctx, userID, "acme.com"); err != nil {
+	return err
+}
+if err := userService.Enable(ctx, userID, "acme.com"); err != nil {
+	return err
+}
+
+// Read the enable/disable/lock/unlock audit trail (newest first, tenant-scoped).
+history, err := userService.StatusHistory(ctx, userID, "acme.com")
+if err != nil {
+	return err
+}
+_ = history // []*model.UserStatusChange
+
+// The audit table has no expiry — prune it on a schedule (olderThan must be positive).
+removed, err := userService.CleanupStatusChanges(ctx, 90*24*time.Hour)
+if err != nil {
+	return err
+}
+_ = removed
+```
+
+## Rate Limiting And Health Checks
+
+`RateLimiter`, `Metrics`, and health checks are wired at construction; see
+[patterns.md](patterns.md) for a `Config.RateLimiter` implementation (rejections
+surface as `authkit.ErrRateLimited` / 429) and a readiness probe using
+`identity.Ping(ctx)` (with `Config.VerifyConnectivity` for fail-fast startup).
+
 ## Login And JWT Validation
 
 ```go

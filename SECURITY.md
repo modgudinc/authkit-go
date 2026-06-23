@@ -64,6 +64,11 @@ Best practices:
   `log` package), escape untrusted field values — authkit logs some caller-supplied
   fields (such as tenant name and domain) verbatim; structured loggers escape field
   values, but plain line writers do not, so control characters could forge log lines.
+  Likewise, if you wire up `Config.Metrics`, the rate-limit counters
+  (`authkit_rate_limited_total`, `authkit_rate_limiter_error_total`) carry a `key`
+  label that can contain an email (e.g. `login:<tenant>:email:<email>`,
+  `otp:<tenant>:<email>:<purpose>`) — hash or drop that label if metric-label PII is in
+  scope for your backend.
 
 Recommended minimum entropy:
 
@@ -133,14 +138,21 @@ migration window, but create only new-key hashes.
 This library deliberately leaves some controls to the embedding application. They
 are out of scope for the library itself and must be provided by the caller:
 
-- **Login / token-refresh rate limiting.** `AuthService.Login` enforces only a
-  per-account failed-login lockout (`MaxFailedLoginAttempts`, then a timed lock).
-  That bounds guessing against a *single* account but does NOT stop password
-  spraying (one or two guesses each across many accounts) or distributed guessing,
-  and `AuthService.RefreshToken` has no throttle at all. Put IP-based and/or global
-  rate limiting in front of these endpoints. Refresh tokens themselves are 256-bit
-  random and not feasibly guessable, but the endpoint should still be throttled to
-  bound abuse and OTP/email cost amplification.
+- **Rate limiting (login, token refresh, OTP generation).** The only *built-in*
+  online-guessing defense is `AuthService.Login`'s per-account failed-login lockout
+  (`MaxFailedLoginAttempts`, then a timed lock); it bounds guessing against a *single*
+  account but does NOT stop password spraying (a few guesses each across many accounts)
+  or distributed guessing, and neither `AuthService.RefreshToken` nor
+  `OTPService.Generate` has a lockout of its own. Configure the pluggable
+  **`Config.RateLimiter`** (an `authkit.RateLimiter`): it is consulted before `Login`,
+  `RefreshToken`, and `OTPService.Generate`, keyed by tenant / client IP / email (see
+  the `ratelimit` package for the exact key formats), and a rejection surfaces as
+  `authkit.ErrRateLimited` (map to HTTP 429). Have your limiter fail *open* on its own
+  backend errors so an outage degrades to "no limiting", not an auth outage. If you do
+  not configure a limiter, these endpoints are unthrottled beyond the per-account
+  lockout, so you MUST add IP-/global rate limiting at the edge. (Refresh tokens are
+  256-bit random and not feasibly guessable, but the endpoint should still be throttled
+  to bound abuse and OTP/email cost amplification.)
 - **Transport security.** Terminate TLS and reject plaintext transport — access and
   refresh tokens are bearer credentials, and access tokens carry identity claims
   (including email) that are signed but not encrypted.

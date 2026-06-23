@@ -66,13 +66,38 @@ This is expected. Refresh tokens rotate. A successful refresh consumes the old t
 
 Check:
 
-- Email matches exactly.
-- Code matches.
-- Purpose matches.
-- Code has not expired.
-- Code has not already been consumed.
+- `OTPConfig.HMACSecret` is set. `OTPService.Generate` and `Validate` return
+  `ErrOTPSecretMissing` when it is empty (OTP codes are stored as a keyed HMAC).
+- The **same** `OTPConfig.HMACSecret` is used at generation and validation — codes are
+  keyed HMACs, so a changed secret makes every outstanding code unverifiable.
+- Email, code, and purpose all match exactly.
+- The code has not expired or already been consumed.
+- Not locked out: after `MaxOTPValidationAttempts` (5) failed guesses the code is
+  invalidated and `Validate` returns `ErrOTPLockedOut` — the caller must request a new code.
 
 OTP validation is atomic and single-use.
+
+## Requests Rejected With `ErrRateLimited` (429)
+
+If you set `Config.RateLimiter`, `Login`, `RefreshToken`, and `OTPService.Generate`
+consult it and return `authkit.ErrRateLimited` (map to HTTP 429) when it rejects.
+
+- Your `RateLimiter.Allow` should return `(false, nil)` to **reject** and an `error`
+  only for a backend fault. On an error the library **fails open** (the operation
+  proceeds) and increments `authkit_rate_limiter_error_total` — a sustained nonzero
+  rate there means your limiter backend is degraded.
+- The key passed to `Allow` is `login:<tenant>:<ip|email:...>`, `refresh:<ip>`, or
+  `otp:<tenant>:<email>:<purpose>` — bucket on it directly.
+- `ValidateJWT` is **not** rate-limited (it's a local signature/DB check), so a 429
+  only originates from the login/refresh/OTP-generation paths.
+
+## Database Errors Only Appear On The First Query
+
+By design, `New` does **not** contact the database — a bad DSN or down server surfaces
+on the first service call, not at construction. To fail fast at startup set
+`Config.VerifyConnectivity = true` (pings both handles with a short timeout). For
+readiness/liveness probes call `AuthKit.Ping(ctx)`, which pings both the read-write and
+read-only handles and returns an error naming whichever is unreachable.
 
 ## API Key Validation Fails
 
@@ -94,3 +119,24 @@ openssl rand -base64 32
 ```
 
 Store it in a secret manager or environment variable, not in source control.
+
+## Mapping Errors To HTTP Status Codes
+
+Branch on the exported sentinels with `errors.Is(err, authkit.Err…)` — never match on
+`err.Error()`. A suggested mapping (treat anything unrecognized, including
+`authkit.ErrInternal`, as **500** — never as a 401):
+
+| Sentinel(s) | HTTP |
+|---|---|
+| `ErrInvalidCredentials`, `ErrInvalidToken`, `ErrTokenRevoked`, `ErrInvalidRefreshToken`, `ErrRefreshTokenReuse`, `ErrInvalidAPIKey`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrIncorrectPassword` | 401 |
+| `ErrAccountDisabled`, `ErrAccountLocked` | 403 |
+| `ErrNotFound` | 404 |
+| `ErrUserExists` | 409 |
+| `ErrRateLimited`, `ErrOTPRateLimited` | 429 |
+| `ErrInvalidInput`, `ErrValueTooLong`, `ErrPasswordTooWeak` | 400 |
+| `ErrSecretEncryptionKeyMissing`, `ErrOTPSecretMissing`, `ErrInternal`, anything else | 500 |
+
+`ErrSecretEncryptionKeyMissing`/`ErrOTPSecretMissing` are construction-time
+misconfigurations (a required secret wasn't provided), so they're operator errors → 500.
+See the README "Error Handling" section for the canonical sentinel list and an example
+`switch`.

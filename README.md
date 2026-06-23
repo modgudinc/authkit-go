@@ -12,7 +12,9 @@ A Go library for multi-tenant identity and authentication management with suppor
 - **Invitation System**: Invitation-based user onboarding with secure access codes
 - **OTP Verification**: One-Time Password generation and email verification
 - **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 identifiers
-- **Flexible Logging**: Dependency injection for logger implementation
+- **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`RefreshToken`/OTP generation
+- **Flexible Logging & Metrics**: Dependency-injected, context-aware `Logger` and an optional `Metrics` counter sink
+- **Health Checks**: `AuthKit.Ping` and fail-fast `Config.VerifyConnectivity`
 - **Read-Write Separation**: Optimized database connection management
 
 ## Installation
@@ -564,6 +566,37 @@ if err != nil {
 - New password strength validation
 - Automatic logout from all devices (token version increment)
 - All refresh tokens revoked
+
+## User Service
+
+The `UserService` manages users, queries, and account-status operations. Every method
+is tenant-scoped — a cross-tenant `userID` matches no row and returns `ErrNotFound`.
+Convention: create/update take a keyed request struct (ids inside); simple
+get/delete/status/role operations take positional ids.
+
+```go
+userService := identity.UserService()
+
+// Create / update / query
+id, err := userService.Create(ctx, model.CreateUserRequest{ /* Email, TenantID, PasswordHash, ... */ })
+err = userService.Update(ctx, model.UpdateUserRequest{UserID: id, TenantID: tenantID, DisplayName: &name})
+user, err := userService.GetByID(ctx, id, tenantID)
+users, err := userService.List(ctx, tenantID, limit, offset) // limit/offset are clamped
+
+// Account status (security controls) — each is tenant-scoped and revokes sessions as needed
+err = userService.Disable(ctx, id, tenantID)         // also bumps token_version + revokes refresh tokens
+err = userService.Lock(ctx, id, tenantID, &until)
+err = userService.UpdateRoles(ctx, id, tenantID, []string{"Member"})
+
+// Account status-change audit trail (v0.13.0)
+history, err := userService.StatusHistory(ctx, id, tenantID) // []*model.UserStatusChange, newest first
+// Prune the audit table periodically (it has no expiry); olderThan must be positive:
+removed, err := userService.CleanupStatusChanges(ctx, 90*24*time.Hour)
+```
+
+`StatusHistory` returns the enable/disable/lock/unlock transitions (including automatic
+failed-login lockouts) recorded in `user_status_changes`. `CleanupStatusChanges` bounds
+that table's growth — run it on a schedule alongside the other `CleanupExpired` jobs.
 
 ## Tenant Service
 
@@ -1163,9 +1196,10 @@ identity, err := authkit.New(authkit.Config{
 })
 ```
 
-If a user requests an OTP too soon:
+If a user requests an OTP too soon, `Generate` returns an error that wraps
+`authkit.ErrOTPRateLimited` (branch on it with `errors.Is`, don't match the string):
 ```
-Error: "rate limit exceeded: please wait 1m30s before requesting a new OTP"
+please wait 1m30s before requesting a new OTP: authkit: OTP rate limit exceeded
 ```
 
 ### Complete OTP Flow Example (Signup)
@@ -1371,7 +1405,7 @@ code rather than via environment.
 - **`DatabaseConnection.IdentitySchema`**: PostgreSQL schema name (default: `authkit`)
 - **`SecretConfig.EncryptionKey`**: Base64-encoded 32-byte AES-256 key for `SecretService`
 - **`Logger`**: Logger implementation (default: nil, no logging). Some security signals (OTP lockout, refresh-token reuse, sub-threshold failed logins) are logger-only — inject one in production.
-- **`Metrics`**: Counter sink for login/lockout/OTP/refresh-reuse events (default: nil, no metrics). Survives independently of log level; recommended for alerting. See the `metrics` package.
+- **`Metrics`**: Counter sink (default: nil, no metrics); survives independently of log level, so it's the recommended basis for alerting. The library emits the `metrics.Counter*` constants — `authkit_login_success_total`, `authkit_login_failure_total`, `authkit_account_lockout_total`, `authkit_otp_failure_total`, `authkit_otp_lockout_total`, `authkit_refresh_token_reuse_total`, `authkit_rate_limited_total`, `authkit_rate_limiter_error_total`, `authkit_best_effort_write_failure_total` — see the `metrics` package for the authoritative list.
 - **`RateLimiter`**: Optional throttle (`ratelimit.RateLimiter`) consulted by `Login`/`RefreshToken`/`OTPService.Generate` (default: nil, no limiting). The recommended place to enforce IP/global rate limiting — see "Rate Limiting" below.
 - **`VerifyConnectivity`**: When `true`, `New` pings both DB handles and fails fast if either is unreachable (default: `false`, lazy connection). See "Health Checks".
 
@@ -1394,10 +1428,13 @@ The library currently requires PostgreSQL with the `authkit` schema containing t
 - **`authkit.invitations`**: Access codes for member/viewer signup
 - **`authkit.api_keys`**: Tenant-scoped API keys (HMAC-SHA256 hashed)
 - **`authkit.refresh_tokens`**: Refresh token session records (HMAC-SHA256 hashed)
-- **`authkit.verification_codes`**: OTP codes for email verification
+- **`authkit.verification_codes`**: OTP codes, stored as a keyed HMAC-SHA256 (`code_hash`), never plaintext
 - **`authkit.provider_keys`**: Encrypted provider secrets
+- **`authkit.user_status_changes`**: Account status-change audit trail (enable/disable/lock/unlock), written in the same transaction as the change; read via `UserService.StatusHistory`, pruned via `UserService.CleanupStatusChanges`
 
-Migration scripts are included in [`migrations/`](migrations/):
+Migration scripts are included in [`migrations/`](migrations/). Migration `000001` is
+the single consolidated schema (edited in place across `0.x`); a fresh `migrate up`
+gives the current schema:
 
 ```bash
 migrate -path migrations -database "$DATABASE_URL" up
@@ -1679,10 +1716,12 @@ make test-integration
 
 ## Examples
 
-Complete working examples are planned. Useful first examples would include:
+Per-service usage snippets live in [docs/examples.md](docs/examples.md) and
+integration patterns in [docs/patterns.md](docs/patterns.md). Standalone runnable
+programs are still planned — useful first ones would include:
 
 - `api_key_management.go` - API key CRUD operations
-- `custom_logger.go` - Integrating with zap/logrus
+- `custom_logger.go` - Integrating with zap/logrus (context-aware)
 - `multi_tenant.go` - Multi-tenant user management
 
 ## Contributing
@@ -1739,8 +1778,10 @@ This project is licensed under the Apache License, Version 2.0 - see the [LICENS
 - [x] OTP Service (one-time password generation & validation with rate limiting)
 - [x] Tenant Service (tenant management, settings, domain validation)
 - [x] Invitation Service (invitation management, validation, revocation)
-- [ ] Audit Logging (planned)
-- [ ] Rate Limiting (planned)
+- [x] Account status-change audit trail (`user_status_changes` + `UserService.StatusHistory`)
+- [x] Rate Limiting (pluggable `Config.RateLimiter` consulted by Login/RefreshToken/OTP generation)
+- [x] Metrics hooks (`Config.Metrics`) and health checks (`AuthKit.Ping` / `Config.VerifyConnectivity`)
+- [ ] General audit logging beyond status changes (planned)
 - [ ] Key Rotation Support (planned)
 
 ## Changelog
