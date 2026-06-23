@@ -48,7 +48,7 @@ func NewAPIKeyService(repo *repository.Repository, hmacSecret string, logger log
 //
 // IMPORTANT: The plaintext API key is returned only once and never stored
 func (s *APIKeyService) Create(ctx context.Context, req model.CreateAPIKeyRequest) (*model.CreateAPIKeyResponse, error) {
-	s.logger.Info("Creating API key",
+	s.logger.Info(ctx, "Creating API key",
 		"tenant_id", req.TenantID,
 		"name", req.Name,
 	)
@@ -96,7 +96,7 @@ func (s *APIKeyService) Create(ctx context.Context, req model.CreateAPIKeyReques
 		// or unique-constraint violation) that would otherwise leak table/constraint
 		// names and SQLSTATE to the caller. It is logged server-side and replaced
 		// with ErrInternal; a known sentinel still passes through for errors.Is.
-		return nil, sanitizeError(s.logger, "create api key", err)
+		return nil, sanitizeError(ctx, s.logger, "create api key", err)
 	}
 
 	// Format response
@@ -109,7 +109,7 @@ func (s *APIKeyService) Create(ctx context.Context, req model.CreateAPIKeyReques
 		CreatedAt: time.Now(),
 	}
 
-	s.logger.Info("API key created successfully",
+	s.logger.Info(ctx, "API key created successfully",
 		"key_id", keyID.String(),
 		"tenant_id", req.TenantID,
 		"name", req.Name,
@@ -133,7 +133,7 @@ func (s *APIKeyService) Validate(ctx context.Context, apiKey string) (*model.API
 	// Validate key format. The specific reason is logged, not returned, so the
 	// caller only sees a generic invalid-key error.
 	if err := s.validateKeyFormat(apiKey); err != nil {
-		s.logger.Warn("API key format validation failed", "error", err.Error())
+		s.logger.Warn(ctx, "API key format validation failed", "error", err.Error())
 		return nil, fmt.Errorf("invalid API key format: %w", model.ErrInvalidAPIKey)
 	}
 
@@ -144,13 +144,13 @@ func (s *APIKeyService) Validate(ctx context.Context, apiKey string) (*model.API
 	key, err := s.repo.GetAPIKeyByHash(ctx, keyHash)
 	if err != nil {
 		// Untrusted input: log at Warn to avoid error-level floods from invalid keys.
-		s.logger.Warn("API key not found", "error", err.Error())
+		s.logger.Warn(ctx, "API key not found", "error", err.Error())
 		return nil, model.ErrInvalidAPIKey
 	}
 
 	// Check if expired (GetAPIKeyByHash already filters expired keys, but double-check)
 	if key.ExpiresAt != nil && key.ExpiresAt.Before(time.Now()) {
-		s.logger.Warn("API key is expired",
+		s.logger.Warn(ctx, "API key is expired",
 			"key_id", key.KeyID,
 			"expires_at", key.ExpiresAt.Format(time.RFC3339),
 		)
@@ -181,7 +181,7 @@ func (s *APIKeyService) Validate(ctx context.Context, apiKey string) (*model.API
 // Returns a list of API keys (without key_hash or plaintext key) or error
 func (s *APIKeyService) List(ctx context.Context, tenantID string, includeExpired bool) ([]*model.APIKey, error) {
 	keys, err := s.repo.ListAPIKeys(ctx, tenantID, includeExpired)
-	return keys, sanitizeError(s.logger, "list api keys", err)
+	return keys, sanitizeError(ctx, s.logger, "list api keys", err)
 }
 
 // Get retrieves a specific API key by key_id within a tenant
@@ -195,7 +195,7 @@ func (s *APIKeyService) List(ctx context.Context, tenantID string, includeExpire
 // Returns the API key metadata (without plaintext key) or error
 func (s *APIKeyService) Get(ctx context.Context, keyID, tenantID string) (*model.APIKey, error) {
 	key, err := s.repo.GetAPIKey(ctx, keyID, tenantID)
-	return key, sanitizeError(s.logger, "get api key", err)
+	return key, sanitizeError(ctx, s.logger, "get api key", err)
 }
 
 // Revoke revokes (deletes) an API key within a tenant
@@ -208,14 +208,14 @@ func (s *APIKeyService) Get(ctx context.Context, keyID, tenantID string) (*model
 //
 // Returns error if key not found (or not owned by the tenant) or on database failure
 func (s *APIKeyService) Revoke(ctx context.Context, keyID, tenantID string) error {
-	s.logger.Info("Revoking API key", "key_id", keyID, "tenant_id", tenantID)
+	s.logger.Info(ctx, "Revoking API key", "key_id", keyID, "tenant_id", tenantID)
 
 	err := s.repo.DeleteAPIKey(ctx, keyID, tenantID)
 	if err != nil {
-		return sanitizeError(s.logger, "revoke api key", err)
+		return sanitizeError(ctx, s.logger, "revoke api key", err)
 	}
 
-	s.logger.Info("API key revoked successfully", "key_id", keyID, "tenant_id", tenantID)
+	s.logger.Info(ctx, "API key revoked successfully", "key_id", keyID, "tenant_id", tenantID)
 
 	return nil
 }
@@ -223,7 +223,7 @@ func (s *APIKeyService) Revoke(ctx context.Context, keyID, tenantID string) erro
 // Count returns the count of active (non-expired) API keys for a tenant
 func (s *APIKeyService) Count(ctx context.Context, tenantID string) (int, error) {
 	n, err := s.repo.CountAPIKeysByTenant(ctx, tenantID)
-	return n, sanitizeError(s.logger, "count api keys", err)
+	return n, sanitizeError(ctx, s.logger, "count api keys", err)
 }
 
 // CleanupExpired removes expired API keys from the database
@@ -231,14 +231,14 @@ func (s *APIKeyService) Count(ctx context.Context, tenantID string) (int, error)
 // Should be run periodically (e.g., via cron job) to maintain database hygiene
 // Returns the number of expired keys deleted
 func (s *APIKeyService) CleanupExpired(ctx context.Context) (int64, error) {
-	s.logger.Info("Cleaning up expired API keys")
+	s.logger.Info(ctx, "Cleaning up expired API keys")
 
 	count, err := s.repo.DeleteExpiredAPIKeys(ctx)
 	if err != nil {
-		return 0, sanitizeError(s.logger, "cleanup expired api keys", err)
+		return 0, sanitizeError(ctx, s.logger, "cleanup expired api keys", err)
 	}
 
-	s.logger.Info("Expired API keys cleaned up", "count", count)
+	s.logger.Info(ctx, "Expired API keys cleaned up", "count", count)
 
 	return count, nil
 }

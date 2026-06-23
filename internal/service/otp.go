@@ -5,7 +5,10 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -13,7 +16,9 @@ import (
 
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
+	"github.com/modgudinc/authkit-go/metrics"
 	"github.com/modgudinc/authkit-go/model"
+	"github.com/modgudinc/authkit-go/ratelimit"
 )
 
 // MaxOTPValidationAttempts is the number of failed validation attempts allowed
@@ -27,7 +32,10 @@ const MaxOTPValidationAttempts = 5
 type OTPService struct {
 	repo              otpRepository
 	rateLimitDuration time.Duration // Minimum time between OTP generation attempts
+	hmacSecret        string        // HMAC-SHA256 secret for hashing OTP codes at rest
 	logger            logger.Logger
+	metrics           metrics.Metrics
+	rateLimiter       ratelimit.RateLimiter
 }
 
 type otpRepository interface {
@@ -38,13 +46,32 @@ type otpRepository interface {
 	DeleteExpiredVerificationCodes(ctx context.Context) (int64, error)
 }
 
-// NewOTPService creates a new OTP service instance
-func NewOTPService(repo *repository.Repository, rateLimitDuration time.Duration, logger logger.Logger) *OTPService {
+// NewOTPService creates a new OTP service instance.
+//
+// hmacSecret keys the HMAC-SHA256 used to hash OTP codes at rest; when empty,
+// Generate and Validate return model.ErrOTPSecretMissing. metrics is optional and
+// may be nil.
+func NewOTPService(repo *repository.Repository, rateLimitDuration time.Duration, hmacSecret string, logger logger.Logger, metrics metrics.Metrics, rateLimiter ratelimit.RateLimiter) *OTPService {
 	return &OTPService{
 		repo:              repo,
 		rateLimitDuration: rateLimitDuration,
+		hmacSecret:        hmacSecret,
 		logger:            ensureLogger(logger),
+		metrics:           metrics,
+		rateLimiter:       rateLimiter,
 	}
+}
+
+// hashOTP returns the hex HMAC-SHA256 of an OTP code under the configured secret.
+// OTP codes are stored and compared only as this keyed hash, so a read-only
+// database/backup/replica disclosure does not expose usable codes — mirroring how
+// refresh tokens and API keys are stored. The keyspace of a 6-digit code is tiny,
+// so a *keyed* HMAC (server secret never in the DB) is what provides the
+// protection; an unkeyed hash would be trivially brute-forced.
+func (s *OTPService) hashOTP(code string) string {
+	h := hmac.New(sha256.New, []byte(s.hmacSecret))
+	h.Write([]byte(code))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Generate creates a new OTP or replaces an existing one (upsert behavior)
@@ -66,6 +93,20 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 	tenantID, purpose, expirationDuration := req.TenantID, req.Purpose, req.ExpirationDuration
 	email := normalizeEmail(req.Email)
 
+	// OTP codes are stored as a keyed HMAC, so the secret is mandatory. Fail with a
+	// matchable sentinel (analogous to SecretService) rather than silently hashing
+	// with an empty key.
+	if s.hmacSecret == "" {
+		return nil, model.ErrOTPSecretMissing
+	}
+
+	// Optional caller-owned rate limiting (Config.RateLimiter), on top of the built-in
+	// per-(tenant,email,purpose) generation cooldown — lets callers bound OTP-email
+	// fan-out cost. Keyed by (tenant, email, purpose).
+	if err := checkRateLimit(ctx, s.rateLimiter, s.metrics, s.logger, "otp:"+tenantID+":"+email+":"+purpose); err != nil {
+		return nil, err
+	}
+
 	// Reject a non-positive expiration up front. A zero (the zero value, so an
 	// omitted field) or negative duration would mint a code that is already expired
 	// the instant it is issued — it can never be validated, yet the caller would
@@ -82,12 +123,12 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 	// disable the rate limit on a transient DB error.
 	existingOTP, err := s.repo.GetVerificationCode(ctx, tenantID, email, purpose)
 	if err != nil && !errors.Is(err, model.ErrNotFound) {
-		s.logger.Error("failed to read OTP for rate limiting",
+		s.logger.Error(ctx, "failed to read OTP for rate limiting",
 			"email", maskEmail(email),
 			"purpose", purpose,
 			"error", err.Error(),
 		)
-		return nil, sanitizeError(s.logger, "check otp rate limit", err)
+		return nil, sanitizeError(ctx, s.logger, "check otp rate limit", err)
 	}
 
 	// Enforce rate limiting if OTP exists and was created recently
@@ -95,7 +136,7 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 		timeSinceCreation := time.Since(existingOTP.CreatedAt)
 		if timeSinceCreation < s.rateLimitDuration {
 			remainingTime := s.rateLimitDuration - timeSinceCreation
-			s.logger.Warn("OTP generation rate limit exceeded",
+			s.logger.Warn(ctx, "OTP generation rate limit exceeded",
 				"email", maskEmail(email),
 				"purpose", purpose,
 				"time_since_creation", timeSinceCreation,
@@ -109,22 +150,24 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 	// Generate 6-digit OTP code using crypto/rand for security
 	code, err := generateSecureOTP(6)
 	if err != nil {
-		s.logger.Error("failed to generate secure OTP code",
+		s.logger.Error(ctx, "failed to generate secure OTP code",
 			"email", maskEmail(email),
 			"purpose", purpose,
 			"error", err.Error(),
 		)
-		return nil, sanitizeError(s.logger, "generate otp", err)
+		return nil, sanitizeError(ctx, s.logger, "generate otp", err)
 	}
 
 	// Calculate expiration timestamp
 	expiresAt := time.Now().Add(expirationDuration)
 
-	// Upsert OTP to database (create or replace)
+	// Upsert OTP to database (create or replace). Only the keyed HMAC of the code is
+	// persisted; the plaintext is returned to the caller (below) for delivery and is
+	// never stored.
 	upsertReq := repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
-		Code:      code,
+		CodeHash:  s.hashOTP(code),
 		Purpose:   purpose,
 		ExpiresAt: expiresAt,
 	}
@@ -135,22 +178,22 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 	// fast-path check above), so report rate-limited rather than overwriting it.
 	stored, err := s.repo.UpsertVerificationCode(ctx, upsertReq, s.rateLimitDuration)
 	if err != nil {
-		s.logger.Error("failed to store OTP in database",
+		s.logger.Error(ctx, "failed to store OTP in database",
 			"email", maskEmail(email),
 			"purpose", purpose,
 			"error", err.Error(),
 		)
-		return nil, sanitizeError(s.logger, "store otp", err)
+		return nil, sanitizeError(ctx, s.logger, "store otp", err)
 	}
 	if !stored {
-		s.logger.Warn("OTP generation rate limit exceeded (atomic guard)",
+		s.logger.Warn(ctx, "OTP generation rate limit exceeded (atomic guard)",
 			"email", maskEmail(email),
 			"purpose", purpose,
 		)
 		return nil, fmt.Errorf("please wait before requesting a new OTP: %w", model.ErrOTPRateLimited)
 	}
 
-	s.logger.Info("OTP generated successfully",
+	s.logger.Info(ctx, "OTP generated successfully",
 		"email", maskEmail(email),
 		"purpose", purpose,
 		"expires_at", expiresAt,
@@ -188,38 +231,47 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest) error {
 	tenantID, code, purpose := req.TenantID, req.Code, req.Purpose
 	email := normalizeEmail(req.Email)
-	result, err := s.repo.ConsumeVerificationCode(ctx, tenantID, email, code, purpose, MaxOTPValidationAttempts)
+
+	if s.hmacSecret == "" {
+		return model.ErrOTPSecretMissing
+	}
+
+	// Hash the supplied code under the same secret used at generation; the stored
+	// value is the HMAC, so the repository compares hash-to-hash (constant-time).
+	result, err := s.repo.ConsumeVerificationCode(ctx, tenantID, email, s.hashOTP(code), purpose, MaxOTPValidationAttempts)
 	if err != nil {
-		s.logger.Error("OTP validation failed",
+		s.logger.Error(ctx, "OTP validation failed",
 			"tenant_id", tenantID,
 			"email", maskEmail(email),
 			"purpose", purpose,
 			"error", err.Error(),
 		)
-		return sanitizeError(s.logger, "validate otp", err)
+		return sanitizeError(ctx, s.logger, "validate otp", err)
 	}
 
 	switch result {
 	case repository.OTPConsumeValid:
-		s.logger.Info("OTP validated successfully",
+		s.logger.Info(ctx, "OTP validated successfully",
 			"tenant_id", tenantID,
 			"email", maskEmail(email),
 			"purpose", purpose,
 		)
 		return nil
 	case repository.OTPConsumeLockedOut:
-		s.logger.Warn("OTP locked out after too many failed attempts",
+		s.logger.Warn(ctx, "OTP locked out after too many failed attempts",
 			"tenant_id", tenantID,
 			"email", maskEmail(email),
 			"purpose", purpose,
 		)
+		incMetric(s.metrics, metrics.CounterOTPLockout)
 		return fmt.Errorf("too many invalid attempts; request a new OTP: %w", model.ErrOTPLockedOut)
 	default: // repository.OTPConsumeInvalid
-		s.logger.Warn("OTP validation failed",
+		s.logger.Warn(ctx, "OTP validation failed",
 			"tenant_id", tenantID,
 			"email", maskEmail(email),
 			"purpose", purpose,
 		)
+		incMetric(s.metrics, metrics.CounterOTPFailure)
 		return fmt.Errorf("invalid or expired OTP: %w", model.ErrInvalidOTP)
 	}
 }
@@ -232,15 +284,15 @@ func (s *OTPService) Delete(ctx context.Context, tenantID, email, purpose string
 	email = normalizeEmail(email)
 	err := s.repo.DeleteVerificationCode(ctx, tenantID, email, purpose)
 	if err != nil {
-		s.logger.Error("failed to delete OTP",
+		s.logger.Error(ctx, "failed to delete OTP",
 			"email", maskEmail(email),
 			"purpose", purpose,
 			"error", err.Error(),
 		)
-		return sanitizeError(s.logger, "delete otp", err)
+		return sanitizeError(ctx, s.logger, "delete otp", err)
 	}
 
-	s.logger.Info("OTP deleted successfully",
+	s.logger.Info(ctx, "OTP deleted successfully",
 		"email", maskEmail(email),
 		"purpose", purpose,
 	)
@@ -257,13 +309,13 @@ func (s *OTPService) Delete(ctx context.Context, tenantID, email, purpose string
 func (s *OTPService) CleanupExpired(ctx context.Context) (int64, error) {
 	deletedCount, err := s.repo.DeleteExpiredVerificationCodes(ctx)
 	if err != nil {
-		s.logger.Error("failed to cleanup expired OTPs",
+		s.logger.Error(ctx, "failed to cleanup expired OTPs",
 			"error", err.Error(),
 		)
-		return 0, sanitizeError(s.logger, "cleanup expired otps", err)
+		return 0, sanitizeError(ctx, s.logger, "cleanup expired otps", err)
 	}
 
-	s.logger.Info("expired OTPs cleaned up successfully",
+	s.logger.Info(ctx, "expired OTPs cleaned up successfully",
 		"deleted_count", deletedCount,
 	)
 

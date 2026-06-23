@@ -3,6 +3,8 @@
 
 package logger
 
+import "context"
+
 // NopLogger is a Logger implementation that discards all log records. Use it as
 // a safe non-nil default when you want to inject a logger but not emit anything:
 //
@@ -13,13 +15,13 @@ package logger
 type NopLogger struct{}
 
 // Debug implements Logger and discards the record.
-func (NopLogger) Debug(msg string, fields ...interface{}) {}
+func (NopLogger) Debug(ctx context.Context, msg string, fields ...interface{}) {}
 
 // Info implements Logger and discards the record.
-func (NopLogger) Info(msg string, fields ...interface{}) {}
+func (NopLogger) Info(ctx context.Context, msg string, fields ...interface{}) {}
 
 // Error implements Logger and discards the record.
-func (NopLogger) Error(msg string, fields ...interface{}) {}
+func (NopLogger) Error(ctx context.Context, msg string, fields ...interface{}) {}
 
 // Warn implements Logger and discards the record.
-func (NopLogger) Warn(msg string, fields ...interface{}) {}
+func (NopLogger) Warn(ctx context.Context, msg string, fields ...interface{}) {}

@@ -28,7 +28,7 @@ const defaultDatabaseURL = "postgres://authkit_test:authkit_test@localhost:55432
 func TestMigrationsAlignWithRepository(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
 	applyMigration(t, db, "000001_identity_schema.up.sql")
@@ -215,7 +215,7 @@ func applyMigration(t *testing.T, db *sql.DB, name string) {
 	t.Helper()
 
 	path := filepath.Join("..", "migrations", name)
-	sqlBytes, err := os.ReadFile(path)
+	sqlBytes, err := os.ReadFile(path) //nolint:gosec // G304: test reads migration SQL from the repo's fixed migrations dir
 	if err != nil {
 		t.Fatalf("read migration %s: %v", name, err)
 	}
@@ -230,7 +230,7 @@ func applyCustomSchemaMigration(t *testing.T, db *sql.DB, schema string) {
 	_, _ = db.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`)
 
 	path := filepath.Join("..", "migrations", "000001_identity_schema.up.sql")
-	sqlBytes, err := os.ReadFile(path)
+	sqlBytes, err := os.ReadFile(path) //nolint:gosec // G304: test reads migration SQL from the repo's fixed migrations dir
 	if err != nil {
 		t.Fatalf("read custom schema migration: %v", err)
 	}
@@ -460,7 +460,7 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 	if _, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
 		TenantID:  tenantID,
 		Email:     email,
-		Code:      "123456",
+		CodeHash:  "123456",
 		Purpose:   "signup",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}, 0); err != nil {

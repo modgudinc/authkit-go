@@ -4,6 +4,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -19,7 +20,7 @@ func TestSanitizeErrorMapsValueTooLong(t *testing.T) {
 	pgErr := &pgconn.PgError{Code: pgStringDataRightTruncation, Message: "value too long for type character varying(255)"}
 	wrapped := fmt.Errorf("create tenant: %w", pgErr) // mirror the repo's error wrapping
 
-	got := sanitizeError(nil, "create tenant", wrapped)
+	got := sanitizeError(context.Background(), nil, "create tenant", wrapped)
 	if !errors.Is(got, model.ErrValueTooLong) {
 		t.Fatalf("expected ErrValueTooLong, got %v", got)
 	}
@@ -30,11 +31,11 @@ func TestSanitizeErrorMapsValueTooLong(t *testing.T) {
 
 func TestSanitizeErrorPassesThroughSentinelAndHidesOtherFaults(t *testing.T) {
 	// A known sentinel passes through unchanged.
-	if got := sanitizeError(nil, "op", fmt.Errorf("wrap: %w", model.ErrNotFound)); !errors.Is(got, model.ErrNotFound) {
+	if got := sanitizeError(context.Background(), nil, "op", fmt.Errorf("wrap: %w", model.ErrNotFound)); !errors.Is(got, model.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound to pass through, got %v", got)
 	}
 	// An unknown fault is replaced with the generic ErrInternal.
-	if got := sanitizeError(nil, "op", errors.New("driver exploded")); !errors.Is(got, model.ErrInternal) {
+	if got := sanitizeError(context.Background(), nil, "op", errors.New("driver exploded")); !errors.Is(got, model.ErrInternal) {
 		t.Fatalf("expected ErrInternal for an unknown fault, got %v", got)
 	}
 }

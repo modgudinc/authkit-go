@@ -86,6 +86,13 @@ func TestNewValidatesRequiredConfig(t *testing.T) {
 			wantErr: "at least 32 bytes",
 		},
 		{
+			name: "otp hmac secret too short",
+			mutate: func(config *Config) {
+				config.OTPConfig.HMACSecret = "short"
+			},
+			wantErr: "OTP HMAC secret must be at least",
+		},
+		{
 			name: "invalid schema",
 			mutate: func(config *Config) {
 				config.DBConnection.IdentitySchema = "authkit;drop"
