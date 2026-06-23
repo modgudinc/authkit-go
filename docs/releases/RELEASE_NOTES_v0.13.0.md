@@ -103,6 +103,9 @@ schema):
   wiring (rejection, key format, fail-open).
 - Raised the integration coverage floor from 30% to 50% (actual ~55%) and added a 20%
   floor to the unit job.
+- The integration job no longer runs under `-race` (it was flaky on CI — a best-effort
+  detached `last_used` write can outlive a test's database teardown); the concurrency
+  primitive is covered deterministically under `-race` by the unit job instead.
 - The `gosec` SARIF is now uploaded to GitHub code scanning (Security tab), not just as
   a build artifact.
 
@@ -130,8 +133,8 @@ schema):
 
 `gofmt`, `go vet` (default + `integration`), and `golangci-lint` (default +
 `integration`) are clean; standalone `gosec` passes; the unit suite (with `-race`) and
-the PostgreSQL integration suite (with `-race`, exercising the re-applied migration and
-new indexes) pass.
+the PostgreSQL integration suite (exercising the re-applied migration and new indexes)
+pass.
 
 ---
 
