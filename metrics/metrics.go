@@ -46,4 +46,15 @@ const (
 	// omits "Token" so it does not trip gosec's hardcoded-credential heuristic (G101);
 	// the metric string is unchanged.
 	CounterRefreshReuse = "authkit_refresh_token_reuse_total"
+	// CounterRateLimited counts operations rejected by a configured RateLimiter.
+	// Emitted with a "key" label identifying the operation/bucket.
+	CounterRateLimited = "authkit_rate_limited_total"
+	// CounterRateLimiterError counts RateLimiter.Allow errors (the library fails open
+	// and proceeds); a sustained nonzero rate means the limiter backend is degraded.
+	CounterRateLimiterError = "authkit_rate_limiter_error_total"
+	// CounterBestEffortWriteFailure counts failures of non-critical, best-effort
+	// primary writes that the auth flows swallow to stay available (e.g. last-login
+	// update, failed-count reset, auto-unlock). Emitted with an "op" label. A
+	// sustained nonzero rate signals a degraded primary even while logins still work.
+	CounterBestEffortWriteFailure = "authkit_best_effort_write_failure_total"
 )

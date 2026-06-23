@@ -20,6 +20,7 @@
 package authkit
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -30,6 +31,7 @@ import (
 	"github.com/modgudinc/authkit-go/internal/service"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/metrics"
+	"github.com/modgudinc/authkit-go/ratelimit"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -44,6 +46,16 @@ const (
 	// per RFC 7518). Shorter secrets are brute-forceable offline against any
 	// captured token, so they are rejected at construction time.
 	MinSecretLength = 32
+
+	// HighBcryptCostThreshold is the bcrypt cost above which New logs a warning.
+	// Costs above ~15 take well over 1s per hash on typical hardware; because every
+	// login runs at least one bcrypt comparison (a real one or DummyVerify), an
+	// excessive cost is a self-inflicted denial-of-service rather than added safety.
+	HighBcryptCostThreshold = 15
+
+	// connectivityCheckTimeout bounds the per-handle ping New issues when
+	// Config.VerifyConnectivity is set, so a dead database cannot hang construction.
+	connectivityCheckTimeout = 5 * time.Second
 )
 
 // AuthKit is the library entrypoint created by New. It is safe for concurrent
@@ -70,6 +82,7 @@ type AuthKit struct {
 	identitySchema       string
 	logger               logger.Logger
 	metrics              metrics.Metrics
+	rateLimiter          ratelimit.RateLimiter
 }
 
 // New validates the Config and returns a configured AuthKit. It fails fast if a
@@ -184,7 +197,18 @@ func New(config Config) (*AuthKit, error) {
 		libMetrics = metrics.NopMetrics{}
 	}
 
-	return &AuthKit{
+	// A very high bcrypt cost is a self-inflicted DoS: PasswordService.DummyVerify
+	// runs at this cost on every login (including the unknown-user timing-equalization
+	// path), so each attempt burns the corresponding CPU. Warn rather than reject so a
+	// deliberately aggressive value still works, but an accidental one surfaces.
+	if passwordBcryptCost > HighBcryptCostThreshold {
+		libLogger.Warn(context.Background(), "password bcrypt cost is high; every login (including the unknown-user dummy verify) will be correspondingly slow",
+			"bcrypt_cost", passwordBcryptCost,
+			"suggested_max", HighBcryptCostThreshold,
+		)
+	}
+
+	kit := &AuthKit{
 		rwConnection: config.DBConnection.IdentityRWDB,
 		roConnection: config.DBConnection.IdentityRODB,
 
@@ -204,7 +228,35 @@ func New(config Config) (*AuthKit, error) {
 		identitySchema:       identitySchema,
 		logger:               libLogger,
 		metrics:              libMetrics,
-	}, nil
+		rateLimiter:          config.RateLimiter,
+	}
+
+	// Optional fail-fast connectivity check (see Config.VerifyConnectivity). Default
+	// behavior is unchanged: the first connection error surfaces on the first query.
+	if config.VerifyConnectivity {
+		ctx, cancel := context.WithTimeout(context.Background(), connectivityCheckTimeout)
+		defer cancel()
+		if err := kit.Ping(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	return kit, nil
+}
+
+// Ping verifies connectivity to both the read-write and read-only identity
+// databases by issuing a PingContext to each. It is intended for readiness/health
+// probes. New performs this check at construction only when
+// Config.VerifyConnectivity is set; otherwise connection errors surface lazily on
+// the first query.
+func (k *AuthKit) Ping(ctx context.Context) error {
+	if err := k.rwConnection.PingContext(ctx); err != nil {
+		return fmt.Errorf("identity read-write database unreachable: %w", err)
+	}
+	if err := k.roConnection.PingContext(ctx); err != nil {
+		return fmt.Errorf("identity read-only database unreachable: %w", err)
+	}
+	return nil
 }
 
 // The accessors below each return a service interface. They open no new resources
@@ -243,7 +295,7 @@ func (k *AuthKit) TokenService() TokenService {
 // for complete authentication flows (login, logout, token refresh, JWT validation).
 func (k *AuthKit) AuthService() AuthService {
 	repo := k.repository()
-	return service.NewAuthService(&repo, k.newPasswordService(), k.newTokenService(), k.newJWTService(), k.logger, k.metrics)
+	return service.NewAuthService(&repo, k.newPasswordService(), k.newTokenService(), k.newJWTService(), k.logger, k.metrics, k.rateLimiter)
 }
 
 // newPasswordService / newJWTService / newTokenService return the concrete
@@ -273,7 +325,7 @@ func (k *AuthKit) newTokenService() *service.TokenService {
 // for OTP generation, validation, and lifecycle management with rate limiting.
 func (k *AuthKit) OTPService() OTPService {
 	repo := k.repository()
-	return service.NewOTPService(&repo, k.otpRateLimitDuration, k.otpHMACSecret, k.logger, k.metrics)
+	return service.NewOTPService(&repo, k.otpRateLimitDuration, k.otpHMACSecret, k.logger, k.metrics, k.rateLimiter)
 }
 
 // TenantService returns the tenant service

@@ -8,6 +8,99 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-22
+
+Operational hardening plus test/CI improvements. Contains one **breaking change** —
+the `logger.Logger` interface is now context-first — so per the pre-1.0 policy this is
+a minor bump, not a patch.
+
+### Changed (breaking)
+
+- **`logger.Logger` is now context-first.** Each method takes the call's
+  `context.Context` as its first argument
+  (`Info(ctx, msg, fields...)`, etc.), so an implementation can attach
+  request/trace/correlation IDs from the context to every line (as `log/slog`'s
+  `*Context` methods do). Any existing `Logger` implementation must add the `ctx`
+  parameter to its four methods; `NopLogger` and the README example are updated. The
+  library passes the operation's context where it has one and `context.Background()`
+  from the pure-CPU services (password, JWT) that do no I/O.
+
+### Added
+
+- **Pluggable rate-limiter hook.** New `ratelimit.RateLimiter` interface (aliased as
+  `authkit.RateLimiter`) and `Config.RateLimiter`, consulted by `Login`,
+  `RefreshToken`, and `OTPService.Generate` with a documented key convention. A
+  rejection returns the new `ErrRateLimited` sentinel (HTTP 429); a limiter error
+  fails open (logged + metered). This is the recommended place for the IP/global rate
+  limiting the library does not do itself.
+- **Health-check support.** `AuthKit.Ping(ctx)` pings both DB handles for
+  readiness/liveness probes, and `Config.VerifyConnectivity` makes `New` fail fast on
+  an unreachable database instead of deferring to the first query.
+- New metrics counters: `authkit_rate_limited_total`, `authkit_rate_limiter_error_total`,
+  and `authkit_best_effort_write_failure_total` (the last surfaces swallowed
+  last-login/reset/auto-unlock write failures so a degraded primary is observable).
+- `ErrInvalidInput` sentinel (re-exported as `authkit.ErrInvalidInput`) for malformed
+  caller input that should map to a 400 — currently returned by
+  `TenantService.UpdateSettings` when the settings map cannot be serialized to JSON.
+- README **Environment variables** reference documenting the variables the examples
+  expect (DB DSNs and the JWT/refresh/API-key/OTP secrets + encryption key), how each
+  maps to `Config`, and which are required — clarifying that the library reads no
+  environment variables itself.
+
+### Changed
+
+- **Schema index cleanup (re-apply migration `000001`).** Dropped ten verified-unused
+  indexes (boolean/`locked_until` user columns, redundant `tenant_id`/`provider`
+  indexes covered by primary keys, and refresh-token session-metadata indexes),
+  replaced the separate `(tenant_id)`+`(created_at)` pairs on users/api_keys/
+  invitations with composite `(tenant_id, created_at DESC)` indexes for the list
+  endpoints, and added a functional `UNIQUE (tenant_id, lower(email))` on users as
+  case-insensitive defense-in-depth.
+- `New` logs a warning when `PasswordConfig.BcryptCost` exceeds
+  `HighBcryptCostThreshold` (15): a very high cost is a self-inflicted DoS, since every
+  login (including the unknown-user dummy verify) runs at that cost. It warns rather
+  than rejects, so a deliberately aggressive value still works.
+- Demoted the per-request success log lines (`ValidateJWT` success, the per-attempt
+  `Login` line) from Info to Debug to cut hot-path log volume.
+- The compensating revocations in `RefreshTokenPair` (family-revoke for an inactive
+  account, rotated-token cleanup on an access-token error) now run on a short context
+  detached from the request's cancellation, so a client disconnect cannot leave them
+  half-done.
+
+### Fixed
+
+- `SecretService.Get` no longer surfaces the raw decrypt/crypto error across the public
+  API boundary; a decrypt/authentication failure now maps to `ErrInternal` (a
+  server-side integrity fault, not caller input).
+- Corrected the `clockSkewLeeway` doc comment: the leeway applies to `exp` only — `iat`
+  is stamped but not validated, and `nbf` is never issued.
+
+### Tests / CI
+
+- Added unit tests for the bounded `last_used` fan-out (`runBoundedLastUsedUpdate`,
+  driven concurrently so the unit job's `-race` covers the shared semaphore and the
+  detached-goroutine lifecycle), plus `isUserLocked` and the refresh-token `hashToken`.
+- Raised the integration coverage floor from 30% to 50% (actual ~55%) and added a
+  modest 20% floor to the unit job. Both the unit and integration jobs run under
+  `-race`, and each job prints a toolchain-info (`go version` / `go env`) line for
+  easier CI diagnosis.
+- The `gosec` SARIF is now uploaded to GitHub code scanning (Security tab), not just as
+  a build artifact (`security-events: write` + `github/codeql-action/upload-sarif`).
+- Simplified the branch-naming CI convention to
+  `(feature|fix|bugfix|hotfix|docs|chore|refactor)/<lowercase-dashes>` (dropped the
+  `release/*`, `test/`, and `renovate/*` patterns; `dependabot/*` stays exempt);
+  releases now land on `main` via a conventionally-named PR branch rather than a
+  `release/*` branch.
+
+### Documentation
+
+- Documented that the library does not (and in idiomatic Go cannot reliably) zeroize
+  secret material in memory, with OS/deployment mitigations (SECURITY.md).
+- Added README **Rate Limiting** and **Health Checks** sections (including
+  behavior-under-database-outage), and documented on the `InvitationService` interface
+  that the by-code operations are bearer-capability-based and not additionally tenant-
+  checked (resolve via `Get` and check `TenantID` first if your model requires it).
+
 ## [0.12.0] - 2026-06-21
 
 Production-readiness hardening from a multi-dimension audit: closes the medium-

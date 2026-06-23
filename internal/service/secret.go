@@ -68,7 +68,7 @@ func NewSecretService(repo *repository.Repository, encryptionKey []byte, logger 
 //
 // IMPORTANT: The plaintext value is encrypted before storage and never stored in plaintext
 func (s *SecretService) Save(ctx context.Context, req model.SaveSecretRequest) (*model.SaveSecretResponse, error) {
-	s.logger.Info("Saving secret",
+	s.logger.Info(ctx, "Saving secret",
 		"tenant_id", req.TenantID,
 		"key", req.Key,
 	)
@@ -90,10 +90,10 @@ func (s *SecretService) Save(ctx context.Context, req model.SaveSecretRequest) (
 	// Save to repository
 	secret, err := s.repo.SaveSecret(ctx, req.TenantID, req.Key, encryptedValue, maskedValue, req.CreatedBy)
 	if err != nil {
-		return nil, sanitizeError(s.logger, "save secret", err)
+		return nil, sanitizeError(ctx, s.logger, "save secret", err)
 	}
 
-	s.logger.Info("Secret saved successfully",
+	s.logger.Info(ctx, "Secret saved successfully",
 		"tenant_id", req.TenantID,
 		"key", req.Key,
 	)
@@ -126,18 +126,21 @@ func (s *SecretService) Get(ctx context.Context, tenantID, key string) (string, 
 	// Get encrypted value from repository
 	encryptedValue, err := s.repo.GetEncryptedSecret(ctx, tenantID, key)
 	if err != nil {
-		return "", sanitizeError(s.logger, "get secret", err)
+		return "", sanitizeError(ctx, s.logger, "get secret", err)
 	}
 
 	// Decrypt the value, authenticating it against its (tenant, key) context.
 	plainValue, err := s.decrypt(encryptedValue, tenantID, key)
 	if err != nil {
-		s.logger.Error("Failed to decrypt secret",
+		s.logger.Error(ctx, "Failed to decrypt secret",
 			"tenant_id", tenantID,
 			"key", key,
 			"error", err.Error(),
 		)
-		return "", fmt.Errorf("failed to decrypt secret: %w", err)
+		// A decrypt/authentication failure is a server-side integrity fault (corrupt
+		// ciphertext, wrong key, or tampering), not caller input — map it to the
+		// matchable ErrInternal sentinel rather than leaking the raw crypto error.
+		return "", fmt.Errorf("decrypt secret: %w", model.ErrInternal)
 	}
 
 	return plainValue, nil
@@ -149,24 +152,24 @@ func (s *SecretService) Get(ctx context.Context, tenantID, key string) (string, 
 // Ordered by key ASC
 func (s *SecretService) List(ctx context.Context, tenantID string) ([]*model.Secret, error) {
 	secrets, err := s.repo.ListSecrets(ctx, tenantID)
-	return secrets, sanitizeError(s.logger, "list secrets", err)
+	return secrets, sanitizeError(ctx, s.logger, "list secrets", err)
 }
 
 // Delete removes a secret
 //
 // Returns error if secret not found
 func (s *SecretService) Delete(ctx context.Context, tenantID, key string) error {
-	s.logger.Info("Deleting secret",
+	s.logger.Info(ctx, "Deleting secret",
 		"tenant_id", tenantID,
 		"key", key,
 	)
 
 	err := s.repo.DeleteSecret(ctx, tenantID, key)
 	if err != nil {
-		return sanitizeError(s.logger, "delete secret", err)
+		return sanitizeError(ctx, s.logger, "delete secret", err)
 	}
 
-	s.logger.Info("Secret deleted successfully",
+	s.logger.Info(ctx, "Secret deleted successfully",
 		"tenant_id", tenantID,
 		"key", key,
 	)
@@ -179,13 +182,13 @@ func (s *SecretService) Delete(ctx context.Context, tenantID, key string) error 
 // Called after successful secret verification (e.g., API key test)
 // Also sets is_valid = true
 func (s *SecretService) MarkVerified(ctx context.Context, tenantID, key string) error {
-	return sanitizeError(s.logger, "mark secret verified", s.repo.UpdateSecretVerified(ctx, tenantID, key))
+	return sanitizeError(ctx, s.logger, "mark secret verified", s.repo.UpdateSecretVerified(ctx, tenantID, key))
 }
 
 // Count returns the count of secrets for a tenant
 func (s *SecretService) Count(ctx context.Context, tenantID string) (int, error) {
 	n, err := s.repo.CountSecretsByTenant(ctx, tenantID)
-	return n, sanitizeError(s.logger, "count secrets", err)
+	return n, sanitizeError(ctx, s.logger, "count secrets", err)
 }
 
 // ============================================================================

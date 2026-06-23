@@ -23,6 +23,19 @@ import (
 // timestamp updates so a detached goroutine can never hang on a stuck connection.
 const lastUsedUpdateTimeout = 5 * time.Second
 
+// cleanupTimeout bounds the compensating security cleanups in RefreshTokenPair
+// (family revoke on an inactive account, rotated-token revoke after an error). They
+// run on a context detached from the request's cancellation so a client disconnect
+// cannot leave a cut-off account's tokens or an orphaned rotated token in place.
+const cleanupTimeout = 5 * time.Second
+
+// cleanupContext returns a context detached from parent's cancellation (its values
+// preserved) and bounded by cleanupTimeout, for compensating writes that must still
+// run after the request is cancelled.
+func cleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), cleanupTimeout)
+}
+
 // maxConcurrentLastUsedUpdates caps how many best-effort "last used" updates may
 // be in flight at once. Without a bound, a burst of token/API-key validations
 // would fan out one detached goroutine each, all contending on the rw pool.
@@ -43,7 +56,7 @@ func runBoundedLastUsedUpdate(parent context.Context, log logger.Logger, what st
 	case lastUsedUpdateSlots <- struct{}{}:
 	default:
 		if log != nil {
-			log.Warn("skipping last_used_at update: too many in flight", "what", what)
+			log.Warn(parent, "skipping last_used_at update: too many in flight", "what", what)
 		}
 		return
 	}
@@ -53,13 +66,13 @@ func runBoundedLastUsedUpdate(parent context.Context, log logger.Logger, what st
 		defer func() { <-lastUsedUpdateSlots }()
 		defer func() {
 			if rec := recover(); rec != nil && log != nil {
-				log.Error("panic updating last_used_at", "what", what, "panic", rec)
+				log.Error(bgCtx, "panic updating last_used_at", "what", what, "panic", rec)
 			}
 		}()
 		uctx, cancel := context.WithTimeout(bgCtx, lastUsedUpdateTimeout)
 		defer cancel()
 		if err := fn(uctx); err != nil && log != nil {
-			log.Warn("failed to update last_used_at", "what", what, "error", err.Error())
+			log.Warn(uctx, "failed to update last_used_at", "what", what, "error", err.Error())
 		}
 	}()
 }
@@ -131,7 +144,7 @@ func (s *TokenService) GenerateTokenPair(
 	user *model.User,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
-	s.logger.Info("Generating token pair",
+	s.logger.Info(ctx, "Generating token pair",
 		"user_id", user.ID.String(),
 		"email", maskEmail(user.Email),
 		"tenant_id", user.TenantID,
@@ -140,15 +153,15 @@ func (s *TokenService) GenerateTokenPair(
 	// 1. Generate JWT access token
 	accessToken, err := s.jwtService.GenerateAccessToken(user)
 	if err != nil {
-		s.logger.Error("Failed to generate access token", "error", err.Error())
-		return nil, sanitizeError(s.logger, "generate access token", err)
+		s.logger.Error(ctx, "Failed to generate access token", "error", err.Error())
+		return nil, sanitizeError(ctx, s.logger, "generate access token", err)
 	}
 
 	// 2. Generate random refresh token
 	refreshToken, err := s.jwtService.GenerateRefreshToken()
 	if err != nil {
-		s.logger.Error("Failed to generate refresh token", "error", err.Error())
-		return nil, sanitizeError(s.logger, "generate refresh token", err)
+		s.logger.Error(ctx, "Failed to generate refresh token", "error", err.Error())
+		return nil, sanitizeError(ctx, s.logger, "generate refresh token", err)
 	}
 
 	// 3. Hash refresh token with HMAC-SHA256
@@ -179,11 +192,11 @@ func (s *TokenService) GenerateTokenPair(
 		ExpiresAt:  expiresAt,
 	})
 	if err != nil {
-		s.logger.Error("Failed to store refresh token", "error", err.Error())
-		return nil, sanitizeError(s.logger, "store refresh token", err)
+		s.logger.Error(ctx, "Failed to store refresh token", "error", err.Error())
+		return nil, sanitizeError(ctx, s.logger, "store refresh token", err)
 	}
 
-	s.logger.Info("Token pair generated successfully",
+	s.logger.Info(ctx, "Token pair generated successfully",
 		"user_id", user.ID.String(),
 		"access_expires_in", s.jwtService.GetAccessExpiry().Seconds(),
 		"refresh_expires_in", s.refreshExpiry.Seconds(),
@@ -225,7 +238,7 @@ func (s *TokenService) GenerateTokenPair(
 //	    return fmt.Errorf("invalid refresh token: %w", err)
 //	}
 func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString string) (*model.User, error) {
-	s.logger.Info("Validating refresh token")
+	s.logger.Info(ctx, "Validating refresh token")
 
 	// 1. Hash provided token
 	tokenHash := s.hashToken(tokenString)
@@ -233,21 +246,21 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 	// 2. Lookup token in database
 	storedToken, err := s.repo.GetByTokenHash(ctx, tokenHash)
 	if err != nil {
-		s.logger.Warn("Refresh token not found or expired", "error", err.Error())
-		return nil, sanitizeError(s.logger, "lookup refresh token", err)
+		s.logger.Warn(ctx, "Refresh token not found or expired", "error", err.Error())
+		return nil, sanitizeError(ctx, s.logger, "lookup refresh token", err)
 	}
 
 	// 3. Fetch user by user_id (no tenant_id needed since user_id is unique)
 	user, err := s.repo.GetByIDOnly(ctx, storedToken.UserID)
 	if err != nil {
-		s.logger.Error("Failed to fetch user for refresh token", "error", err.Error())
-		return nil, sanitizeError(s.logger, "fetch user for refresh token", err)
+		s.logger.Error(ctx, "Failed to fetch user for refresh token", "error", err.Error())
+		return nil, sanitizeError(ctx, s.logger, "fetch user for refresh token", err)
 	}
 
 	// 4. Reject disabled/locked accounts so a cut-off account cannot be treated
 	// as valid even if a consumer uses this method directly to build a session.
 	if !user.IsEnabled || isUserLocked(user) {
-		s.logger.Warn("Refresh token rejected: account is not active",
+		s.logger.Warn(ctx, "Refresh token rejected: account is not active",
 			"user_id", user.ID.String(),
 			"is_enabled", user.IsEnabled,
 			"is_locked", user.IsLocked,
@@ -263,7 +276,7 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 		return s.repo.UpdateLastUsed(uctx, tokenID)
 	})
 
-	s.logger.Info("Refresh token validated successfully",
+	s.logger.Info(ctx, "Refresh token validated successfully",
 		"user_id", user.ID.String(),
 		"token_id", storedToken.ID.String(),
 	)
@@ -301,13 +314,13 @@ func (s *TokenService) RefreshTokenPair(
 	refreshToken string,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
-	s.logger.Info("Refreshing token pair")
+	s.logger.Info(ctx, "Refreshing token pair")
 
 	// 1. Generate the replacement refresh token before entering the DB transaction.
 	newRefreshToken, err := s.jwtService.GenerateRefreshToken()
 	if err != nil {
-		s.logger.Error("Failed to generate replacement refresh token", "error", err.Error())
-		return nil, sanitizeError(s.logger, "generate replacement refresh token", err)
+		s.logger.Error(ctx, "Failed to generate replacement refresh token", "error", err.Error())
+		return nil, sanitizeError(ctx, s.logger, "generate replacement refresh token", err)
 	}
 
 	oldTokenHash := s.hashToken(refreshToken)
@@ -346,19 +359,19 @@ func (s *TokenService) RefreshTokenPair(
 		// as "possible theft", not "confirmed theft".
 		var reuseErr *model.RefreshTokenReuseError
 		if errors.As(err, &reuseErr) {
-			s.logger.Error("SECURITY: refresh token reuse detected; token family revoked and all sessions invalidated",
+			s.logger.Error(ctx, "SECURITY: refresh token reuse detected; token family revoked and all sessions invalidated",
 				"event", "refresh_token_reuse",
 				"user_id", reuseErr.UserID.String(),
 				"family_id", reuseErr.FamilyID.String(),
 			)
 			incMetric(s.metrics, metrics.CounterRefreshReuse)
 		} else {
-			s.logger.Warn("Failed to rotate refresh token", "error", err.Error())
+			s.logger.Warn(ctx, "Failed to rotate refresh token", "error", err.Error())
 		}
 		// Preserve the underlying sentinel (model.ErrInvalidRefreshToken or
 		// model.ErrRefreshTokenReuse) so callers can distinguish a benign
 		// invalid/expired token from a detected reuse/theft event.
-		return nil, sanitizeError(s.logger, "rotate refresh token", err)
+		return nil, sanitizeError(ctx, s.logger, "rotate refresh token", err)
 	}
 
 	// 3. Re-check account standing before minting a new access token.
@@ -369,13 +382,18 @@ func (s *TokenService) RefreshTokenPair(
 	// rejection we revoke the user's entire refresh-token family to ensure a
 	// cut-off account cannot continue refreshing.
 	if !user.IsEnabled || isUserLocked(user) {
-		if revokeErr := s.repo.DeleteByUserID(ctx, user.ID); revokeErr != nil && s.logger != nil {
-			s.logger.Warn("Failed to revoke refresh tokens for inactive account during refresh",
+		// Detached cleanup: this family-revoke is a security action that must run even
+		// if the request context was cancelled.
+		cctx, ccancel := cleanupContext(ctx)
+		revokeErr := s.repo.DeleteByUserID(cctx, user.ID)
+		ccancel()
+		if revokeErr != nil {
+			s.logger.Warn(ctx, "Failed to revoke refresh tokens for inactive account during refresh",
 				"user_id", user.ID.String(),
 				"error", revokeErr.Error(),
 			)
 		}
-		s.logger.Warn("Refresh denied: account is not active",
+		s.logger.Warn(ctx, "Refresh denied: account is not active",
 			"user_id", user.ID.String(),
 			"is_enabled", user.IsEnabled,
 			"is_locked", user.IsLocked,
@@ -386,17 +404,22 @@ func (s *TokenService) RefreshTokenPair(
 	// 4. Generate a new access token for the user tied to the consumed token.
 	accessToken, err := s.jwtService.GenerateAccessToken(user)
 	if err != nil {
-		s.logger.Error("Failed to generate rotated access token", "error", err.Error())
-		if revokeErr := s.repo.DeleteByTokenHash(ctx, newTokenHash); revokeErr != nil && s.logger != nil {
-			s.logger.Warn("Failed to revoke rotated refresh token after access token error",
+		s.logger.Error(ctx, "Failed to generate rotated access token", "error", err.Error())
+		// Detached cleanup: drop the just-persisted rotated token even if the request
+		// context was cancelled, so a token the client never received cannot linger.
+		cctx, ccancel := cleanupContext(ctx)
+		revokeErr := s.repo.DeleteByTokenHash(cctx, newTokenHash)
+		ccancel()
+		if revokeErr != nil {
+			s.logger.Warn(ctx, "Failed to revoke rotated refresh token after access token error",
 				"token_id", tokenID.String(),
 				"error", revokeErr.Error(),
 			)
 		}
-		return nil, sanitizeError(s.logger, "generate rotated access token", err)
+		return nil, sanitizeError(ctx, s.logger, "generate rotated access token", err)
 	}
 
-	s.logger.Info("Refresh token rotated successfully",
+	s.logger.Info(ctx, "Refresh token rotated successfully",
 		"user_id", user.ID.String(),
 		"token_id", tokenID.String(),
 	)
@@ -433,21 +456,21 @@ func (s *TokenService) RefreshTokenPair(
 //	    return fmt.Errorf("failed to revoke token: %w", err)
 //	}
 func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString string) error {
-	s.logger.Info("Revoking refresh token")
+	s.logger.Info(ctx, "Revoking refresh token")
 
 	tokenHash := s.hashToken(tokenString)
 	if err := s.repo.RevokeByTokenHash(ctx, tokenHash); err != nil {
 		// Logout is idempotent: a token that is no longer active is already revoked,
 		// so treat a not-found soft-revoke as success rather than an error.
 		if errors.Is(err, model.ErrNotFound) {
-			s.logger.Info("Refresh token already revoked")
+			s.logger.Info(ctx, "Refresh token already revoked")
 			return nil
 		}
-		s.logger.Error("Failed to revoke refresh token", "error", err.Error())
-		return sanitizeError(s.logger, "revoke refresh token", err)
+		s.logger.Error(ctx, "Failed to revoke refresh token", "error", err.Error())
+		return sanitizeError(ctx, s.logger, "revoke refresh token", err)
 	}
 
-	s.logger.Info("Refresh token revoked successfully")
+	s.logger.Info(ctx, "Refresh token revoked successfully")
 
 	return nil
 }
@@ -477,14 +500,14 @@ func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString strin
 //	    return fmt.Errorf("failed to revoke all tokens: %w", err)
 //	}
 func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID uuid.UUID) error {
-	s.logger.Info("Revoking all refresh tokens for user", "user_id", userID)
+	s.logger.Info(ctx, "Revoking all refresh tokens for user", "user_id", userID)
 
 	if err := s.repo.DeleteByUserID(ctx, userID); err != nil {
-		s.logger.Error("Failed to revoke all user tokens", "error", err.Error())
-		return sanitizeError(s.logger, "revoke all user tokens", err)
+		s.logger.Error(ctx, "Failed to revoke all user tokens", "error", err.Error())
+		return sanitizeError(ctx, s.logger, "revoke all user tokens", err)
 	}
 
-	s.logger.Info("All refresh tokens revoked successfully", "user_id", userID)
+	s.logger.Info(ctx, "All refresh tokens revoked successfully", "user_id", userID)
 
 	return nil
 }
@@ -508,15 +531,15 @@ func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID uuid.UUID
 //	}
 //	fmt.Printf("Deleted %d expired tokens\n", count)
 func (s *TokenService) CleanupExpired(ctx context.Context) (int64, error) {
-	s.logger.Info("Cleaning up expired refresh tokens")
+	s.logger.Info(ctx, "Cleaning up expired refresh tokens")
 
 	count, err := s.repo.DeleteExpired(ctx)
 	if err != nil {
-		s.logger.Error("Failed to cleanup expired tokens", "error", err.Error())
-		return 0, sanitizeError(s.logger, "cleanup expired tokens", err)
+		s.logger.Error(ctx, "Failed to cleanup expired tokens", "error", err.Error())
+		return 0, sanitizeError(ctx, s.logger, "cleanup expired tokens", err)
 	}
 
-	s.logger.Info("Expired tokens cleaned up successfully", "count", count)
+	s.logger.Info(ctx, "Expired tokens cleaned up successfully", "count", count)
 
 	return count, nil
 }

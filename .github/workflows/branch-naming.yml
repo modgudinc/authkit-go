@@ -1,52 +1,52 @@
 name: Branch Naming Convention
-
 permissions:
   contents: read
-
 on:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
     branches-ignore:
       - main
-      - release
 
 jobs:
   check-branch-name:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-
     steps:
       - name: Check branch naming convention
         run: |
           BRANCH_NAME="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
 
-          # Define allowed pattern
-          PATTERN='^((feature|fix|bugfix|hotfix|docs|chore|test|refactor)/[a-z0-9][a-z0-9-]*[a-z0-9]|release/v[0-9]+(\.[0-9]+){1,2}|dependabot/.+|renovate/.+)$'
+          # Define allowed pattern: <type>/<lowercase alphanumeric with dashes>
+          PATTERN='^(feature|fix|bugfix|hotfix|docs|chore|refactor)/[a-z0-9][a-z0-9-]*[a-z0-9]$'
 
-          # Check if main/release
-          if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "release" ]]; then
-            echo "Protected branch: $BRANCH_NAME"
+          # Check if main
+          if [[ "$BRANCH_NAME" == "main" ]]; then
+            echo "✅ Protected branch: $BRANCH_NAME"
+            exit 0
+          fi
+
+          # Dependabot manages its own branch names (dependabot/<ecosystem>/<dep>-<version>),
+          # which don't fit the <type>/<dashes> convention — exempt them.
+          if [[ "$BRANCH_NAME" == dependabot/* ]]; then
+            echo "✅ Dependabot branch: $BRANCH_NAME"
             exit 0
           fi
 
           # Check pattern
           if [[ ! "$BRANCH_NAME" =~ $PATTERN ]]; then
-            echo "Branch name '$BRANCH_NAME' does not match required pattern"
+            echo "❌ Branch name '$BRANCH_NAME' does not match required pattern"
             echo ""
-            echo "Required pattern: (feature|fix|bugfix|hotfix|docs|chore|test|refactor)/lowercase-with-dashes"
-            echo "Release pattern: release/v1.2.3"
+            echo "Required pattern: (feature|fix|bugfix|hotfix|docs|chore|refactor)/lowercase-with-dashes"
             echo ""
             echo "Valid examples:"
-            echo "  - feature/add-schema-config"
+            echo "  - feature/add-mcp-support"
             echo "  - fix/cache-warning"
             echo "  - bugfix/issue-123"
             echo "  - hotfix/critical-security"
-            echo "  - release/v1.0.0"
             echo "  - docs/update-readme"
             echo "  - chore/update-deps"
             echo "  - refactor/token-rotation"
             exit 1
           fi
 
-          echo "Branch name '$BRANCH_NAME' is valid"
+          echo "✅ Branch name '$BRANCH_NAME' is valid"
