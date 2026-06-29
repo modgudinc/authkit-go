@@ -8,6 +8,50 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-28
+
+Identity representation change: all identifiers move from `uuid.UUID` to `string`
+(36-char UUIDv7), and the schema's id columns become `VARCHAR(36)`. Per the pre-1.0
+policy this **breaking** change is a minor bump. Also lands a substantial expansion of
+the PostgreSQL integration test suite.
+
+### Changed (breaking)
+
+- **All identifiers are now `string` (UUIDv7), not `uuid.UUID`.** Every id on the
+  public surface is a Go `string` holding a 36-char UUIDv7: `model.User.ID`,
+  `JWTClaims.UserID`, `APIKey.CreatedBy`, `Invitation.CreatedBy`, `Secret.CreatedBy`,
+  the `UserStatusChange` ids (`ChangedBy` is `*string`),
+  `RefreshTokenReuseError.{UserID, FamilyID}`, and every repository/service method
+  that takes or returns an id (e.g. `GetByID(ctx, userID string, tenantID string)`,
+  `Create(...) (string, error)`, `RotateRefreshToken(...) (*model.User, string, error)`).
+  Callers no longer need `github.com/google/uuid` to interoperate with the API. Ids are
+  still minted in Go with `uuid.NewV7()` (now `.String()`-ed before use); the JWT wire
+  format is unchanged (a UUID already serialized as a quoted string, so existing tokens
+  still validate).
+- **Schema: the UUID id columns are now `VARCHAR(36)`.**
+  `migrations/000001_identity_schema.up.sql` stores the 11 id columns
+  (`users.id`, the three `created_by` (invitations / api_keys / provider_keys), `api_keys.key_id`,
+  `refresh_tokens.{id, user_id, family_id}`, `user_status_changes.{id, user_id, changed_by}`)
+  as `varchar(36)` instead of the native `uuid` type — no SQL-side UUID type or
+  generator. `tenant_id` is unchanged (`varchar(255)`; it is a caller-supplied
+  free-form identifier, not a minted UUID). Fresh installs get the new types
+  automatically; an existing deployment must `ALTER` those columns to `varchar(36)`
+  (or recreate the schema) before upgrading.
+
+### Tests / CI
+
+- Expanded the PostgreSQL integration suite (total coverage ~55% → ~76%): the
+  account status-change audit trail (including the nullable `changed_by` scan),
+  `APIKeyService.Validate` (unknown/malformed/expired/revoked), `InvitationService`
+  accept (single-use exhaustion + email binding), the user account-status and
+  token-invalidation mutators, `RefreshTokenPair` (invalid-token path + the
+  post-rotation account-not-active gate that revokes the token family), the
+  `SecretService` AES-256-GCM round-trip and `(tenant_id, key)` AAD binding, tenant
+  domain-access management, user CRUD, and the maintenance cleanup jobs.
+- Added JWT issuer/audience coverage: the unit-level mismatch matrix plus an
+  end-to-end test that the public `JWTConfig.Issuer/Audience` is enforced through
+  `AuthService.ValidateJWT`.
+
 ## [0.13.0] - 2026-06-23
 
 Operational hardening plus test/CI improvements. Contains one **breaking change** —
@@ -1050,7 +1094,12 @@ secrets) on PostgreSQL, plus a security-hardening pass across the library.
 - Integration tests now produce a cross-package coverage profile and the build
   fails if total coverage drops below 30%.
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/modgudinc/authkit-go/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/modgudinc/authkit-go/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/modgudinc/authkit-go/compare/v0.11.1...v0.12.0
+[0.11.1]: https://github.com/modgudinc/authkit-go/compare/v0.11.0...v0.11.1
+[0.11.0]: https://github.com/modgudinc/authkit-go/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/modgudinc/authkit-go/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/modgudinc/authkit-go/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/modgudinc/authkit-go/compare/v0.8.1...v0.9.0

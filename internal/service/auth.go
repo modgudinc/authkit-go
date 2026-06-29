@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/metrics"
@@ -22,15 +21,15 @@ import (
 type authRepository interface {
 	GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error)
 	GetByEmailFromPrimary(ctx context.Context, email, tenantID string) (*model.User, error)
-	GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error)
-	GetByIDFromPrimary(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error)
-	UnlockByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error
-	RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error)
-	UpdateLastLoginByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error
-	VerifyPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID string) (string, error)
-	SetPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error
-	SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error
-	IncrementTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error
+	GetByID(ctx context.Context, userID string, tenantID string) (*model.User, error)
+	GetByIDFromPrimary(ctx context.Context, userID string, tenantID string) (*model.User, error)
+	UnlockByTenant(ctx context.Context, userID string, tenantID string) error
+	RegisterFailedLogin(ctx context.Context, userID string, maxAttempts int, lockDuration time.Duration) (int, bool, error)
+	UpdateLastLoginByTenant(ctx context.Context, userID string, tenantID string) error
+	VerifyPasswordByTenant(ctx context.Context, userID string, tenantID string) (string, error)
+	SetPasswordByTenant(ctx context.Context, userID string, tenantID, hashedPassword string) error
+	SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID string, tenantID, hashedPassword string) error
+	IncrementTokenVersionByTenant(ctx context.Context, userID string, tenantID string) error
 }
 
 // AuthService handles user authentication operations
@@ -169,7 +168,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	if !user.IsEnabled {
 		s.passwordService.DummyVerify(req.Password)
 		s.logger.Warn(ctx, "Login failed: account disabled",
-			"user_id", user.ID.String(),
+			"user_id", user.ID,
 			"email", maskEmail(email),
 		)
 		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_disabled")
@@ -185,7 +184,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 				incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "auto_unlock")
 				// Continue anyway - will try to authenticate
 			} else {
-				s.logger.Info(ctx, "Account auto-unlocked", "user_id", user.ID.String())
+				s.logger.Info(ctx, "Account auto-unlocked", "user_id", user.ID)
 				// Refresh user data from the PRIMARY: the unlock we just committed
 				// (UnlockByTenant writes rw) must be visible here, so re-reading from a
 				// lagging replica could still show the account locked.
@@ -199,7 +198,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 			// indistinguishable (by message or timing) from not-found/wrong-password.
 			s.passwordService.DummyVerify(req.Password)
 			s.logger.Warn(ctx, "Login failed: account locked",
-				"user_id", user.ID.String(),
+				"user_id", user.ID,
 				"locked_until", user.LockedUntil,
 			)
 			incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_locked")
@@ -212,7 +211,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	if err != nil {
 		// Password verification failed
 		s.logger.Warn(ctx, "Password verification failed",
-			"user_id", user.ID.String(),
+			"user_id", user.ID,
 			"email", maskEmail(email),
 		)
 
@@ -228,13 +227,13 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 			// Continue anyway - authentication still failed.
 		case locked:
 			s.logger.Warn(ctx, "Account locked after max failed attempts",
-				"user_id", user.ID.String(),
+				"user_id", user.ID,
 				"failed_attempts", count,
 			)
 			incMetric(s.metrics, metrics.CounterAccountLockout)
 		default:
 			s.logger.Info(ctx, "Failed login attempt recorded",
-				"user_id", user.ID.String(),
+				"user_id", user.ID,
 				"failed_attempts", count,
 			)
 		}
@@ -268,7 +267,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	}
 
 	s.logger.Info(ctx, "User login successful",
-		"user_id", user.ID.String(),
+		"user_id", user.ID,
 		"email", maskEmail(email),
 		"tenant_id", req.TenantID,
 	)
@@ -340,7 +339,7 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 //	if err != nil {
 //	    return fmt.Errorf("logout all failed: %w", err)
 //	}
-func (s *AuthService) LogoutAll(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (s *AuthService) LogoutAll(ctx context.Context, userID string, tenantID string) error {
 	s.logger.Info(ctx, "Logout from all devices", "user_id", userID, "tenant_id", tenantID)
 
 	// 1. Increment token version (invalidates all JWTs) scoped to the tenant. This
@@ -464,8 +463,8 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 		return nil, fmt.Errorf("invalid token: %w", model.ErrInvalidToken)
 	}
 
-	// 2. Get user from database (claims.UserID is a uuid.UUID; a malformed token
-	// id would already have failed JWT claim parsing above). Read from the PRIMARY:
+	// 2. Get user from database (claims.UserID is the uuid7 string subject claim; an
+	// unknown or malformed id simply matches no row below). Read from the PRIMARY:
 	// this is the revocation/account-status gate, so token_version, is_enabled and
 	// is_locked must reflect LogoutAll / ChangePassword / disable / lock writes
 	// immediately rather than lagging a read replica (which would fail open).

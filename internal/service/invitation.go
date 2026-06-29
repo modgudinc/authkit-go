@@ -11,7 +11,6 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/model"
@@ -265,7 +264,7 @@ func (s *InvitationService) Validate(ctx context.Context, code string) (bool, er
 //
 // Returns the new user's ID, or an error wrapping model.ErrInvitationInvalid if
 // the invitation is unknown, expired, exhausted, or the email does not match.
-func (s *InvitationService) Accept(ctx context.Context, req model.AcceptInvitationRequest) (uuid.UUID, error) {
+func (s *InvitationService) Accept(ctx context.Context, req model.AcceptInvitationRequest) (string, error) {
 	s.logger.Info(ctx, "Accepting invitation",
 		"code", maskCode(req.Code),
 		"email", maskEmail(req.Email),
@@ -278,12 +277,12 @@ func (s *InvitationService) Accept(ctx context.Context, req model.AcceptInvitati
 			"email", maskEmail(req.Email),
 			"error", err.Error(),
 		)
-		return uuid.Nil, sanitizeError(ctx, s.logger, "accept invitation", err)
+		return "", sanitizeError(ctx, s.logger, "accept invitation", err)
 	}
 
 	s.logger.Info(ctx, "Invitation accepted successfully",
 		"code", maskCode(req.Code),
-		"user_id", userID.String(),
+		"user_id", userID,
 	)
 
 	return userID, nil

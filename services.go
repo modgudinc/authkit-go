@@ -7,7 +7,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/internal/service"
 	"github.com/modgudinc/authkit-go/model"
 	"github.com/modgudinc/authkit-go/ratelimit"
@@ -46,7 +45,7 @@ type APIKeyService interface {
 type AuthService interface {
 	Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error)
 	Logout(ctx context.Context, refreshToken string) error
-	LogoutAll(ctx context.Context, userID uuid.UUID, tenantID string) error
+	LogoutAll(ctx context.Context, userID string, tenantID string) error
 	RefreshToken(ctx context.Context, req model.RefreshRequest) (*model.RefreshResponse, error)
 	ValidateJWT(ctx context.Context, token string) (*model.JWTClaims, error)
 	ChangePassword(ctx context.Context, req model.ChangePasswordRequest) error
@@ -66,7 +65,7 @@ type InvitationService interface {
 	Create(ctx context.Context, req model.CreateInvitationRequest) (*model.Invitation, error)
 	Get(ctx context.Context, code string) (*model.Invitation, error)
 	Validate(ctx context.Context, code string) (bool, error)
-	Accept(ctx context.Context, req model.AcceptInvitationRequest) (uuid.UUID, error)
+	Accept(ctx context.Context, req model.AcceptInvitationRequest) (string, error)
 	List(ctx context.Context, tenantID string) ([]*model.Invitation, error)
 	ListActive(ctx context.Context, tenantID string) ([]*model.Invitation, error)
 	Revoke(ctx context.Context, code string) error
@@ -165,32 +164,32 @@ type TokenService interface {
 // get/delete/status/role operations take positional ids (userID, tenantID). Every
 // mutator is tenant-scoped — a cross-tenant userID matches no row (ErrNotFound).
 type UserService interface {
-	Create(ctx context.Context, req model.CreateUserRequest) (uuid.UUID, error)
+	Create(ctx context.Context, req model.CreateUserRequest) (string, error)
 	Update(ctx context.Context, req model.UpdateUserRequest) error
-	Delete(ctx context.Context, userID uuid.UUID, tenantID string) error
-	GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error)
+	Delete(ctx context.Context, userID string, tenantID string) error
+	GetByID(ctx context.Context, userID string, tenantID string) (*model.User, error)
 	GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error)
 	Exists(ctx context.Context, email, tenantID string) (bool, error)
 	List(ctx context.Context, tenantID string, limit, offset int) ([]*model.User, error)
 	ExistsActive(ctx context.Context, email, tenantID string) (bool, error)
-	GetDisplayName(ctx context.Context, userID uuid.UUID, tenantID string) (string, error)
-	GetActiveUserIDByEmail(ctx context.Context, email, tenantID string) (uuid.UUID, error)
-	Enable(ctx context.Context, userID uuid.UUID, tenantID string) error
-	Disable(ctx context.Context, userID uuid.UUID, tenantID string) error
-	Lock(ctx context.Context, userID uuid.UUID, tenantID string, lockedUntil *time.Time) error
-	Unlock(ctx context.Context, userID uuid.UUID, tenantID string) error
-	SetPassword(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error
-	VerifyPassword(ctx context.Context, userID uuid.UUID, tenantID string) (string, error)
-	UpdateLastLogin(ctx context.Context, userID uuid.UUID, tenantID string) error
-	IncrementFailedLoginCount(ctx context.Context, userID uuid.UUID, tenantID string) error
-	IncrementTokenVersion(ctx context.Context, userID uuid.UUID, tenantID string) error
-	UpdateRoles(ctx context.Context, userID uuid.UUID, tenantID string, roles []string) error
+	GetDisplayName(ctx context.Context, userID string, tenantID string) (string, error)
+	GetActiveUserIDByEmail(ctx context.Context, email, tenantID string) (string, error)
+	Enable(ctx context.Context, userID string, tenantID string) error
+	Disable(ctx context.Context, userID string, tenantID string) error
+	Lock(ctx context.Context, userID string, tenantID string, lockedUntil *time.Time) error
+	Unlock(ctx context.Context, userID string, tenantID string) error
+	SetPassword(ctx context.Context, userID string, tenantID, hashedPassword string) error
+	VerifyPassword(ctx context.Context, userID string, tenantID string) (string, error)
+	UpdateLastLogin(ctx context.Context, userID string, tenantID string) error
+	IncrementFailedLoginCount(ctx context.Context, userID string, tenantID string) error
+	IncrementTokenVersion(ctx context.Context, userID string, tenantID string) error
+	UpdateRoles(ctx context.Context, userID string, tenantID string, roles []string) error
 	Count(ctx context.Context, tenantID string) (int, error)
 	// StatusHistory returns a user's account status-change audit trail (newest
 	// first), tenant-scoped. CleanupStatusChanges deletes audit rows older than
 	// olderThan (which must be positive) and returns the count removed; run it
 	// periodically to bound the otherwise unbounded audit table.
-	StatusHistory(ctx context.Context, userID uuid.UUID, tenantID string) ([]*model.UserStatusChange, error)
+	StatusHistory(ctx context.Context, userID string, tenantID string) ([]*model.UserStatusChange, error)
 	CleanupStatusChanges(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 

@@ -293,7 +293,7 @@ func assertTablesExistInSchema(t *testing.T, db *sql.DB, schema string, tables .
 	}
 }
 
-func createTenantAndUser(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string) uuid.UUID {
+func createTenantAndUser(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string) string {
 	t.Helper()
 
 	passwordService := service.NewPasswordService(4, nil)
@@ -308,7 +308,7 @@ func createTenantAndUserWithPassword(
 	email string,
 	password string,
 	passwordService *service.PasswordService,
-) uuid.UUID {
+) string {
 	t.Helper()
 
 	if err := repo.CreateTenant(ctx, model.CreateTenantRequest{
@@ -330,7 +330,7 @@ func createUserWithPassword(
 	email string,
 	password string,
 	passwordService *service.PasswordService,
-) uuid.UUID {
+) string {
 	t.Helper()
 
 	passwordHash, err := passwordService.HashPassword(password)
@@ -384,7 +384,7 @@ func newIntegrationAuthKit(t *testing.T, db *sql.DB) *authkit.AuthKit {
 	return authKit
 }
 
-func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repository.Repository, userID uuid.UUID) {
+func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repository.Repository, userID string) {
 	t.Helper()
 
 	oldHash := "old-refresh-hash"
@@ -429,7 +429,7 @@ func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repositor
 	}
 }
 
-func testAPIKeyPersistence(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID uuid.UUID) {
+func testAPIKeyPersistence(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID string) {
 	t.Helper()
 
 	keyID := uuid.NewString()
@@ -504,7 +504,7 @@ func testOTPPersistence(t *testing.T, ctx context.Context, repo *repository.Repo
 	}
 }
 
-func testInvitationPersistence(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID uuid.UUID) {
+func testInvitationPersistence(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID string) {
 	t.Helper()
 
 	if err := repo.CreateInvitation(ctx, repository.InsertInvitationParams{
@@ -551,7 +551,7 @@ func testInvitationPersistence(t *testing.T, ctx context.Context, repo *reposito
 	}
 }
 
-func testInvitationAccept(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID uuid.UUID) {
+func testInvitationAccept(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID string) {
 	t.Helper()
 
 	code := "ACCEPTCODE0000000001"
@@ -717,7 +717,7 @@ func TestDisableByTenantRevokesRefreshTokens(t *testing.T) {
 	}
 }
 
-func testSecretPersistence(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID uuid.UUID) {
+func testSecretPersistence(t *testing.T, ctx context.Context, repo *repository.Repository, tenantID string, userID string) {
 	t.Helper()
 
 	secret, err := repo.SaveSecret(ctx, tenantID, "openai", "encrypted-value", "sk-************abcd", userID)

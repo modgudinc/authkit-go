@@ -3,20 +3,16 @@
 
 package model
 
-import (
-	"time"
-
-	"github.com/google/uuid"
-)
+import "time"
 
 type User struct {
-	ID           uuid.UUID `json:"id" db:"id"`
-	Email        string    `json:"email" db:"email"`
-	PasswordHash string    `json:"-" db:"password_hash"`
-	TenantID     string    `json:"tenant_id" db:"tenant_id"`
-	DisplayName  string    `json:"display_name" db:"display_name"`
-	Roles        []string  `json:"roles" db:"roles"`
-	TokenVersion int       `json:"-" db:"token_version"`
+	ID           string   `json:"id" db:"id"`
+	Email        string   `json:"email" db:"email"`
+	PasswordHash string   `json:"-" db:"password_hash"`
+	TenantID     string   `json:"tenant_id" db:"tenant_id"`
+	DisplayName  string   `json:"display_name" db:"display_name"`
+	Roles        []string `json:"roles" db:"roles"`
+	TokenVersion int      `json:"-" db:"token_version"`
 
 	// Account status (enable/disable - admin control)
 	IsEnabled  bool       `json:"is_enabled" db:"is_enabled"`
@@ -46,15 +42,15 @@ type CreateUserRequest struct {
 // is_locked transition (admin enable/disable/lock/unlock and the automatic
 // failed-login lockout). It is a read-back snapshot; treat it as read-only.
 type UserStatusChange struct {
-	ID uuid.UUID `json:"id"`
+	ID string `json:"id"`
 	// UserID is the account whose status changed.
-	UserID uuid.UUID `json:"user_id"`
+	UserID string `json:"user_id"`
 	// StatusType is the transition: "enable", "disable", "lock", or "unlock".
 	StatusType string `json:"status_type"`
 	// ChangedBy identifies the actor when known; the library leaves it nil (the
 	// provenance is conveyed by ChangedByType) but it is available for callers that
 	// extend the audit trail.
-	ChangedBy *uuid.UUID `json:"changed_by,omitempty"`
+	ChangedBy *string `json:"changed_by,omitempty"`
 	// ChangedByType is the provenance of the change: "admin" (an explicit mutator)
 	// or "system" (the automatic failed-login lockout).
 	ChangedByType string `json:"changed_by_type"`
@@ -74,7 +70,7 @@ type UserStatusChange struct {
 // reading the current values. Changing Roles bumps the user's token_version
 // (invalidating existing JWTs); a display-name-only update does not.
 type UpdateUserRequest struct {
-	UserID      uuid.UUID
+	UserID      string
 	TenantID    string
 	DisplayName *string
 	Roles       *[]string

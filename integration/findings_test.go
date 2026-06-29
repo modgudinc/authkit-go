@@ -770,7 +770,7 @@ func TestNotFoundMutatorsWrapErrNotFound(t *testing.T) {
 	applyMigration(t, db, "000001_identity_schema.up.sql")
 
 	repo := repository.New(db, db)
-	missingUser := uuid.Must(uuid.NewV7())
+	missingUser := uuid.Must(uuid.NewV7()).String()
 
 	newName, newRoles := "x", []string{"r"}
 	cases := map[string]error{

@@ -1,8 +1,9 @@
 -- Identity schema for authkit-go (consolidated).
 --
--- The complete schema in a single migration. All identifiers are UUIDv7 minted
--- by the application (uuid.NewV7()); columns carry no SQL-side UUID default and
--- there is no DB-side UUID generator. Account status-change audit rows
+-- The complete schema in a single migration. All identifiers are UUIDv7 strings
+-- minted by the application (uuid.NewV7().String()) and stored as VARCHAR(36);
+-- columns carry no SQL-side UUID type or default and there is no DB-side UUID
+-- generator. Account status-change audit rows
 -- (user_status_changes) are written by the library in Go (in the same
 -- transaction as the status change), not by a database trigger.
 --
@@ -42,7 +43,7 @@ CREATE TRIGGER trigger_tenants_updated_at
     EXECUTE FUNCTION authkit.update_updated_at();
 
 CREATE TABLE IF NOT EXISTS authkit.users (
-    id UUID PRIMARY KEY,
+    id VARCHAR(36) PRIMARY KEY,
     email VARCHAR(255) NOT NULL,
     display_name VARCHAR(255) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
@@ -81,7 +82,7 @@ CREATE TRIGGER trigger_users_updated_at
 CREATE TABLE IF NOT EXISTS authkit.invitations (
     code VARCHAR(255) PRIMARY KEY,
     tenant_id VARCHAR(255) NOT NULL REFERENCES authkit.tenants(tenant_id) ON DELETE CASCADE,
-    created_by UUID NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
+    created_by VARCHAR(36) NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
     email VARCHAR(255) NOT NULL,
     roles JSONB NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
@@ -104,11 +105,11 @@ CREATE INDEX IF NOT EXISTS idx_invitations_created_by ON authkit.invitations (cr
 -- provides the index used by the hash lookup in ValidateAPIKey (no separate
 -- key_hash index).
 CREATE TABLE IF NOT EXISTS authkit.api_keys (
-    key_id UUID PRIMARY KEY,
+    key_id VARCHAR(36) PRIMARY KEY,
     key_hash VARCHAR(512) NOT NULL UNIQUE,
     tenant_id VARCHAR(255) NOT NULL REFERENCES authkit.tenants(tenant_id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
-    created_by UUID NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
+    created_by VARCHAR(36) NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
     last_used_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -125,7 +126,7 @@ CREATE TABLE IF NOT EXISTS authkit.provider_keys (
     provider VARCHAR(50) NOT NULL,
     encrypted_key TEXT NOT NULL,
     masked_key VARCHAR(100),
-    created_by UUID NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
+    created_by VARCHAR(36) NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
     last_verified_at TIMESTAMPTZ,
     is_valid BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -150,10 +151,10 @@ CREATE TRIGGER trigger_provider_keys_updated_at
 -- presentation of an already-consumed token can be detected as reuse/theft, at
 -- which point the whole family is revoked. Rows are cleaned up after expiry.
 CREATE TABLE IF NOT EXISTS authkit.refresh_tokens (
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
+    id VARCHAR(36) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
     token_hash VARCHAR(255) UNIQUE NOT NULL,
-    family_id UUID NOT NULL,
+    family_id VARCHAR(36) NOT NULL,
     ip_address INET,
     user_agent TEXT,
     device_name VARCHAR(255),
@@ -213,10 +214,10 @@ CREATE INDEX IF NOT EXISTS idx_verification_codes_expires_at ON authkit.verifica
 -- leaves them NULL and conveys provenance via changed_by_type), so there is no
 -- index on changed_by.
 CREATE TABLE IF NOT EXISTS authkit.user_status_changes (
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
+    id VARCHAR(36) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL REFERENCES authkit.users(id) ON DELETE CASCADE,
     status_type VARCHAR(50) NOT NULL,
-    changed_by UUID REFERENCES authkit.users(id),
+    changed_by VARCHAR(36) REFERENCES authkit.users(id),
     changed_by_type VARCHAR(20) NOT NULL,
     changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     reason TEXT,

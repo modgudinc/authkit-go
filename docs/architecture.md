@@ -28,8 +28,10 @@ Core tables:
   transitions. Written by the library in Go, in the same transaction as the
   status change (there is no DB trigger).
 
-All identifiers are UUIDv7 minted in Go (`uuid.NewV7()`); the schema has no
-SQL-side UUID generation.
+All identifiers are UUIDv7 minted in Go (`uuid.NewV7()`) and represented as 36-char
+strings — `varchar(36)` columns in the schema and `string` on the Go API surface;
+there is no SQL-side UUID type or generator. (`tenant_id` is the exception: a
+caller-supplied free-form identifier, `varchar(255)`.)
 
 ## Connection Model
 

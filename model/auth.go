@@ -3,8 +3,6 @@
 
 package model
 
-import "github.com/google/uuid"
-
 // LoginRequest contains parameters for user login
 type LoginRequest struct {
 	Email       string       `json:"email" binding:"required,email"`
@@ -29,10 +27,10 @@ type RefreshRequest struct {
 
 // RefreshResponse contains new tokens after successful refresh
 type RefreshResponse struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
-	ExpiresIn    int64     `json:"expires_in"`
-	UserID       uuid.UUID `json:"user_id"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
+	UserID       string `json:"user_id"`
 }
 
 // ChangePasswordRequest contains parameters for password change.
@@ -41,8 +39,8 @@ type RefreshResponse struct {
 // caller-supplied user id from another tenant cannot be targeted. Pass the tenant
 // the caller is authorized for.
 type ChangePasswordRequest struct {
-	UserID      uuid.UUID `json:"user_id" binding:"required"`
-	TenantID    string    `json:"tenant_id" binding:"required"`
-	OldPassword string    `json:"old_password" binding:"required"`
-	NewPassword string    `json:"new_password" binding:"required"`
+	UserID      string `json:"user_id" binding:"required"`
+	TenantID    string `json:"tenant_id" binding:"required"`
+	OldPassword string `json:"old_password" binding:"required"`
+	NewPassword string `json:"new_password" binding:"required"`
 }

@@ -50,17 +50,18 @@ import (
 // ============================================================================
 // Create - Creates a new user with default status (enabled, unlocked)
 // ============================================================================
-func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (uuid.UUID, error) {
-	userID, err := uuid.NewV7()
+func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (string, error) {
+	gen, err := uuid.NewV7()
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("could not generate an id for user: %w", err)
+		return "", fmt.Errorf("could not generate an id for user: %w", err)
 	}
+	userID := gen.String()
 
 	now := time.Now()
 
 	rolesJSON, err := json.Marshal(user.Roles)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to marshal roles: %w", err)
+		return "", fmt.Errorf("failed to marshal roles: %w", err)
 	}
 
 	query := `
@@ -92,9 +93,9 @@ func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (
 		// driver/constraint string so callers can errors.Is it.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
-			return uuid.Nil, fmt.Errorf("user already exists for this tenant: %w", model.ErrUserExists)
+			return "", fmt.Errorf("user already exists for this tenant: %w", model.ErrUserExists)
 		}
-		return uuid.Nil, fmt.Errorf("failed to create user: %w", err)
+		return "", fmt.Errorf("failed to create user: %w", err)
 	}
 
 	return userID, nil
@@ -112,7 +113,7 @@ func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (
 // lagging replica could return a stale hash right after a password change. This
 // matches the read-write split's rule that validation paths use the primary.
 // ============================================================================
-func (r *Repository) VerifyPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID string) (string, error) {
+func (r *Repository) VerifyPasswordByTenant(ctx context.Context, userID string, tenantID string) (string, error) {
 	query := `
 		SELECT password_hash
 		FROM {{schema}}.users
@@ -195,7 +196,7 @@ func scanUser(row scannable) (*model.User, error) {
 // getByID - Tenant-scoped user lookup against the supplied handle (rw or ro).
 // Shared by GetByID (replica) and GetByIDFromPrimary (primary).
 // ============================================================================
-func (r *Repository) getByID(ctx context.Context, db rowQuerier, userID uuid.UUID, tenantID string) (*model.User, error) {
+func (r *Repository) getByID(ctx context.Context, db rowQuerier, userID string, tenantID string) (*model.User, error) {
 	query := `SELECT ` + userColumns + ` FROM {{schema}}.users WHERE id = $1 AND tenant_id = $2`
 
 	user, err := scanUser(db.QueryRowContext(ctx, r.q(query), userID, tenantID))
@@ -214,7 +215,7 @@ func (r *Repository) getByID(ctx context.Context, db rowQuerier, userID uuid.UUI
 // replica (ro) — use GetByIDFromPrimary for security gates that must observe the
 // latest writes (see below).
 // ============================================================================
-func (r *Repository) GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
+func (r *Repository) GetByID(ctx context.Context, userID string, tenantID string) (*model.User, error) {
 	return r.getByID(ctx, r.ro, userID, tenantID)
 }
 
@@ -229,7 +230,7 @@ func (r *Repository) GetByID(ctx context.Context, userID uuid.UUID, tenantID str
 // window — a fail-open gap. This mirrors the same rw decision already made for
 // GetByTokenHash and GetAPIKeyByHash.
 // ============================================================================
-func (r *Repository) GetByIDFromPrimary(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
+func (r *Repository) GetByIDFromPrimary(ctx context.Context, userID string, tenantID string) (*model.User, error) {
 	return r.getByID(ctx, r.rw, userID, tenantID)
 }
 
@@ -237,7 +238,7 @@ func (r *Repository) GetByIDFromPrimary(ctx context.Context, userID uuid.UUID, t
 // GetByIDOnly - Retrieves a user by ID without tenant_id constraint
 // Used for refresh token validation where user_id is sufficient (UUID is unique)
 // ============================================================================
-func (r *Repository) GetByIDOnly(ctx context.Context, userID uuid.UUID) (*model.User, error) {
+func (r *Repository) GetByIDOnly(ctx context.Context, userID string) (*model.User, error) {
 	query := `SELECT ` + userColumns + ` FROM {{schema}}.users WHERE id = $1`
 
 	user, err := scanUser(r.ro.QueryRowContext(ctx, r.q(query), userID))
@@ -354,7 +355,7 @@ func (r *Repository) List(ctx context.Context, tenantID string, limit, offset in
 // from another tenant cannot drive an unrelated account toward lockout.
 // Used for tracking failed login attempts before account lockout.
 // ============================================================================
-func (r *Repository) IncrementFailedLoginCountByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (r *Repository) IncrementFailedLoginCountByTenant(ctx context.Context, userID string, tenantID string) error {
 	query := `
 		UPDATE {{schema}}.users
 		SET
@@ -382,7 +383,7 @@ func (r *Repository) IncrementFailedLoginCountByTenant(ctx context.Context, user
 // the new failed_login_count and whether the account is now locked. It never
 // clears an existing lock.
 // ============================================================================
-func (r *Repository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error) {
+func (r *Repository) RegisterFailedLogin(ctx context.Context, userID string, maxAttempts int, lockDuration time.Duration) (int, bool, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, false, fmt.Errorf("failed to begin failed-login registration: %w", err)
@@ -446,7 +447,7 @@ func (r *Repository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, 
 // a tenant so a caller-supplied user id from another tenant cannot be touched.
 // Called after successful authentication to track user activity.
 // ============================================================================
-func (r *Repository) UpdateLastLoginByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (r *Repository) UpdateLastLoginByTenant(ctx context.Context, userID string, tenantID string) error {
 	query := `
 		UPDATE {{schema}}.users
 		SET
@@ -489,7 +490,7 @@ func (r *Repository) ExistsActive(ctx context.Context, email, tenantID string) (
 // tenant so a caller-supplied user id from another tenant cannot be read.
 // Useful when enriching responses with user names.
 // ============================================================================
-func (r *Repository) GetDisplayNameByTenant(ctx context.Context, userID uuid.UUID, tenantID string) (string, error) {
+func (r *Repository) GetDisplayNameByTenant(ctx context.Context, userID string, tenantID string) (string, error) {
 	query := `SELECT display_name FROM {{schema}}.users WHERE id = $1 AND tenant_id = $2`
 
 	var displayName string
@@ -508,20 +509,20 @@ func (r *Repository) GetDisplayNameByTenant(ctx context.Context, userID uuid.UUI
 // GetActiveUserIDByEmail - Gets user ID for an active (enabled, unlocked) user
 // Useful when linking external actors to users by email
 // ============================================================================
-func (r *Repository) GetActiveUserIDByEmail(ctx context.Context, email, tenantID string) (uuid.UUID, error) {
+func (r *Repository) GetActiveUserIDByEmail(ctx context.Context, email, tenantID string) (string, error) {
 	query := `
 		SELECT id FROM {{schema}}.users
 		WHERE email = $1 AND tenant_id = $2 AND is_enabled = TRUE AND is_locked = FALSE
 		LIMIT 1
 	`
 
-	var userID uuid.UUID
+	var userID string
 	err := r.ro.QueryRowContext(ctx, r.q(query), email, tenantID).Scan(&userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return uuid.Nil, fmt.Errorf("active user not found for email: %w", model.ErrNotFound)
+			return "", fmt.Errorf("active user not found for email: %w", model.ErrNotFound)
 		}
-		return uuid.Nil, fmt.Errorf("failed to get active user ID: %w", err)
+		return "", fmt.Errorf("failed to get active user ID: %w", err)
 	}
 
 	return userID, nil
@@ -550,7 +551,7 @@ func (r *Repository) CountUsersByTenant(ctx context.Context, tenantID string) (i
 // roles. This prevents a downgraded user from retaining elevated roles in a live
 // access token until it expires.
 // ============================================================================
-func (r *Repository) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, tenantID string, roles []string) error {
+func (r *Repository) UpdateRolesByTenant(ctx context.Context, userID string, tenantID string, roles []string) error {
 	rolesJSON, err := json.Marshal(roles)
 	if err != nil {
 		return fmt.Errorf("failed to marshal roles: %w", err)
@@ -582,7 +583,7 @@ func (r *Repository) UpdateRolesByTenant(ctx context.Context, userID uuid.UUID, 
 // EnableByTenant - Enables a user account with tenant isolation
 // Validates tenant ownership before enabling
 // ============================================================================
-func (r *Repository) EnableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (r *Repository) EnableByTenant(ctx context.Context, userID string, tenantID string) error {
 	return r.withUserStatusAudit(ctx, userID, &tenantID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users SET is_enabled = true, disabled_at = NULL, updated_at = $1 WHERE id = $2 AND tenant_id = $3
@@ -602,7 +603,7 @@ func (r *Repository) EnableByTenant(ctx context.Context, userID uuid.UUID, tenan
 // rejected by ValidateJWT; the next refresh re-reads the updated roles. This
 // keeps a role change from leaving stale roles in a live access token.
 // ============================================================================
-func (r *Repository) UpdateByTenant(ctx context.Context, userID uuid.UUID, tenantID string, req model.UpdateUserRequest) error {
+func (r *Repository) UpdateByTenant(ctx context.Context, userID string, tenantID string, req model.UpdateUserRequest) error {
 	// A nil Roles is passed as SQL NULL so COALESCE leaves the column untouched; a
 	// non-nil Roles is marshaled to JSON text and cast to jsonb.
 	var rolesParam *string
@@ -637,7 +638,7 @@ func (r *Repository) UpdateByTenant(ctx context.Context, userID uuid.UUID, tenan
 // ============================================================================
 // SetPasswordByTenant - Sets the password hash with tenant isolation
 // ============================================================================
-func (r *Repository) SetPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error {
+func (r *Repository) SetPasswordByTenant(ctx context.Context, userID string, tenantID, hashedPassword string) error {
 	query := `
 		UPDATE {{schema}}.users
 		SET password_hash = $1, updated_at = $2
@@ -657,7 +658,7 @@ func (r *Repository) SetPasswordByTenant(ctx context.Context, userID uuid.UUID, 
 // atomically: they can never be left half-applied (password changed but old JWTs
 // still valid, or vice versa). Refresh-token revocation remains a separate step.
 // ============================================================================
-func (r *Repository) SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error {
+func (r *Repository) SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID string, tenantID, hashedPassword string) error {
 	query := `
 		UPDATE {{schema}}.users
 		SET password_hash = $1, token_version = token_version + 1, updated_at = $2
@@ -673,7 +674,7 @@ func (r *Repository) SetPasswordAndBumpTokenVersionByTenant(ctx context.Context,
 // ============================================================================
 // DeleteByTenant - Soft deletes a user with tenant isolation
 // ============================================================================
-func (r *Repository) DeleteByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (r *Repository) DeleteByTenant(ctx context.Context, userID string, tenantID string) error {
 	return r.withUserStatusAudit(ctx, userID, &tenantID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		now := time.Now()
 		if _, err := tx.ExecContext(ctx, r.q(`
@@ -691,7 +692,7 @@ func (r *Repository) DeleteByTenant(ctx context.Context, userID uuid.UUID, tenan
 // ============================================================================
 // LockByTenant - Locks a user account with tenant isolation
 // ============================================================================
-func (r *Repository) LockByTenant(ctx context.Context, userID uuid.UUID, tenantID string, lockedUntil *time.Time) error {
+func (r *Repository) LockByTenant(ctx context.Context, userID string, tenantID string, lockedUntil *time.Time) error {
 	return r.withUserStatusAudit(ctx, userID, &tenantID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users SET is_locked = true, locked_until = $1, updated_at = $2 WHERE id = $3 AND tenant_id = $4
@@ -708,7 +709,7 @@ func (r *Repository) LockByTenant(ctx context.Context, userID uuid.UUID, tenantI
 // ============================================================================
 // UnlockByTenant - Unlocks a user account with tenant isolation
 // ============================================================================
-func (r *Repository) UnlockByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (r *Repository) UnlockByTenant(ctx context.Context, userID string, tenantID string) error {
 	return r.withUserStatusAudit(ctx, userID, &tenantID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users SET is_locked = false, locked_until = NULL, failed_login_count = 0, updated_at = $1 WHERE id = $2 AND tenant_id = $3
@@ -726,7 +727,7 @@ func (r *Repository) UnlockByTenant(ctx context.Context, userID uuid.UUID, tenan
 // ============================================================================
 // IncrementTokenVersionByTenant - Bumps token_version with tenant isolation
 // ============================================================================
-func (r *Repository) IncrementTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (r *Repository) IncrementTokenVersionByTenant(ctx context.Context, userID string, tenantID string) error {
 	query := `
 		UPDATE {{schema}}.users
 		SET token_version = token_version + 1, updated_at = $1
@@ -749,7 +750,7 @@ func rowsAffectedOrNotFound(result sql.Result) error {
 // DisableByTenant - Disables a user account with tenant isolation
 // Validates tenant ownership and increments token_version to invalidate JWTs
 // ============================================================================
-func (r *Repository) DisableByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (r *Repository) DisableByTenant(ctx context.Context, userID string, tenantID string) error {
 	return r.withUserStatusAudit(ctx, userID, &tenantID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		now := time.Now()
 		if _, err := tx.ExecContext(ctx, r.q(`
