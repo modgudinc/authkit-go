@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/metrics"
@@ -145,7 +144,7 @@ func (s *TokenService) GenerateTokenPair(
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
 	s.logger.Info(ctx, "Generating token pair",
-		"user_id", user.ID.String(),
+		"user_id", user.ID,
 		"email", maskEmail(user.Email),
 		"tenant_id", user.TenantID,
 	)
@@ -197,7 +196,7 @@ func (s *TokenService) GenerateTokenPair(
 	}
 
 	s.logger.Info(ctx, "Token pair generated successfully",
-		"user_id", user.ID.String(),
+		"user_id", user.ID,
 		"access_expires_in", s.jwtService.GetAccessExpiry().Seconds(),
 		"refresh_expires_in", s.refreshExpiry.Seconds(),
 	)
@@ -261,7 +260,7 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 	// as valid even if a consumer uses this method directly to build a session.
 	if !user.IsEnabled || isUserLocked(user) {
 		s.logger.Warn(ctx, "Refresh token rejected: account is not active",
-			"user_id", user.ID.String(),
+			"user_id", user.ID,
 			"is_enabled", user.IsEnabled,
 			"is_locked", user.IsLocked,
 		)
@@ -277,8 +276,8 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 	})
 
 	s.logger.Info(ctx, "Refresh token validated successfully",
-		"user_id", user.ID.String(),
-		"token_id", storedToken.ID.String(),
+		"user_id", user.ID,
+		"token_id", storedToken.ID,
 	)
 
 	return user, nil
@@ -361,8 +360,8 @@ func (s *TokenService) RefreshTokenPair(
 		if errors.As(err, &reuseErr) {
 			s.logger.Error(ctx, "SECURITY: refresh token reuse detected; token family revoked and all sessions invalidated",
 				"event", "refresh_token_reuse",
-				"user_id", reuseErr.UserID.String(),
-				"family_id", reuseErr.FamilyID.String(),
+				"user_id", reuseErr.UserID,
+				"family_id", reuseErr.FamilyID,
 			)
 			incMetric(s.metrics, metrics.CounterRefreshReuse)
 		} else {
@@ -389,12 +388,12 @@ func (s *TokenService) RefreshTokenPair(
 		ccancel()
 		if revokeErr != nil {
 			s.logger.Warn(ctx, "Failed to revoke refresh tokens for inactive account during refresh",
-				"user_id", user.ID.String(),
+				"user_id", user.ID,
 				"error", revokeErr.Error(),
 			)
 		}
 		s.logger.Warn(ctx, "Refresh denied: account is not active",
-			"user_id", user.ID.String(),
+			"user_id", user.ID,
 			"is_enabled", user.IsEnabled,
 			"is_locked", user.IsLocked,
 		)
@@ -412,7 +411,7 @@ func (s *TokenService) RefreshTokenPair(
 		ccancel()
 		if revokeErr != nil {
 			s.logger.Warn(ctx, "Failed to revoke rotated refresh token after access token error",
-				"token_id", tokenID.String(),
+				"token_id", tokenID,
 				"error", revokeErr.Error(),
 			)
 		}
@@ -420,8 +419,8 @@ func (s *TokenService) RefreshTokenPair(
 	}
 
 	s.logger.Info(ctx, "Refresh token rotated successfully",
-		"user_id", user.ID.String(),
-		"token_id", tokenID.String(),
+		"user_id", user.ID,
+		"token_id", tokenID,
 	)
 
 	return &model.TokenPairResponse{
@@ -499,7 +498,7 @@ func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString strin
 //	if err != nil {
 //	    return fmt.Errorf("failed to revoke all tokens: %w", err)
 //	}
-func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID uuid.UUID) error {
+func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID string) error {
 	s.logger.Info(ctx, "Revoking all refresh tokens for user", "user_id", userID)
 
 	if err := s.repo.DeleteByUserID(ctx, userID); err != nil {

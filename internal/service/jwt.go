@@ -111,7 +111,7 @@ func NewJWTService(
 //	// Return token to client
 func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
 	s.logger.Info(context.Background(), "Generating access token",
-		"user_id", user.ID.String(),
+		"user_id", user.ID,
 		"email", maskEmail(user.Email),
 		"tenant_id", user.TenantID,
 	)
@@ -127,7 +127,7 @@ func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
 		TokenVersion: user.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        uuid.Must(uuid.NewV7()).String(), // jti: unique per token, for log correlation / future denylist
-			Subject:   user.ID.String(),
+			Subject:   user.ID,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 		},
@@ -147,7 +147,7 @@ func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
 	}
 
 	s.logger.Info(context.Background(), "Access token generated successfully",
-		"user_id", user.ID.String(),
+		"user_id", user.ID,
 		"expires_at", expiresAt.Format(time.RFC3339),
 	)
 

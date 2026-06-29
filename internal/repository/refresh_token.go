@@ -16,10 +16,10 @@ import (
 
 // RefreshToken represents a stored refresh token for session management
 type RefreshToken struct {
-	ID         uuid.UUID  `json:"id" db:"id"`
-	UserID     uuid.UUID  `json:"user_id" db:"user_id"`
+	ID         string     `json:"id" db:"id"`
+	UserID     string     `json:"user_id" db:"user_id"`
 	TokenHash  string     `json:"-" db:"token_hash"`        // HMAC hash, never exposed
-	FamilyID   uuid.UUID  `json:"family_id" db:"family_id"` // Lineage of one login; rotated tokens share it
+	FamilyID   string     `json:"family_id" db:"family_id"` // Lineage of one login; rotated tokens share it
 	IPAddress  *string    `json:"ip_address,omitempty" db:"ip_address"`
 	UserAgent  *string    `json:"user_agent,omitempty" db:"user_agent"`
 	DeviceName *string    `json:"device_name,omitempty" db:"device_name"`
@@ -31,11 +31,11 @@ type RefreshToken struct {
 
 // CreateRefreshTokenRequest represents the parameters for creating a new refresh token
 type CreateRefreshTokenRequest struct {
-	UserID    uuid.UUID
+	UserID    string
 	TokenHash string // HMAC hash of the plaintext token
-	// FamilyID ties a rotated token to its lineage. Leave as uuid.Nil for a fresh
-	// login (a new family is generated); set it when rotating an existing token.
-	FamilyID   uuid.UUID
+	// FamilyID ties a rotated token to its lineage. Leave it empty ("" — the zero
+	// value) for a fresh login (a new family is generated); set it when rotating.
+	FamilyID   string
 	IPAddress  *string
 	UserAgent  *string
 	DeviceName *string
@@ -58,19 +58,21 @@ type CreateRefreshTokenRequest struct {
 // ============================================================================
 // CreateRefreshToken - Stores a new refresh token with session metadata
 // ============================================================================
-func (r *Repository) CreateRefreshToken(ctx context.Context, req CreateRefreshTokenRequest) (uuid.UUID, error) {
-	tokenID, err := uuid.NewV7()
+func (r *Repository) CreateRefreshToken(ctx context.Context, req CreateRefreshTokenRequest) (string, error) {
+	gen, err := uuid.NewV7()
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("could not generate ID for refresh token: %w", err)
+		return "", fmt.Errorf("could not generate ID for refresh token: %w", err)
 	}
+	tokenID := gen.String()
 
 	// A fresh login starts a new token family; a rotation passes the existing one.
 	familyID := req.FamilyID
-	if familyID == uuid.Nil {
-		familyID, err = uuid.NewV7()
+	if familyID == "" {
+		genFam, err := uuid.NewV7()
 		if err != nil {
-			return uuid.Nil, fmt.Errorf("could not generate family ID for refresh token: %w", err)
+			return "", fmt.Errorf("could not generate family ID for refresh token: %w", err)
 		}
+		familyID = genFam.String()
 	}
 
 	query := `
@@ -95,7 +97,7 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, req CreateRefreshTo
 		now,
 	)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to create refresh token: %w", err)
+		return "", fmt.Errorf("failed to create refresh token: %w", err)
 	}
 
 	return tokenID, nil
@@ -104,10 +106,10 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, req CreateRefreshTo
 // ============================================================================
 // RotateRefreshToken - Atomically consumes one refresh token and stores a new one
 // ============================================================================
-func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, uuid.UUID, error) {
+func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, string, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, uuid.Nil, fmt.Errorf("failed to begin refresh token rotation: %w", err)
+		return nil, "", fmt.Errorf("failed to begin refresh token rotation: %w", err)
 	}
 
 	committed := false
@@ -126,14 +128,14 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 		FOR UPDATE
 	`
 
-	var userID, familyID uuid.UUID
+	var userID, familyID string
 	var revokedAt *time.Time
 	var expiresAt time.Time
 	if err := tx.QueryRowContext(ctx, r.q(lookupQuery), oldTokenHash).Scan(&userID, &familyID, &revokedAt, &expiresAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, uuid.Nil, fmt.Errorf("refresh token not found: %w", model.ErrInvalidRefreshToken)
+			return nil, "", fmt.Errorf("refresh token not found: %w", model.ErrInvalidRefreshToken)
 		}
-		return nil, uuid.Nil, fmt.Errorf("failed to look up refresh token: %w", err)
+		return nil, "", fmt.Errorf("failed to look up refresh token: %w", err)
 	}
 
 	// Reuse/theft: an already-consumed token is being presented again. Revoke the
@@ -149,23 +151,23 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 			SET revoked_at = $1
 			WHERE family_id = $2 AND revoked_at IS NULL
 		`), now, familyID); err != nil {
-			return nil, uuid.Nil, fmt.Errorf("failed to revoke reused token family: %w", err)
+			return nil, "", fmt.Errorf("failed to revoke reused token family: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users
 			SET token_version = token_version + 1, updated_at = $1
 			WHERE id = $2
 		`), now, userID); err != nil {
-			return nil, uuid.Nil, fmt.Errorf("failed to bump token version on reuse: %w", err)
+			return nil, "", fmt.Errorf("failed to bump token version on reuse: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
-			return nil, uuid.Nil, fmt.Errorf("failed to commit token family revocation: %w", err)
+			return nil, "", fmt.Errorf("failed to commit token family revocation: %w", err)
 		}
 		committed = true
 		// Return a typed error carrying the user/family so the service layer can log
 		// and meter the theft event; it unwraps to model.ErrRefreshTokenReuse so
 		// errors.Is callers and sanitizeError keep working unchanged.
-		return nil, uuid.Nil, &model.RefreshTokenReuseError{UserID: userID, FamilyID: familyID}
+		return nil, "", &model.RefreshTokenReuseError{UserID: userID, FamilyID: familyID}
 	}
 
 	now := time.Now()
@@ -176,24 +178,25 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 	// reserved for genuinely consumed/rotated tokens). The deferred rollback
 	// releases the row lock with no changes; DeleteExpired removes the row.
 	if now.After(expiresAt) {
-		return nil, uuid.Nil, fmt.Errorf("refresh token expired: %w", model.ErrInvalidRefreshToken)
+		return nil, "", fmt.Errorf("refresh token expired: %w", model.ErrInvalidRefreshToken)
 	}
 
 	// Consume (soft-revoke) the presented token. It is retained, not deleted, so a
 	// later replay is detectable until the row is cleaned up after expiry.
 	if _, err := tx.ExecContext(ctx, r.q(`UPDATE {{schema}}.refresh_tokens SET revoked_at = $1 WHERE token_hash = $2`), now, oldTokenHash); err != nil {
-		return nil, uuid.Nil, fmt.Errorf("failed to consume refresh token: %w", err)
+		return nil, "", fmt.Errorf("failed to consume refresh token: %w", err)
 	}
 
 	user, err := scanUser(tx.QueryRowContext(ctx, r.q(`SELECT `+userColumns+` FROM {{schema}}.users WHERE id = $1`), userID))
 	if err != nil {
-		return nil, uuid.Nil, fmt.Errorf("failed to get user for refresh token: %w", err)
+		return nil, "", fmt.Errorf("failed to get user for refresh token: %w", err)
 	}
 
-	tokenID, err := uuid.NewV7()
+	gen, err := uuid.NewV7()
 	if err != nil {
-		return nil, uuid.Nil, fmt.Errorf("could not generate ID for refresh token: %w", err)
+		return nil, "", fmt.Errorf("could not generate ID for refresh token: %w", err)
 	}
+	tokenID := gen.String()
 
 	insertQuery := `
 		INSERT INTO {{schema}}.refresh_tokens (
@@ -215,11 +218,11 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 		req.ExpiresAt,
 		now,
 	); err != nil {
-		return nil, uuid.Nil, fmt.Errorf("failed to create rotated refresh token: %w", err)
+		return nil, "", fmt.Errorf("failed to create rotated refresh token: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, uuid.Nil, fmt.Errorf("failed to commit refresh token rotation: %w", err)
+		return nil, "", fmt.Errorf("failed to commit refresh token rotation: %w", err)
 	}
 	committed = true
 
@@ -292,7 +295,7 @@ func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*Ref
 // Scoped by user_id only (refresh_tokens has no tenant column). Callers MUST
 // tenant-authorize the userID before calling.
 // ============================================================================
-func (r *Repository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*RefreshToken, error) {
+func (r *Repository) GetByUserID(ctx context.Context, userID string) ([]*RefreshToken, error) {
 	query := `
 		SELECT
 			id, user_id, token_hash, ip_address, user_agent, device_name,
@@ -352,7 +355,7 @@ func (r *Repository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*Refr
 // UpdateLastUsed - Updates the last_used_at timestamp for a refresh token
 // This is typically called asynchronously to avoid blocking token validation
 // ============================================================================
-func (r *Repository) UpdateLastUsed(ctx context.Context, tokenID uuid.UUID) error {
+func (r *Repository) UpdateLastUsed(ctx context.Context, tokenID string) error {
 	query := `
 		UPDATE {{schema}}.refresh_tokens
 		SET last_used_at = $1
@@ -419,7 +422,7 @@ func (r *Repository) RevokeByTokenHash(ctx context.Context, tokenHash string) er
 // Scoped by user_id only (refresh_tokens has no tenant column). Callers MUST
 // tenant-authorize the userID before calling.
 // ============================================================================
-func (r *Repository) DeleteByUserID(ctx context.Context, userID uuid.UUID) error {
+func (r *Repository) DeleteByUserID(ctx context.Context, userID string) error {
 	query := `
 		DELETE FROM {{schema}}.refresh_tokens
 		WHERE user_id = $1

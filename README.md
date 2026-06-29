@@ -11,7 +11,7 @@ A Go library for multi-tenant identity and authentication management with suppor
 - **API Key Management**: Secure API key generation and validation with HMAC-SHA256 hashing
 - **Invitation System**: Invitation-based user onboarding with secure access codes
 - **OTP Verification**: One-Time Password generation and email verification
-- **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 identifiers
+- **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 string identifiers
 - **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`RefreshToken`/OTP generation
 - **Flexible Logging & Metrics**: Dependency-injected, context-aware `Logger` and an optional `Metrics` counter sink
 - **Health Checks**: `AuthKit.Ping` and fail-fast `Config.VerifyConnectivity`
@@ -173,7 +173,7 @@ apiKeyService := identity.APIKeyService()
 expiresIn := 90 * 24 * time.Hour // Optional: expires in 90 days (nil = never)
 response, err := apiKeyService.Create(ctx, model.CreateAPIKeyRequest{
     TenantID:  "acme.com",
-    CreatedBy: adminUserID, // uuid.UUID of the admin (FK to users.id)
+    CreatedBy: adminUserID, // string user id (uuid7) of the admin (FK to users.id)
     Name:      "Production SDK Key",
     ExpiresIn: &expiresIn, // Optional
 })
@@ -809,7 +809,7 @@ expiresIn := 7 * 24 * time.Hour // 7 days
 
 invitation, err := invitationService.Create(ctx, model.CreateInvitationRequest{
     TenantID:  "acme.com",
-    CreatedBy: adminUserID,        // uuid.UUID of the admin (FK to users.id)
+    CreatedBy: adminUserID,        // string user id (uuid7) of the admin (FK to users.id)
     Email:     "user@acme.com",    // Target email address
     Roles:     []string{"Member"}, // Validated by your app layer
     MaxUses:   &maxUses,           // Optional (nil = default 1)
@@ -1018,7 +1018,7 @@ fmt.Printf("Deleted %d expired invitations\n", count)
 
 ```go
 // Step 1: Admin creates invitation
-func AdminCreateInvitation(ctx context.Context, tenantID string, adminUserID uuid.UUID, inviteeEmail string) (string, error) {
+func AdminCreateInvitation(ctx context.Context, tenantID string, adminUserID string, inviteeEmail string) (string, error) {
     invitationService := identity.InvitationService()
 
     // Optional: enforce the tenant's allowed_domains for invited users. The
@@ -1482,17 +1482,25 @@ APIKeyConfig: authkit.APIKeyConfig{
 
 ### UUID v7
 
-The library uses UUID v7 for all identifiers:
+The library uses UUID v7 for all identifiers, minted in Go and represented as
+36-char strings:
 
 - Time-ordered for better database indexing
 - Chronologically sortable
 - Cryptographically secure
 
+The public Go surface uses `string` (not `uuid.UUID`) for every id — user ids, key
+ids, token/family ids — so callers don't need a uuid package to interoperate. The DB
+columns are `varchar(36)` (no SQL-side UUID type or generator); ids are still minted
+with `uuid.NewV7()` and stored/returned in their canonical 36-char string form:
+
 ```go
 import "github.com/google/uuid"
 
-// Used internally for all IDs
-keyID, err := uuid.NewV7()
+// Minted internally for all IDs, then used as the 36-char string form.
+id, err := uuid.NewV7()
+if err != nil { /* handle */ }
+keyID := id.String() // e.g. "0190bdf2-...": a varchar(36) value in the DB
 ```
 
 ## Architecture

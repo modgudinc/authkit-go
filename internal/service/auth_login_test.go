@@ -47,7 +47,7 @@ func (f *fakeAuthRepository) GetByEmailFromPrimary(ctx context.Context, email, t
 	return f.GetByEmail(ctx, email, tenantID)
 }
 
-func (f *fakeAuthRepository) GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
+func (f *fakeAuthRepository) GetByID(ctx context.Context, userID string, tenantID string) (*model.User, error) {
 	if f.getByIDErr != nil {
 		return nil, f.getByIDErr
 	}
@@ -57,18 +57,18 @@ func (f *fakeAuthRepository) GetByID(ctx context.Context, userID uuid.UUID, tena
 // GetByIDFromPrimary mirrors GetByID for the fake: the primary/replica split is a
 // repository concern, so the in-memory fake returns the same user from both. It
 // records that it was called so a test can assert the security gate uses it.
-func (f *fakeAuthRepository) GetByIDFromPrimary(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error) {
+func (f *fakeAuthRepository) GetByIDFromPrimary(ctx context.Context, userID string, tenantID string) (*model.User, error) {
 	f.getByIDFromPrimaryCalled = true
 	return f.GetByID(ctx, userID, tenantID)
 }
 
-func (f *fakeAuthRepository) Lock(ctx context.Context, userID uuid.UUID, lockedUntil *time.Time) error {
+func (f *fakeAuthRepository) Lock(ctx context.Context, userID string, lockedUntil *time.Time) error {
 	f.lockCalled = true
 	f.lockedUntilPassed = lockedUntil
 	return nil
 }
 
-func (f *fakeAuthRepository) UnlockByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (f *fakeAuthRepository) UnlockByTenant(ctx context.Context, userID string, tenantID string) error {
 	f.unlockCalled = true
 	if f.user != nil {
 		f.user.IsLocked = false
@@ -77,7 +77,7 @@ func (f *fakeAuthRepository) UnlockByTenant(ctx context.Context, userID uuid.UUI
 	return nil
 }
 
-func (f *fakeAuthRepository) RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error) {
+func (f *fakeAuthRepository) RegisterFailedLogin(ctx context.Context, userID string, maxAttempts int, lockDuration time.Duration) (int, bool, error) {
 	count := 0
 	if f.user != nil {
 		f.user.FailedLoginCount++
@@ -97,23 +97,23 @@ func (f *fakeAuthRepository) RegisterFailedLogin(ctx context.Context, userID uui
 	return count, locked, nil
 }
 
-func (f *fakeAuthRepository) UpdateLastLoginByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (f *fakeAuthRepository) UpdateLastLoginByTenant(ctx context.Context, userID string, tenantID string) error {
 	f.updateLastLogin++
 	return nil
 }
 
-func (f *fakeAuthRepository) VerifyPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID string) (string, error) {
+func (f *fakeAuthRepository) VerifyPasswordByTenant(ctx context.Context, userID string, tenantID string) (string, error) {
 	if f.user == nil {
 		return "", model.ErrNotFound
 	}
 	return f.user.PasswordHash, nil
 }
 
-func (f *fakeAuthRepository) SetPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error {
+func (f *fakeAuthRepository) SetPasswordByTenant(ctx context.Context, userID string, tenantID, hashedPassword string) error {
 	return nil
 }
 
-func (f *fakeAuthRepository) SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error {
+func (f *fakeAuthRepository) SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID string, tenantID, hashedPassword string) error {
 	if f.user != nil {
 		f.user.PasswordHash = hashedPassword
 		f.user.TokenVersion++
@@ -121,7 +121,7 @@ func (f *fakeAuthRepository) SetPasswordAndBumpTokenVersionByTenant(ctx context.
 	return nil
 }
 
-func (f *fakeAuthRepository) IncrementTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error {
+func (f *fakeAuthRepository) IncrementTokenVersionByTenant(ctx context.Context, userID string, tenantID string) error {
 	return nil
 }
 
@@ -145,7 +145,7 @@ func makeUser(t *testing.T, password string) *model.User {
 		t.Fatalf("hash password: %v", err)
 	}
 	return &model.User{
-		ID:           uuid.Must(uuid.NewV7()),
+		ID:           uuid.Must(uuid.NewV7()).String(),
 		Email:        "user@acme.test",
 		PasswordHash: hash,
 		TenantID:     "acme.test",

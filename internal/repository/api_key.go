@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -22,7 +21,7 @@ type InsertAPIKeyParams struct {
 	KeyHash   string
 	TenantID  string
 	Name      string
-	CreatedBy uuid.UUID
+	CreatedBy string
 	ExpiresAt *time.Time
 }
 

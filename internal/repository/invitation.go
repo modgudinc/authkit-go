@@ -47,7 +47,7 @@ const uniqueViolation = "23505"
 type InsertInvitationParams struct {
 	Code      string
 	TenantID  string
-	CreatedBy uuid.UUID
+	CreatedBy string
 	Roles     []string
 	Email     string
 	ExpiresAt time.Time
@@ -186,10 +186,10 @@ func (r *Repository) IncrementUseCount(ctx context.Context, code string) error {
 // Returns the new user's ID. The created user's email, tenant, and roles are
 // taken from the invitation; only displayName and passwordHash come from the caller.
 // ============================================================================
-func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayName, passwordHash string) (uuid.UUID, error) {
+func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayName, passwordHash string) (string, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to begin invitation acceptance: %w", err)
+		return "", fmt.Errorf("failed to begin invitation acceptance: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -211,28 +211,28 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 	`
 	if err := tx.QueryRowContext(ctx, r.q(lookup), code).Scan(&tenantID, &rolesJSON, &invitedEmail, &expiresAt, &maxUses, &currentUses); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return uuid.Nil, fmt.Errorf("invitation not found: %w", model.ErrInvitationInvalid)
+			return "", fmt.Errorf("invitation not found: %w", model.ErrInvitationInvalid)
 		}
-		return uuid.Nil, fmt.Errorf("failed to load invitation: %w", err)
+		return "", fmt.Errorf("failed to load invitation: %w", err)
 	}
 
 	// Validate expiry and remaining uses.
 	if time.Now().After(expiresAt) {
-		return uuid.Nil, fmt.Errorf("invitation has expired: %w", model.ErrInvitationInvalid)
+		return "", fmt.Errorf("invitation has expired: %w", model.ErrInvitationInvalid)
 	}
 	if currentUses >= maxUses {
-		return uuid.Nil, fmt.Errorf("invitation has been fully used: %w", model.ErrInvitationInvalid)
+		return "", fmt.Errorf("invitation has been fully used: %w", model.ErrInvitationInvalid)
 	}
 
 	// Bind the redemption to the invitation's target email.
 	normEmail := strings.ToLower(strings.TrimSpace(email))
 	if !strings.EqualFold(strings.TrimSpace(invitedEmail), normEmail) {
-		return uuid.Nil, fmt.Errorf("email does not match invitation: %w", model.ErrInvitationInvalid)
+		return "", fmt.Errorf("email does not match invitation: %w", model.ErrInvitationInvalid)
 	}
 
 	var roles []string
 	if err := json.Unmarshal(rolesJSON, &roles); err != nil {
-		return uuid.Nil, fmt.Errorf("failed to unmarshal invitation roles: %w", err)
+		return "", fmt.Errorf("failed to unmarshal invitation roles: %w", err)
 	}
 
 	// Consume one use under the max_uses guard (defends against a concurrent race
@@ -243,20 +243,21 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 		WHERE code = $1 AND current_uses < max_uses
 	`), code)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to consume invitation: %w", err)
+		return "", fmt.Errorf("failed to consume invitation: %w", err)
 	}
 	if err := requireRowsAffected(res, fmt.Errorf("invitation has been fully used: %w", model.ErrInvitationInvalid)); err != nil {
-		return uuid.Nil, err
+		return "", err
 	}
 
 	// Create the user with tenant and roles taken from the invitation.
-	userID, err := uuid.NewV7()
+	gen, err := uuid.NewV7()
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("could not generate an id for user: %w", err)
+		return "", fmt.Errorf("could not generate an id for user: %w", err)
 	}
+	userID := gen.String()
 	rolesOut, err := json.Marshal(roles)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to marshal roles: %w", err)
+		return "", fmt.Errorf("failed to marshal roles: %w", err)
 	}
 	now := time.Now()
 	insertUser := `
@@ -276,13 +277,13 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 		// invitation unconsumed.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
-			return uuid.Nil, fmt.Errorf("user already exists for this tenant: %w", model.ErrUserExists)
+			return "", fmt.Errorf("user already exists for this tenant: %w", model.ErrUserExists)
 		}
-		return uuid.Nil, fmt.Errorf("failed to create user from invitation: %w", err)
+		return "", fmt.Errorf("failed to create user from invitation: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return uuid.Nil, fmt.Errorf("failed to commit invitation acceptance: %w", err)
+		return "", fmt.Errorf("failed to commit invitation acceptance: %w", err)
 	}
 	committed = true
 

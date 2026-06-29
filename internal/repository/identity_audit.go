@@ -54,7 +54,7 @@ type userStatusSnapshot struct {
 
 // readUserStatusForUpdate locks the user row and returns its current status
 // snapshot, or model.ErrNotFound if no matching (id[, tenant]) row exists.
-func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx *sql.Tx, userID uuid.UUID, tenantID *string) (userStatusSnapshot, error) {
+func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx *sql.Tx, userID string, tenantID *string) (userStatusSnapshot, error) {
 	var s userStatusSnapshot
 	var (
 		query string
@@ -87,7 +87,7 @@ func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx *sql.Tx, us
 // is_locked transition between old and current, attributing it to actor. actor is
 // the operation's provenance (admin for explicit admin mutations, system for the
 // automatic failed-login lockout), not something inferred from the row state.
-func (r *Repository) recordStatusChange(ctx context.Context, tx *sql.Tx, userID uuid.UUID, old, current userStatusSnapshot, actor statusChangeActor) error {
+func (r *Repository) recordStatusChange(ctx context.Context, tx *sql.Tx, userID string, old, current userStatusSnapshot, actor statusChangeActor) error {
 	if old.IsEnabled != current.IsEnabled {
 		statusType := "disable"
 		if current.IsEnabled {
@@ -119,11 +119,12 @@ func (r *Repository) recordStatusChange(ctx context.Context, tx *sql.Tx, userID 
 	return nil
 }
 
-func (r *Repository) insertUserStatusChange(ctx context.Context, tx *sql.Tx, userID uuid.UUID, statusType, changedByType string, metadata map[string]any) error {
-	id, err := uuid.NewV7()
+func (r *Repository) insertUserStatusChange(ctx context.Context, tx *sql.Tx, userID string, statusType, changedByType string, metadata map[string]any) error {
+	gen, err := uuid.NewV7()
 	if err != nil {
 		return fmt.Errorf("could not generate id for status change: %w", err)
 	}
+	id := gen.String()
 	metaJSON, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("failed to marshal status change metadata: %w", err)
@@ -141,7 +142,7 @@ func (r *Repository) insertUserStatusChange(ctx context.Context, tx *sql.Tx, use
 // first. It is tenant-scoped via a JOIN to users, so a caller-supplied id from
 // another tenant matches no rows (and a hard-deleted user has none). Reads from the
 // replica (ro): the audit trail is an admin/report read, not a security gate.
-func (r *Repository) ListUserStatusChanges(ctx context.Context, userID uuid.UUID, tenantID string) ([]*model.UserStatusChange, error) {
+func (r *Repository) ListUserStatusChanges(ctx context.Context, userID string, tenantID string) ([]*model.UserStatusChange, error) {
 	query := `
 		SELECT sc.id, sc.user_id, sc.status_type, sc.changed_by, sc.changed_by_type, sc.changed_at, sc.reason, sc.metadata
 		FROM {{schema}}.user_status_changes sc
@@ -161,7 +162,7 @@ func (r *Repository) ListUserStatusChanges(ctx context.Context, userID uuid.UUID
 	for rows.Next() {
 		var (
 			c         model.UserStatusChange
-			changedBy uuid.NullUUID
+			changedBy sql.NullString
 			reason    *string
 			metaJSON  []byte
 		)
@@ -169,7 +170,7 @@ func (r *Repository) ListUserStatusChanges(ctx context.Context, userID uuid.UUID
 			return nil, fmt.Errorf("failed to scan user status change row: %w", err)
 		}
 		if changedBy.Valid {
-			id := changedBy.UUID
+			id := changedBy.String
 			c.ChangedBy = &id
 		}
 		c.Reason = reason
@@ -207,7 +208,7 @@ func (r *Repository) CleanupStatusChanges(ctx context.Context, cutoff time.Time)
 // tenant), calls apply (which performs the UPDATE and returns the resulting
 // snapshot), records any transition attributed to actor, and commits. All of its
 // callers are explicit admin mutations, so they pass actorAdmin.
-func (r *Repository) withUserStatusAudit(ctx context.Context, userID uuid.UUID, tenantID *string, actor statusChangeActor, apply func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error)) error {
+func (r *Repository) withUserStatusAudit(ctx context.Context, userID string, tenantID *string, actor statusChangeActor, apply func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error)) error {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin user status update: %w", err)

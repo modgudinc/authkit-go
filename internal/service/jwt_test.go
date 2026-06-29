@@ -16,7 +16,7 @@ import (
 )
 
 func TestJWTServiceGenerateAndValidateAccessToken(t *testing.T) {
-	userID := uuid.Must(uuid.NewV7())
+	userID := uuid.Must(uuid.NewV7()).String()
 	service := NewJWTService("access-secret", time.Minute, time.Hour, nil)
 
 	token, err := service.GenerateAccessToken(&model.User{
@@ -46,7 +46,7 @@ func TestJWTServiceGenerateAndValidateAccessToken(t *testing.T) {
 }
 
 func TestJWTServiceRejectsWrongSecretAndExpiredToken(t *testing.T) {
-	userID := uuid.Must(uuid.NewV7())
+	userID := uuid.Must(uuid.NewV7()).String()
 	service := NewJWTService("access-secret", -time.Minute, time.Hour, nil)
 	token, err := service.GenerateAccessToken(&model.User{ID: userID, Email: "user@example.com", TenantID: "tenant-a"})
 	if err != nil {
@@ -101,7 +101,7 @@ func TestJWTServiceGenerateRefreshToken(t *testing.T) {
 func TestJWTServiceRejectsAlgorithmConfusion(t *testing.T) {
 	service := NewJWTService("access-secret", time.Minute, time.Hour, nil)
 	claims := model.JWTClaims{
-		UserID:   uuid.Must(uuid.NewV7()),
+		UserID:   uuid.Must(uuid.NewV7()).String(),
 		TenantID: "tenant-a",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
@@ -120,7 +120,7 @@ func TestJWTServiceRejectsAlgorithmConfusion(t *testing.T) {
 }
 
 func TestJWTServiceIssuerAudience(t *testing.T) {
-	user := &model.User{ID: uuid.Must(uuid.NewV7()), Email: "u@x.com", TenantID: "t"}
+	user := &model.User{ID: uuid.Must(uuid.NewV7()).String(), Email: "u@x.com", TenantID: "t"}
 
 	issued := NewJWTService("access-secret", time.Minute, time.Hour, nil,
 		WithIssuer("authkit"), WithAudience("api"))
@@ -153,12 +153,51 @@ func TestJWTServiceIssuerAudience(t *testing.T) {
 	}
 }
 
+// TestJWTServiceIssuerAudienceMismatches rounds out TestJWTServiceIssuerAudience:
+// an audience mismatch and a missing issuer (the inverses of the cases there), and
+// that every iss/aud failure surfaces the model.ErrInvalidToken sentinel so callers
+// can errors.Is them like any other validation failure.
+func TestJWTServiceIssuerAudienceMismatches(t *testing.T) {
+	user := &model.User{ID: uuid.Must(uuid.NewV7()).String(), Email: "u@x.com", TenantID: "t"}
+
+	// Token minted with iss="authkit", aud="api".
+	issued := NewJWTService("access-secret", time.Minute, time.Hour, nil, WithIssuer("authkit"), WithAudience("api"))
+	token, err := issued.GenerateAccessToken(user)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+
+	// Audience mismatch: same issuer, different required audience.
+	wrongAud := NewJWTService("access-secret", time.Minute, time.Hour, nil, WithIssuer("authkit"), WithAudience("other"))
+	if _, err := wrongAud.ValidateAccessToken(token); !errors.Is(err, model.ErrInvalidToken) {
+		t.Fatalf("audience mismatch: expected ErrInvalidToken, got %v", err)
+	}
+
+	// Missing issuer: token carries no iss, validator requires one.
+	audOnly := NewJWTService("access-secret", time.Minute, time.Hour, nil, WithAudience("api"))
+	audOnlyToken, err := audOnly.GenerateAccessToken(user)
+	if err != nil {
+		t.Fatalf("generate aud-only token: %v", err)
+	}
+	requireIss := NewJWTService("access-secret", time.Minute, time.Hour, nil, WithIssuer("authkit"), WithAudience("api"))
+	if _, err := requireIss.ValidateAccessToken(audOnlyToken); !errors.Is(err, model.ErrInvalidToken) {
+		t.Fatalf("missing issuer: expected ErrInvalidToken, got %v", err)
+	}
+
+	// Issuer mismatch surfaces the sentinel too (TestJWTServiceIssuerAudience only
+	// checks err != nil for this case).
+	wrongIss := NewJWTService("access-secret", time.Minute, time.Hour, nil, WithIssuer("nope"), WithAudience("api"))
+	if _, err := wrongIss.ValidateAccessToken(token); !errors.Is(err, model.ErrInvalidToken) {
+		t.Fatalf("issuer mismatch: expected ErrInvalidToken, got %v", err)
+	}
+}
+
 func TestJWTServiceRequiresExpiration(t *testing.T) {
 	service := NewJWTService("access-secret", time.Minute, time.Hour, nil)
 
 	// Hand-craft a token with no exp claim, signed with the right secret.
 	claims := model.JWTClaims{
-		UserID:   uuid.Must(uuid.NewV7()),
+		UserID:   uuid.Must(uuid.NewV7()).String(),
 		TenantID: "t",
 	}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("access-secret"))
@@ -189,7 +228,7 @@ func TestJWTServiceRejectsMalformedToken(t *testing.T) {
 // the same way it can with AuthService.ValidateJWT.
 func TestJWTServiceWrapsInvalidTokenSentinel(t *testing.T) {
 	valid := NewJWTService("access-secret", time.Minute, time.Hour, nil)
-	user := &model.User{ID: uuid.Must(uuid.NewV7()), Email: "u@x.com", TenantID: "t"}
+	user := &model.User{ID: uuid.Must(uuid.NewV7()).String(), Email: "u@x.com", TenantID: "t"}
 
 	// Malformed token.
 	if _, err := valid.ValidateAccessToken("not-a-jwt"); !errors.Is(err, model.ErrInvalidToken) {
