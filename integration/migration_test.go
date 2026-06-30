@@ -157,6 +157,9 @@ func TestDecoupledSchemaStructure(t *testing.T) {
 			}
 			cols = append(cols, c)
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate pk cols: %v", err)
+		}
 		return cols
 	}
 	if got := pkCols("memberships"); len(got) != 2 || got[0] != "user_id" || got[1] != "tenant_id" {
