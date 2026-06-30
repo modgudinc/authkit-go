@@ -1,8 +1,6 @@
 # authkit-go v0.1.0
 
-First public release of **authkit-go** — a multi-tenant identity and authentication library for Go, backed by PostgreSQL.
-
-It gives you the building blocks for auth — users, tenants, JWT access tokens with rotating refresh tokens, API keys, OTP verification, invitations, and encrypted provider secrets — and leaves HTTP routing, authorization policy, and delivery (email/SMS) to your application.
+First release of **authkit-go** on its **decoupled-identity** model — a Go identity and authentication library backed by PostgreSQL. It gives you global user identities, `user ↔ tenant` memberships, JWT access tokens with rotating refresh tokens, API keys, OTP verification, invitations, and encrypted provider secrets — and leaves HTTP routing, authorization policy, and delivery (email/SMS) to your application.
 
 ```bash
 go get github.com/modgudinc/authkit-go@v0.1.0
@@ -10,33 +8,50 @@ go get github.com/modgudinc/authkit-go@v0.1.0
 
 > **Pre-1.0:** the public API may change in minor (`0.x`) releases. Pin a version.
 
+> **Version reset.** This `v0.1.0` is a clean slate, **not** a continuation of the earlier `v0.1.0`–`v0.14.0` line — those pre-release tags have been deleted. authkit had no production identity data, so the decoupled model ships as a fresh start with the `000001` schema edited in place (no data migration).
+
+## The model: global identities + tenant memberships
+
+A **user is a global identity** — a globally-unique, case-insensitive email plus a password, with **no** tenant and **no** roles. A **membership** is a `(user, tenant)` row that grants the identity access to one workspace with a set of **opaque role strings**: authkit stores them but never interprets them — **authkit owns the membership graph; your application owns the role policy.**
+
+A login authenticates the identity and opens one refresh-token **identity session** shared across the user's workspaces; from it you mint **workspace-scoped access tokens** (each scoped to one active membership's tenant + roles). Switching workspace mints a new token from the same session — no re-login. This mirrors WorkOS / Auth0 Organizations / Stytch B2B.
+
 ## Highlights
 
-- **Multi-tenant by design** — users, API keys, invitations, OTPs, and secrets are tenant-scoped; lookups and mutations are constrained to the owning tenant to prevent cross-tenant access (IDOR).
-- **JWT + rotating refresh tokens** — short-lived HS256 access tokens plus single-use refresh tokens stored as HMAC-SHA256 hashes, with **refresh-token reuse/theft detection** (a replayed token revokes the whole token family).
-- **API keys** — `sk_live_`-prefixed keys, stored only as HMAC hashes, with expiry and tenant-scoped validation/revocation.
-- **OTP verification** — 6-digit, `crypto/rand`-generated codes, scoped to `(tenant, email, purpose)`, with a per-code failed-attempt lockout and constant-time comparison.
-- **Invitations** — atomic `AcceptInvitation` that validates, consumes, and creates the user in one transaction, bound to the invitation's email and roles.
+- **Global identities + memberships** — `UserService` manages global users; the new `MembershipService` manages the `user ↔ tenant` graph (grant/revoke, roles, member and workspace lists). One person can belong to many workspaces with a single account and password.
+- **Workspace-scoped tokens with dual versioning** — access-token JWTs carry both an identity `token_version` and a per-membership `membership_token_version`. A credential event (password change, disable, logout-all) invalidates **every** workspace's tokens; a role change or membership revoke invalidates **only that workspace's** tokens.
+- **Flexible login** — `Login(email, password, tenantID)` for a known workspace, `LoginByEmail` when it isn't (returns the user's memberships to choose from), and `MintWorkspaceToken` to select/switch workspace from an existing session.
+- **JWT + rotating refresh tokens** — short-lived HS256 access tokens plus single-use refresh tokens stored as HMAC-SHA256 hashes, with **refresh-token reuse/theft detection** (a replayed token revokes the whole family and bumps the identity token version).
+- **Invitations that reuse identities** — `Accept` redeems atomically and reuses the invitee's existing global identity (or creates one), then grants the invited membership — invited users don't get a second account/password.
+- **API keys** — `sk_live_`-prefixed keys, stored only as HMAC hashes, tenant-scoped, with expiry and revocation.
+- **OTP verification** — 6-digit, `crypto/rand`-generated codes keyed by `(email, purpose)`, with a per-code failed-attempt lockout and constant-time comparison.
 - **Encrypted secrets** — provider API keys stored with AES-256-GCM (authenticated, random nonce per write).
-- **Ergonomics** — single `New(Config)` constructor with fail-fast validation, an injectable `logger.Logger` (and `logger.NopLogger`), context-first methods, and exported sentinel errors (`authkit.Err*`) for `errors.Is`.
+- **Ergonomics** — single `New(Config)` constructor with fail-fast validation; injectable `logger.Logger`, `metrics.Metrics`, and `ratelimit.RateLimiter`; context-first methods; exported sentinel errors (`authkit.Err*`) for `errors.Is`.
+
+## Breaking changes (relative to the deleted pre-release line)
+
+- `users` is a **global** identity: `tenant_id` and `roles` are removed; email is globally unique (`UNIQUE (lower(email))`). `User`, `CreateUserRequest`, `UpdateUserRequest`, `JWTClaims` (now carries `membership_token_version`), and `LoginResponse` (now carries `Memberships`) change accordingly.
+- `UserService` is identity-level (keyed by user id / email). `Count` and `UpdateRoles` are **removed** — roles move to `MembershipService.UpdateRoles`, member counts to `MembershipService.CountByTenant`.
+- `AuthService.Login` now requires an active membership in `TenantID`; `RefreshToken` takes the target `TenantID`; `LogoutAll(userID)` and `ChangePassword` are identity-level (no tenant); `ValidateJWT` checks the identity **and** membership token version plus membership status.
+- OTP is keyed by `(email, purpose)` — tenant dropped from `OTPGenerateRequest` / `OTPValidateRequest` and `OTPService.Delete`.
+- `InvitationService.Accept` returns `(userID, created, error)`.
 
 ## Security
 
-- Tenant isolation on all per-tenant reads/writes (users, API keys, invitations, OTPs, secrets).
-- Refresh-token rotation is atomic; reuse of a consumed token revokes the family (`ErrRefreshTokenReuse`).
-- OTP brute force is bounded by a per-code attempt lockout, not just generation rate limiting.
-- Login does not leak account existence/state: unknown, disabled, and locked accounts all return a single generic `ErrInvalidCredentials`, with a dummy bcrypt comparison to equalize timing (no username enumeration).
-- Passwords hashed with bcrypt (cost 12 by default); JWT/HMAC secrets must be ≥ 32 bytes.
+- **Decoupled invalidation** — `ValidateJWT` rejects on either an identity or a membership `token_version` mismatch, a suspended/removed membership (`ErrTokenRevoked`), or a disabled/locked account; the revocation/account-status reads use the primary so writes are observed without replica lag.
+- **No account enumeration** — unknown email, disabled, and locked accounts all return a single generic `ErrInvalidCredentials` with a dummy bcrypt comparison to equalize timing. A valid login for a workspace the user is not a member of returns `ErrNoActiveMembership` (an authorization, not authentication, outcome) and never revokes the identity session.
+- **Refresh-token rotation is atomic**; reuse of a consumed token revokes the whole family (`ErrRefreshTokenReuse`) and bumps the identity token version.
+- **OTP brute force is bounded** by a per-code attempt lockout, not just generation rate limiting; codes are stored only as a keyed HMAC-SHA256.
+- Passwords are hashed with bcrypt (cost 12 by default); JWT/HMAC secrets must be ≥ 32 bytes.
 - JWT validation pins `HS256` (blocks `alg:none` / algorithm-confusion), requires an `exp` claim, and allows a small clock-skew leeway; optional `iss`/`aud` enforcement.
-- Disabling, locking, or bumping a user's token version revokes their refresh tokens.
 
 See [SECURITY.md](SECURITY.md) for the disclosure policy, secret-management expectations, and rotation guidance.
 
 ## Requirements
 
-- Go **1.24+**
+- Go **1.25+**
 - PostgreSQL — apply `migrations/000001_identity_schema.up.sql` (copy and replace the `authkit` schema name if you use a custom schema).
-- Two `*sql.DB` handles (read-write and read-only; they may be the same), plus the `github.com/lib/pq` driver.
+- Two `*sql.DB` handles (read-write and read-only; they may be the same), opened with the pgx driver (`_ "github.com/jackc/pgx/v5/stdlib"`).
 
 ## Getting started
 
