@@ -202,9 +202,11 @@ func TestTenantServiceDomainManagement(t *testing.T) {
 	}
 }
 
-// TestUserServiceCRUD covers the core user public surface: create, the tenant-scoped
-// queries (GetByID/GetByEmail/Exists/ExistsActive/GetActiveUserIDByEmail/List/Count),
-// Update, and the soft-Delete (the row stays but is no longer active).
+// TestUserServiceCRUD covers the core user public surface in the decoupled model:
+// create a GLOBAL identity, the identity-keyed queries
+// (GetByID/GetByEmail/Exists/ExistsActive/GetActiveUserIDByEmail/List), Update, and the
+// soft-Delete (the row stays but is no longer active). A tenant's member COUNT is now a
+// membership-graph query (MembershipService.CountByTenant), not UserService.Count.
 func TestUserServiceCRUD(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -219,10 +221,11 @@ func TestUserServiceCRUD(t *testing.T) {
 	repo := repository.New(db, db)
 	authKit := newIntegrationAuthKit(t, db)
 	users := authKit.UserService()
+	memberships := authKit.MembershipService()
 	pw := service.NewPasswordService(4, nil)
 
 	tenantID := "usercrud.test"
-	createTenantAndUser(t, ctx, &repo, tenantID) // tenant + one admin user
+	createTenantAndUser(t, ctx, &repo, tenantID) // tenant + one admin identity + membership
 
 	hash, err := pw.HashPassword("ValidPass1!")
 	if err != nil {
@@ -233,9 +236,7 @@ func TestUserServiceCRUD(t *testing.T) {
 	newID, err := users.Create(ctx, model.CreateUserRequest{
 		Email:        email,
 		PasswordHash: hash,
-		TenantID:     tenantID,
 		DisplayName:  "Member User",
-		Roles:        []string{"Member"},
 	})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -243,15 +244,19 @@ func TestUserServiceCRUD(t *testing.T) {
 	if newID == "" {
 		t.Fatal("expected new user id")
 	}
+	// Grant the new identity a membership so it counts toward the tenant's members.
+	if err := memberships.Add(ctx, model.AddMembershipRequest{UserID: newID, TenantID: tenantID, Roles: []string{"Member"}}); err != nil {
+		t.Fatalf("add membership: %v", err)
+	}
 
-	gotByID, err := users.GetByID(ctx, newID, tenantID)
+	gotByID, err := users.GetByID(ctx, newID)
 	if err != nil {
 		t.Fatalf("get by id: %v", err)
 	}
 	if gotByID.Email != email {
 		t.Fatalf("email = %q, want %q", gotByID.Email, email)
 	}
-	gotByEmail, err := users.GetByEmail(ctx, email, tenantID)
+	gotByEmail, err := users.GetByEmail(ctx, email)
 	if err != nil {
 		t.Fatalf("get by email: %v", err)
 	}
@@ -259,35 +264,37 @@ func TestUserServiceCRUD(t *testing.T) {
 		t.Fatalf("get-by-email id = %q, want %q", gotByEmail.ID, newID)
 	}
 
-	if ok, err := users.Exists(ctx, email, tenantID); err != nil || !ok {
+	if ok, err := users.Exists(ctx, email); err != nil || !ok {
 		t.Fatalf("exists = %v err %v; want true", ok, err)
 	}
-	if ok, err := users.Exists(ctx, "nobody@"+tenantID, tenantID); err != nil || ok {
+	if ok, err := users.Exists(ctx, "nobody@"+tenantID); err != nil || ok {
 		t.Fatalf("exists(nobody) = %v err %v; want false", ok, err)
 	}
-	if ok, err := users.ExistsActive(ctx, email, tenantID); err != nil || !ok {
+	if ok, err := users.ExistsActive(ctx, email); err != nil || !ok {
 		t.Fatalf("exists active = %v err %v; want true", ok, err)
 	}
-	if id, err := users.GetActiveUserIDByEmail(ctx, email, tenantID); err != nil || id != newID {
+	if id, err := users.GetActiveUserIDByEmail(ctx, email); err != nil || id != newID {
 		t.Fatalf("active id = %q err %v; want %q", id, err, newID)
 	}
 
-	list, err := users.List(ctx, tenantID, 0, 0) // limit 0 -> clamped to default
+	// List is a global (cross-tenant) admin listing now.
+	list, err := users.List(ctx, 0, 0) // limit 0 -> clamped to default
 	if err != nil {
 		t.Fatalf("list users: %v", err)
 	}
 	if len(list) < 2 {
-		t.Fatalf("expected >=2 users (admin + member), got %d", len(list))
+		t.Fatalf("expected >=2 identities (admin + member), got %d", len(list))
 	}
-	if n, err := users.Count(ctx, tenantID); err != nil || n < 2 {
-		t.Fatalf("count = %d err %v; want >=2", n, err)
+	// A tenant's member count is the membership graph (admin + member = 2).
+	if n, err := memberships.CountByTenant(ctx, tenantID); err != nil || n < 2 {
+		t.Fatalf("membership count = %d err %v; want >=2", n, err)
 	}
 
 	dn := "Member Renamed"
-	if err := users.Update(ctx, model.UpdateUserRequest{UserID: newID, TenantID: tenantID, DisplayName: &dn}); err != nil {
+	if err := users.Update(ctx, model.UpdateUserRequest{UserID: newID, DisplayName: &dn}); err != nil {
 		t.Fatalf("update user: %v", err)
 	}
-	updated, err := users.GetByID(ctx, newID, tenantID)
+	updated, err := users.GetByID(ctx, newID)
 	if err != nil {
 		t.Fatalf("get after update: %v", err)
 	}
@@ -296,17 +303,17 @@ func TestUserServiceCRUD(t *testing.T) {
 	}
 
 	// Soft delete: the row remains but is disabled and no longer "active".
-	if err := users.Delete(ctx, newID, tenantID); err != nil {
+	if err := users.Delete(ctx, newID); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
-	afterDelete, err := users.GetByID(ctx, newID, tenantID)
+	afterDelete, err := users.GetByID(ctx, newID)
 	if err != nil {
 		t.Fatalf("get after delete: %v", err)
 	}
 	if afterDelete.IsEnabled {
 		t.Fatal("expected user disabled after soft delete")
 	}
-	if ok, err := users.ExistsActive(ctx, email, tenantID); err != nil || ok {
+	if ok, err := users.ExistsActive(ctx, email); err != nil || ok {
 		t.Fatalf("exists active after delete = %v err %v; want false", ok, err)
 	}
 }
@@ -368,12 +375,12 @@ func TestMaintenanceCleanups(t *testing.T) {
 		t.Fatalf("create expired refresh token: %v", err)
 	}
 
-	// Expired verification code.
+	// Expired verification code (keyed by (email, purpose) — no tenant_id column).
 	otpEmail := "otp@" + tenantID
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO authkit.verification_codes (tenant_id, email, code_hash, purpose, expires_at)
-		VALUES ($1, $2, $3, 'signup', NOW() - INTERVAL '1 hour')
-	`, tenantID, otpEmail, strings.Repeat("a", 64)); err != nil {
+		INSERT INTO authkit.verification_codes (email, code_hash, purpose, expires_at)
+		VALUES ($1, $2, 'signup', NOW() - INTERVAL '1 hour')
+	`, otpEmail, strings.Repeat("a", 64)); err != nil {
 		t.Fatalf("insert expired verification code: %v", err)
 	}
 

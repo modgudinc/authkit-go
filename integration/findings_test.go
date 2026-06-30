@@ -19,8 +19,9 @@ import (
 )
 
 // TestCreateUserDuplicateReturnsErrUserExists covers the user-creation half of
-// the duplicate-email finding: a (tenant_id, email) uniqueness conflict must
-// surface model.ErrUserExists, not a raw Postgres unique-violation string.
+// the duplicate-email finding: in the decoupled model email is GLOBALLY unique (a
+// lower(email) conflict), so a second global Create for the same email must surface
+// model.ErrUserExists, not a raw Postgres unique-violation string.
 func TestCreateUserDuplicateReturnsErrUserExists(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -44,20 +45,31 @@ func TestCreateUserDuplicateReturnsErrUserExists(t *testing.T) {
 	_, err = repo.Create(ctx, model.CreateUserRequest{
 		Email:        "dup@dup.test",
 		PasswordHash: hash,
-		TenantID:     tenantID,
 		DisplayName:  "Duplicate",
-		Roles:        []string{"Member"},
 	})
 	if !errors.Is(err, model.ErrUserExists) {
 		t.Fatalf("expected ErrUserExists on duplicate create, got %v", err)
 	}
+
+	// Case-insensitive: a different-cased spelling of the same email is the same
+	// global identity and likewise conflicts (uniqueness is on lower(email)).
+	if _, err := repo.Create(ctx, model.CreateUserRequest{
+		Email:        "DUP@DUP.TEST",
+		PasswordHash: hash,
+		DisplayName:  "Duplicate Cased",
+	}); !errors.Is(err, model.ErrUserExists) {
+		t.Fatalf("expected ErrUserExists on case-insensitive duplicate, got %v", err)
+	}
 }
 
-// TestAcceptInvitationDuplicateUserReturnsErrUserExists covers the invitation
-// half of the duplicate-email finding: accepting an invitation whose target
-// email already has an account must return model.ErrUserExists AND leave the
-// invitation unconsumed (transaction rolls back).
-func TestAcceptInvitationDuplicateUserReturnsErrUserExists(t *testing.T) {
+// TestAcceptInvitationReusesExistingIdentity is the decoupled-model conversion of the
+// old "duplicate user on accept -> ErrUserExists" finding. That contract is GONE: with
+// a global identity, accepting an invitation whose target email already has an account
+// is NOT an error — the existing identity is REUSED (no second account/password) and
+// simply granted the invited membership. This asserts the new behavior: Accept returns
+// (existingUserID, created=false, nil), grants an active membership in the invitation's
+// tenant with the invited roles, and consumes the single use.
+func TestAcceptInvitationReusesExistingIdentity(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 	defer func() {
@@ -70,17 +82,29 @@ func TestAcceptInvitationDuplicateUserReturnsErrUserExists(t *testing.T) {
 
 	repo := repository.New(db, db)
 	pw := service.NewPasswordService(4, nil)
-	tenantID := "invdup.test"
-	ownerID := createTenantAndUserWithPassword(t, ctx, &repo, tenantID, "owner@invdup.test", "ValidPass1!", pw)
+	ownerTenant := "invdup.test"
+	ownerID := createTenantAndUserWithPassword(t, ctx, &repo, ownerTenant, "owner@invdup.test", "ValidPass1!", pw)
 
-	// An account already exists for the email the invitation will target.
+	// A GLOBAL identity already exists for the email the invitation will target (it is
+	// a member of ownerTenant, created by the harness).
 	email := "existing@invdup.test"
-	createUserWithPassword(t, ctx, &repo, tenantID, email, "ValidPass1!", pw)
+	existingID := createUserWithPassword(t, ctx, &repo, ownerTenant, email, "ValidPass1!", pw)
+
+	// The invitation grants access to a DIFFERENT tenant, so the reuse adds a second
+	// membership over the same identity (the headline decoupled behavior).
+	inviteTenant := "invtarget.test"
+	if err := repo.CreateTenant(ctx, model.CreateTenantRequest{
+		TenantID:       inviteTenant,
+		Name:           inviteTenant,
+		AllowedDomains: []string{inviteTenant},
+	}); err != nil {
+		t.Fatalf("create invite tenant: %v", err)
+	}
 
 	code := "DUPINVITE00000000001"
 	if err := repo.CreateInvitation(ctx, repository.InsertInvitationParams{
 		Code:      code,
-		TenantID:  tenantID,
+		TenantID:  inviteTenant,
 		CreatedBy: ownerID,
 		Roles:     []string{"Member"},
 		Email:     email,
@@ -90,18 +114,33 @@ func TestAcceptInvitationDuplicateUserReturnsErrUserExists(t *testing.T) {
 		t.Fatalf("create invitation: %v", err)
 	}
 
-	_, err := repo.AcceptInvitation(ctx, code, email, "Existing User", "hashed-password")
-	if !errors.Is(err, model.ErrUserExists) {
-		t.Fatalf("expected ErrUserExists accepting invitation for existing email, got %v", err)
+	gotID, created, err := repo.AcceptInvitation(ctx, code, email, "Existing User", "hashed-password")
+	if err != nil {
+		t.Fatalf("accept invitation for existing email should reuse the identity, got %v", err)
+	}
+	if created {
+		t.Fatal("expected created=false: the existing global identity must be reused, not recreated")
+	}
+	if gotID != existingID {
+		t.Fatalf("accept reused wrong identity: got %q, want existing %q", gotID, existingID)
 	}
 
-	// The failed acceptance must not consume the single-use invitation.
+	// The reuse grants an active membership in the invitation's tenant with its roles.
+	membership, err := repo.GetMembership(ctx, existingID, inviteTenant)
+	if err != nil {
+		t.Fatalf("get granted membership: %v", err)
+	}
+	if !membership.IsActive() || len(membership.Roles) != 1 || membership.Roles[0] != "Member" {
+		t.Fatalf("granted membership unexpected: %+v", membership)
+	}
+
+	// The single use IS consumed (the accept succeeded).
 	inv, err := repo.GetInvitation(ctx, code)
 	if err != nil {
-		t.Fatalf("get invitation after failed accept: %v", err)
+		t.Fatalf("get invitation after accept: %v", err)
 	}
-	if inv.CurrentUses != 0 {
-		t.Fatalf("invitation should not be consumed on ErrUserExists, current_uses=%d", inv.CurrentUses)
+	if inv.CurrentUses != 1 {
+		t.Fatalf("invitation should be consumed by a successful reuse-accept, current_uses=%d", inv.CurrentUses)
 	}
 }
 
@@ -209,7 +248,6 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 	email := "expired@" + tenantID
 
 	if _, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
-		TenantID:  tenantID,
 		Email:     email,
 		CodeHash:  "123456",
 		Purpose:   "signup",
@@ -218,7 +256,7 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 		t.Fatalf("upsert expired code: %v", err)
 	}
 
-	result, err := repo.ConsumeVerificationCode(ctx, tenantID, email, "123456", "signup", 5)
+	result, err := repo.ConsumeVerificationCode(ctx, email, "123456", "signup", 5)
 	if err != nil {
 		t.Fatalf("consume expired: %v", err)
 	}
@@ -226,7 +264,7 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 		t.Fatalf("expected OTPConsumeInvalid for expired code, got %v", result)
 	}
 	// The expired row must have been deleted by the consume path.
-	if _, err := repo.GetVerificationCode(ctx, tenantID, email, "signup"); !errors.Is(err, model.ErrNotFound) {
+	if _, err := repo.GetVerificationCode(ctx, email, "signup"); !errors.Is(err, model.ErrNotFound) {
 		t.Fatalf("expected expired code to be deleted (ErrNotFound), got %v", err)
 	}
 }
@@ -255,7 +293,6 @@ func TestConsumeVerificationCodeRetainsLockedOutRow(t *testing.T) {
 	cooldown := time.Hour // long enough that the limit is clearly still in force after lockout
 
 	if _, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
-		TenantID:  tenantID,
 		Email:     email,
 		CodeHash:  "123456",
 		Purpose:   "signup",
@@ -266,7 +303,7 @@ func TestConsumeVerificationCodeRetainsLockedOutRow(t *testing.T) {
 
 	// Burn maxAttempts wrong guesses; the final one trips the lockout.
 	for i := 0; i < maxAttempts; i++ {
-		result, err := repo.ConsumeVerificationCode(ctx, tenantID, email, "000000", "signup", maxAttempts)
+		result, err := repo.ConsumeVerificationCode(ctx, email, "000000", "signup", maxAttempts)
 		if err != nil {
 			t.Fatalf("attempt %d: consume: %v", i+1, err)
 		}
@@ -280,14 +317,13 @@ func TestConsumeVerificationCodeRetainsLockedOutRow(t *testing.T) {
 	}
 
 	// The locked-out row must still exist (retained as a rate-limit tombstone).
-	if _, err := repo.GetVerificationCode(ctx, tenantID, email, "signup"); err != nil {
+	if _, err := repo.GetVerificationCode(ctx, email, "signup"); err != nil {
 		t.Fatalf("expected locked-out code to be retained, got %v", err)
 	}
 
 	// And it must still enforce the generation cooldown: issuing a new code within
 	// the window is refused (stored == false), proving the lockout did not reset it.
 	stored, err := repo.UpsertVerificationCode(ctx, repository.CreateVerificationCodeRequest{
-		TenantID:  tenantID,
 		Email:     email,
 		CodeHash:  "654321",
 		Purpose:   "signup",
@@ -352,10 +388,11 @@ func TestSingleSessionLogoutEnablesReuseDetection(t *testing.T) {
 	}
 }
 
-// TestSetPasswordAndBumpTokenVersionByTenant is the regression test for making the
-// password write and the token_version bump atomic in ChangePassword: a single
-// tenant-scoped UPDATE must change both, and must be tenant-isolated.
-func TestSetPasswordAndBumpTokenVersionByTenant(t *testing.T) {
+// TestSetPasswordAndBumpTokenVersion is the regression test for making the password
+// write and the IDENTITY token_version bump atomic in ChangePassword: a single UPDATE
+// must change both. A credential is now identity-level (global), so the write is keyed
+// by user id only; an unknown user id matches no row and fails closed with ErrNotFound.
+func TestSetPasswordAndBumpTokenVersion(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 	defer func() {
@@ -370,16 +407,16 @@ func TestSetPasswordAndBumpTokenVersionByTenant(t *testing.T) {
 	tenantID := "pwbump.test"
 	userID := createTenantAndUser(t, ctx, &repo, tenantID)
 
-	before, err := repo.GetByID(ctx, userID, tenantID)
+	before, err := repo.GetByID(ctx, userID)
 	if err != nil {
 		t.Fatalf("load user: %v", err)
 	}
 
-	if err := repo.SetPasswordAndBumpTokenVersionByTenant(ctx, userID, tenantID, "new-hash-value"); err != nil {
+	if err := repo.SetPasswordAndBumpTokenVersion(ctx, userID, "new-hash-value"); err != nil {
 		t.Fatalf("atomic password + token_version update: %v", err)
 	}
 
-	after, err := repo.GetByID(ctx, userID, tenantID)
+	after, err := repo.GetByID(ctx, userID)
 	if err != nil {
 		t.Fatalf("reload user: %v", err)
 	}
@@ -390,16 +427,17 @@ func TestSetPasswordAndBumpTokenVersionByTenant(t *testing.T) {
 		t.Fatalf("token_version = %d, want %d (before+1)", after.TokenVersion, before.TokenVersion+1)
 	}
 
-	// Tenant isolation: a wrong tenant matches no row and changes nothing.
-	if err := repo.SetPasswordAndBumpTokenVersionByTenant(ctx, userID, "other.test", "attacker-hash"); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("cross-tenant update: expected ErrNotFound, got %v", err)
+	// Fail-closed: an unknown user id matches no row and changes nothing.
+	missing := uuid.Must(uuid.NewV7()).String()
+	if err := repo.SetPasswordAndBumpTokenVersion(ctx, missing, "attacker-hash"); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("update of a missing user: expected ErrNotFound, got %v", err)
 	}
-	reloaded, err := repo.GetByID(ctx, userID, tenantID)
+	reloaded, err := repo.GetByID(ctx, userID)
 	if err != nil {
-		t.Fatalf("reload after cross-tenant attempt: %v", err)
+		t.Fatalf("reload after missing-user attempt: %v", err)
 	}
 	if reloaded.PasswordHash != "new-hash-value" || reloaded.TokenVersion != after.TokenVersion {
-		t.Fatal("cross-tenant update must not modify the victim's password or token_version")
+		t.Fatal("an unrelated missing-user update must not modify another identity's password or token_version")
 	}
 }
 
@@ -537,7 +575,6 @@ func TestUpsertVerificationCodeAtomicRateLimit(t *testing.T) {
 	createTenantAndUser(t, ctx, &repo, tenantID)
 
 	req := repository.CreateVerificationCodeRequest{
-		TenantID:  tenantID,
 		Email:     "u@" + tenantID,
 		CodeHash:  "111111",
 		Purpose:   "signup",
@@ -633,7 +670,7 @@ func TestUserStatusAuditWrittenInGo(t *testing.T) {
 
 	// Disable: exactly one 'disable'/'admin' row with a Go-minted UUID id and the
 	// trigger's metadata shape.
-	if err := repo.DisableByTenant(ctx, userID, tenantID); err != nil {
+	if err := repo.Disable(ctx, userID); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 	changes := listChanges()
@@ -649,7 +686,7 @@ func TestUserStatusAuditWrittenInGo(t *testing.T) {
 	}
 
 	// Disabling an already-disabled user is a no-op transition: no new row.
-	if err := repo.DisableByTenant(ctx, userID, tenantID); err != nil {
+	if err := repo.Disable(ctx, userID); err != nil {
 		t.Fatalf("re-disable: %v", err)
 	}
 	if got := len(listChanges()); got != 1 {
@@ -657,7 +694,7 @@ func TestUserStatusAuditWrittenInGo(t *testing.T) {
 	}
 
 	// Admin lock (low failed-login count) is attributed to 'admin'.
-	if err := repo.LockByTenant(ctx, userID, tenantID, nil); err != nil {
+	if err := repo.Lock(ctx, userID, nil); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	changes = listChanges()
@@ -733,7 +770,7 @@ func TestAdminLockIsAdminAttributedAndKeepsFailedCount(t *testing.T) {
 		t.Fatalf("seed failed_login_count: %v", err)
 	}
 
-	if err := repo.LockByTenant(ctx, userID, tenantID, nil); err != nil {
+	if err := repo.Lock(ctx, userID, nil); err != nil {
 		t.Fatalf("admin lock: %v", err)
 	}
 
@@ -772,9 +809,9 @@ func TestNotFoundMutatorsWrapErrNotFound(t *testing.T) {
 	repo := repository.New(db, db)
 	missingUser := uuid.Must(uuid.NewV7()).String()
 
-	newName, newRoles := "x", []string{"r"}
+	newName := "x"
 	cases := map[string]error{
-		"Update":       repo.UpdateByTenant(ctx, missingUser, "no-such-tenant", model.UpdateUserRequest{DisplayName: &newName, Roles: &newRoles}),
+		"Update":       repo.Update(ctx, missingUser, model.UpdateUserRequest{DisplayName: &newName}),
 		"UpdateName":   repo.UpdateName(ctx, "no-such-tenant", "x"),
 		"DeleteAPIKey": repo.DeleteAPIKey(ctx, uuid.Must(uuid.NewV7()).String(), "no-such-tenant"),
 		"Delete":       repo.DeleteSecret(ctx, "no-such-tenant", "no-such-key"),
@@ -878,10 +915,13 @@ func TestCreateAPIKeyExpiresInDuration(t *testing.T) {
 	}
 }
 
-// TestUpdateByTenantPartialUpdate covers UpdateUserRequest's optional fields: a
-// nil field leaves its column unchanged, and token_version is bumped only when
-// roles change (a display-name-only edit must not invalidate sessions).
-func TestUpdateByTenantPartialUpdate(t *testing.T) {
+// TestPartialUpdateAndMembershipRoles is the decoupled-model conversion of the old
+// "UpdateByTenant partial update" coverage. The user is now a global identity whose
+// display-name edit (repo.Update, keyed by user id) must NOT touch the identity
+// token_version; roles moved off the user onto the membership, where a role change
+// (UpdateMembershipRoles) bumps the MEMBERSHIP token_version (only this workspace's
+// access tokens) and leaves the identity token_version alone.
+func TestPartialUpdateAndMembershipRoles(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 	defer func() {
@@ -896,58 +936,76 @@ func TestUpdateByTenantPartialUpdate(t *testing.T) {
 	tenantID := "partial.update.test"
 	userID := createTenantAndUser(t, ctx, &repo, tenantID)
 
-	before, err := repo.GetByID(ctx, userID, tenantID)
+	before, err := repo.GetByID(ctx, userID)
 	if err != nil {
 		t.Fatalf("get before: %v", err)
 	}
-
-	// Display-name-only update: roles and token_version are untouched.
-	newName := "Renamed User"
-	if err := repo.UpdateByTenant(ctx, userID, tenantID, model.UpdateUserRequest{DisplayName: &newName}); err != nil {
-		t.Fatalf("name-only update: %v", err)
+	mBefore, err := repo.GetMembership(ctx, userID, tenantID)
+	if err != nil {
+		t.Fatalf("get membership before: %v", err)
 	}
-	afterName, err := repo.GetByID(ctx, userID, tenantID)
+
+	// Display-name update on the global identity: identity token_version untouched (a
+	// display-name edit must not invalidate sessions).
+	newName := "Renamed User"
+	if err := repo.Update(ctx, userID, model.UpdateUserRequest{DisplayName: &newName}); err != nil {
+		t.Fatalf("name update: %v", err)
+	}
+	afterName, err := repo.GetByID(ctx, userID)
 	if err != nil {
 		t.Fatalf("get after name: %v", err)
 	}
 	if afterName.DisplayName != newName {
 		t.Fatalf("display name = %q, want %q", afterName.DisplayName, newName)
 	}
-	if !slices.Equal(afterName.Roles, before.Roles) {
-		t.Fatalf("roles changed on name-only update: %v -> %v", before.Roles, afterName.Roles)
-	}
 	if afterName.TokenVersion != before.TokenVersion {
-		t.Fatalf("token_version bumped on name-only update: %d -> %d", before.TokenVersion, afterName.TokenVersion)
+		t.Fatalf("identity token_version bumped on name update: %d -> %d", before.TokenVersion, afterName.TokenVersion)
 	}
 
-	// Roles-only update: display name untouched, token_version bumped.
+	// Roles now live on the membership. A role change bumps the MEMBERSHIP
+	// token_version and leaves the identity token_version untouched.
 	newRoles := []string{"Viewer"}
-	if err := repo.UpdateByTenant(ctx, userID, tenantID, model.UpdateUserRequest{Roles: &newRoles}); err != nil {
-		t.Fatalf("roles-only update: %v", err)
+	if err := repo.UpdateMembershipRoles(ctx, userID, tenantID, newRoles); err != nil {
+		t.Fatalf("update membership roles: %v", err)
 	}
-	afterRoles, err := repo.GetByID(ctx, userID, tenantID)
+	mAfter, err := repo.GetMembership(ctx, userID, tenantID)
 	if err != nil {
-		t.Fatalf("get after roles: %v", err)
+		t.Fatalf("get membership after roles: %v", err)
+	}
+	if !slices.Equal(mAfter.Roles, newRoles) {
+		t.Fatalf("membership roles = %v, want %v", mAfter.Roles, newRoles)
+	}
+	if mAfter.TokenVersion != mBefore.TokenVersion+1 {
+		t.Fatalf("membership token_version not bumped on roles change: %d -> %d", mBefore.TokenVersion, mAfter.TokenVersion)
+	}
+	// The identity token_version is unaffected by a per-workspace role change.
+	afterRoles, err := repo.GetByID(ctx, userID)
+	if err != nil {
+		t.Fatalf("get identity after roles: %v", err)
+	}
+	if afterRoles.TokenVersion != before.TokenVersion {
+		t.Fatalf("identity token_version changed on membership role update: %d -> %d", before.TokenVersion, afterRoles.TokenVersion)
 	}
 	if afterRoles.DisplayName != newName {
-		t.Fatalf("display name changed on roles-only update: %q", afterRoles.DisplayName)
-	}
-	if !slices.Equal(afterRoles.Roles, newRoles) {
-		t.Fatalf("roles = %v, want %v", afterRoles.Roles, newRoles)
-	}
-	if afterRoles.TokenVersion != afterName.TokenVersion+1 {
-		t.Fatalf("token_version not bumped on roles change: %d -> %d", afterName.TokenVersion, afterRoles.TokenVersion)
+		t.Fatalf("display name changed on membership role update: %q", afterRoles.DisplayName)
 	}
 }
 
-// TestCrossTenantUserOperationsAreRejected is the regression test for the
-// tenant-isolation finding: the self-service AuthService path (ChangePassword,
-// LogoutAll) and the per-user UserService building blocks (VerifyPassword,
-// GetDisplayName, UpdateLastLogin, IncrementFailedLoginCount) must all be scoped by
-// tenant, so a caller acting for tenant B cannot read or mutate a user that belongs
-// to tenant A using only that user's UUID. Each cross-tenant call must return
-// ErrNotFound and must NOT have any side effect on the victim account.
-func TestCrossTenantUserOperationsAreRejected(t *testing.T) {
+// TestMembershipGatesWorkspaceAccess is the decoupled-model conversion of the old
+// "cross-tenant user operations are rejected" finding. In the decoupled model the user
+// is a single GLOBAL identity, so per-user operations (ChangePassword, LogoutAll,
+// VerifyPassword, ...) are NOT tenant-scoped — they act on the one identity. The
+// tenant-isolation guarantee MOVED to the membership graph: authentication is global,
+// but AUTHORIZATION to a workspace is the active membership. This test encodes that
+// converted invariant with the same strength:
+//   - valid credentials but NO active membership in a tenant cannot obtain a token for
+//     it (Login / LoginByEmail / MintWorkspaceToken / RefreshToken -> ErrNoActiveMembership);
+//   - suspending the membership immediately revokes that workspace's access tokens
+//     (ValidateJWT -> ErrTokenRevoked) and refresh into it (-> ErrNoActiveMembership),
+//     WITHOUT touching the identity session (the user still authenticates and other
+//     workspaces are unaffected);
+//   - the identity-level self-service ops still work globally (positive controls).
+func TestMembershipGatesWorkspaceAccess(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 	defer func() {
@@ -962,89 +1020,88 @@ func TestCrossTenantUserOperationsAreRejected(t *testing.T) {
 	pw := service.NewPasswordService(4, nil)
 
 	const (
-		tenantA  = "tenant-a.xtest"
-		tenantB  = "tenant-b.xtest" // the "attacker" tenant
+		tenantA  = "tenant-a.xtest" // the identity is an active member here
+		tenantB  = "tenant-b.xtest" // ... but NOT a member here
 		password = "ValidPass1!"
 	)
-	victimID := createTenantAndUserWithPassword(t, ctx, &repo, tenantA, "alice@"+tenantA, password, pw)
-	// tenantB must exist so the cross-tenant caller is a legitimate, separate tenant.
-	createTenantAndUserWithPassword(t, ctx, &repo, tenantB, "bob@"+tenantB, password, pw)
+	email := "alice@" + tenantA
+	userID := createTenantAndUserWithPassword(t, ctx, &repo, tenantA, email, password, pw)
+	// tenantB exists but the identity has no membership in it.
+	if err := repo.CreateTenant(ctx, model.CreateTenantRequest{
+		TenantID:       tenantB,
+		Name:           tenantB,
+		AllowedDomains: []string{tenantB},
+	}); err != nil {
+		t.Fatalf("create tenant B: %v", err)
+	}
 
 	authKit := newIntegrationAuthKit(t, db)
 	authSvc := authKit.AuthService()
 	userSvc := authKit.UserService()
 
-	// Give the victim a live session so we can prove LogoutAll cannot touch it
-	// across tenants.
-	login, err := authSvc.Login(ctx, model.LoginRequest{Email: "alice@" + tenantA, Password: password, TenantID: tenantA})
-	if err != nil {
-		t.Fatalf("victim login: %v", err)
+	// --- No membership in tenantB: valid creds cannot obtain a tenantB token. ---
+	if _, err := authSvc.Login(ctx, model.LoginRequest{Email: email, Password: password, TenantID: tenantB}); !errors.Is(err, model.ErrNoActiveMembership) {
+		t.Fatalf("login into a non-member workspace: expected ErrNoActiveMembership, got %v", err)
+	}
+	if _, err := authSvc.LoginByEmail(ctx, model.LoginByEmailRequest{Email: email, Password: password, TenantID: tenantB}); !errors.Is(err, model.ErrNoActiveMembership) {
+		t.Fatalf("login-by-email into a non-member workspace: expected ErrNoActiveMembership, got %v", err)
 	}
 
-	// --- Cross-tenant LogoutAll must fail closed and leave the session intact. ---
-	if err := authSvc.LogoutAll(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("cross-tenant LogoutAll: expected ErrNotFound, got %v", err)
+	// Active member of tenantA: login succeeds and the token validates.
+	login, err := authSvc.Login(ctx, model.LoginRequest{Email: email, Password: password, TenantID: tenantA})
+	if err != nil {
+		t.Fatalf("victim login into tenantA: %v", err)
 	}
 	if _, err := authSvc.ValidateJWT(ctx, login.AccessToken); err != nil {
-		t.Fatalf("victim access token must still be valid after cross-tenant LogoutAll, got %v", err)
+		t.Fatalf("tenantA access token should validate: %v", err)
+	}
+	// The identity session cannot mint a token for a workspace it does not belong to.
+	if _, err := authSvc.MintWorkspaceToken(ctx, login.RefreshToken, tenantB); !errors.Is(err, model.ErrNoActiveMembership) {
+		t.Fatalf("mint token for non-member workspace: expected ErrNoActiveMembership, got %v", err)
 	}
 
-	// --- Cross-tenant per-user reads/writes must all be ErrNotFound. ---
-	if _, err := userSvc.VerifyPassword(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("cross-tenant VerifyPassword: expected ErrNotFound (no hash disclosure), got %v", err)
+	// --- Suspend the tenantA membership: that workspace's tokens are revoked, but the
+	// identity session itself is NOT (the credentials still authenticate). ---
+	if err := repo.RemoveMembership(ctx, userID, tenantA); err != nil {
+		t.Fatalf("suspend membership: %v", err)
 	}
-	if _, err := userSvc.GetDisplayName(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("cross-tenant GetDisplayName: expected ErrNotFound, got %v", err)
+	if _, err := authSvc.ValidateJWT(ctx, login.AccessToken); !errors.Is(err, model.ErrTokenRevoked) {
+		t.Fatalf("after membership suspend, ValidateJWT: expected ErrTokenRevoked, got %v", err)
 	}
-	if err := userSvc.UpdateLastLogin(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("cross-tenant UpdateLastLogin: expected ErrNotFound, got %v", err)
+	if _, err := authSvc.RefreshToken(ctx, model.RefreshRequest{RefreshToken: login.RefreshToken, TenantID: tenantA}); !errors.Is(err, model.ErrNoActiveMembership) {
+		t.Fatalf("refresh into a suspended workspace: expected ErrNoActiveMembership, got %v", err)
 	}
-	if err := userSvc.IncrementFailedLoginCount(ctx, victimID, tenantB); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("cross-tenant IncrementFailedLoginCount: expected ErrNotFound, got %v", err)
-	}
-	// The lockout counter on the victim must be untouched by the cross-tenant call.
-	victim, err := repo.GetByID(ctx, victimID, tenantA)
-	if err != nil {
-		t.Fatalf("reload victim: %v", err)
-	}
-	if victim.FailedLoginCount != 0 {
-		t.Fatalf("cross-tenant IncrementFailedLoginCount leaked: failed_login_count = %d, want 0", victim.FailedLoginCount)
+	// The identity is intact: it can still authenticate (login fails only on the
+	// workspace gate, not the credential), proving suspend did not kill the identity.
+	if _, err := authSvc.LoginByEmail(ctx, model.LoginByEmailRequest{Email: email, Password: password}); err != nil {
+		t.Fatalf("identity must still authenticate after a workspace suspend: %v", err)
 	}
 
-	// --- Cross-tenant ChangePassword must fail and leave the password unchanged. ---
-	if err := authSvc.ChangePassword(ctx, model.ChangePasswordRequest{
-		UserID:      victimID,
-		TenantID:    tenantB,
-		OldPassword: password,
-		NewPassword: "AttackerPass1!",
-	}); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("cross-tenant ChangePassword: expected ErrNotFound, got %v", err)
+	// --- Identity-level self-service ops act on the one global identity (positive
+	// controls; they are no longer tenant-scoped). ---
+	if _, err := userSvc.VerifyPassword(ctx, userID); err != nil {
+		t.Fatalf("identity VerifyPassword should succeed: %v", err)
 	}
-	if _, err := authSvc.Login(ctx, model.LoginRequest{Email: "alice@" + tenantA, Password: password, TenantID: tenantA}); err != nil {
-		t.Fatalf("victim password must be unchanged after cross-tenant ChangePassword, login failed: %v", err)
-	}
-
-	// --- Positive controls: the same operations succeed within the correct tenant. ---
-	if _, err := userSvc.VerifyPassword(ctx, victimID, tenantA); err != nil {
-		t.Fatalf("same-tenant VerifyPassword should succeed: %v", err)
-	}
-	if name, err := userSvc.GetDisplayName(ctx, victimID, tenantA); err != nil || name == "" {
-		t.Fatalf("same-tenant GetDisplayName should succeed, got name=%q err=%v", name, err)
+	if name, err := userSvc.GetDisplayName(ctx, userID); err != nil || name == "" {
+		t.Fatalf("identity GetDisplayName should succeed, got name=%q err=%v", name, err)
 	}
 	if err := authSvc.ChangePassword(ctx, model.ChangePasswordRequest{
-		UserID:      victimID,
-		TenantID:    tenantA,
+		UserID:      userID,
 		OldPassword: password,
 		NewPassword: "NewValidPass1!",
 	}); err != nil {
-		t.Fatalf("same-tenant ChangePassword should succeed: %v", err)
+		t.Fatalf("identity ChangePassword should succeed: %v", err)
 	}
-	// ChangePassword revokes sessions: the original access token must now be invalid.
-	if _, err := authSvc.ValidateJWT(ctx, login.AccessToken); err == nil {
-		t.Fatal("expected victim's original access token to be invalid after same-tenant password change")
+	// ChangePassword revokes sessions identity-wide: the original refresh token dies.
+	if _, err := authSvc.RefreshToken(ctx, model.RefreshRequest{RefreshToken: login.RefreshToken, TenantID: tenantA}); err == nil {
+		t.Fatal("expected the original refresh token to be invalid after identity password change")
 	}
-	// And LogoutAll within the correct tenant succeeds.
-	if err := authSvc.LogoutAll(ctx, victimID, tenantA); err != nil {
-		t.Fatalf("same-tenant LogoutAll should succeed: %v", err)
+	// LogoutAll is identity-level (no tenant) and fails closed for an unknown id.
+	if err := authSvc.LogoutAll(ctx, userID); err != nil {
+		t.Fatalf("identity LogoutAll should succeed: %v", err)
+	}
+	missing := uuid.Must(uuid.NewV7()).String()
+	if err := authSvc.LogoutAll(ctx, missing); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("LogoutAll for unknown id should fail closed with ErrNotFound, got %v", err)
 	}
 }
