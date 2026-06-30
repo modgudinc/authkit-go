@@ -5,14 +5,15 @@ package model
 
 import "time"
 
+// User is the GLOBAL identity: it carries no tenant_id and no roles — those
+// live on Membership. email is globally unique. TokenVersion is the identity-level
+// token version (credential events invalidate every workspace's access tokens).
 type User struct {
-	ID           string   `json:"id" db:"id"`
-	Email        string   `json:"email" db:"email"`
-	PasswordHash string   `json:"-" db:"password_hash"`
-	TenantID     string   `json:"tenant_id" db:"tenant_id"`
-	DisplayName  string   `json:"display_name" db:"display_name"`
-	Roles        []string `json:"roles" db:"roles"`
-	TokenVersion int      `json:"-" db:"token_version"`
+	ID           string `json:"id" db:"id"`
+	Email        string `json:"email" db:"email"`
+	PasswordHash string `json:"-" db:"password_hash"`
+	DisplayName  string `json:"display_name" db:"display_name"`
+	TokenVersion int    `json:"-" db:"token_version"`
 
 	// Account status (enable/disable - admin control)
 	IsEnabled  bool       `json:"is_enabled" db:"is_enabled"`
@@ -29,12 +30,12 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
+// CreateUserRequest creates a GLOBAL identity. No tenant or roles — grant tenant
+// access separately via MembershipService.Add. Email must be globally unique.
 type CreateUserRequest struct {
 	Email        string
 	PasswordHash string
-	TenantID     string
 	DisplayName  string
-	Roles        []string
 }
 
 // UserStatusChange is one row of the account status-change audit trail, returned
@@ -63,15 +64,10 @@ type UserStatusChange struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// UpdateUserRequest updates a user's display name and/or roles. UserID and TenantID
-// identify the target and are required; the update is tenant-scoped (a cross-tenant
-// UserID matches no row). DisplayName and Roles are each optional — a nil pointer
-// leaves that column unchanged, so callers can do a partial update without first
-// reading the current values. Changing Roles bumps the user's token_version
-// (invalidating existing JWTs); a display-name-only update does not.
+// UpdateUserRequest updates a global identity's display name. UserID is required;
+// DisplayName is optional (a nil pointer leaves it unchanged). Roles are no longer
+// here — they are per-tenant; change them via MembershipService.UpdateRoles.
 type UpdateUserRequest struct {
 	UserID      string
-	TenantID    string
 	DisplayName *string
-	Roles       *[]string
 }
