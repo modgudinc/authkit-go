@@ -15,6 +15,7 @@ var (
 	ErrAccountLocked              = model.ErrAccountLocked
 	ErrInvalidToken               = model.ErrInvalidToken
 	ErrTokenRevoked               = model.ErrTokenRevoked
+	ErrNoActiveMembership         = model.ErrNoActiveMembership
 	ErrInvalidRefreshToken        = model.ErrInvalidRefreshToken
 	ErrRefreshTokenReuse          = model.ErrRefreshTokenReuse
 	ErrInvalidOTP                 = model.ErrInvalidOTP

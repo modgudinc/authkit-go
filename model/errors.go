@@ -33,8 +33,17 @@ var (
 	ErrInvalidToken = errors.New("authkit: invalid token")
 
 	// ErrTokenRevoked is returned when an access token is well-formed but has been
-	// revoked (token_version mismatch).
+	// revoked: the identity token_version or the membership token_version no longer
+	// matches, or the active membership the token is scoped to is suspended/removed.
 	ErrTokenRevoked = errors.New("authkit: token has been revoked")
+
+	// ErrNoActiveMembership is returned when an authenticated identity has no active
+	// membership in the requested tenant — there is no membership row, or it is
+	// suspended. It is the workspace-scoping outcome of the decoupled-identity model:
+	// the credentials are valid but the user is not (or no longer) a member of that
+	// workspace. Login/LoginByEmail/MintWorkspaceToken/RefreshToken return it; map it
+	// to HTTP 403.
+	ErrNoActiveMembership = errors.New("authkit: no active membership in tenant")
 
 	// ErrInvalidRefreshToken is returned when a refresh token is unknown, expired,
 	// or already consumed.

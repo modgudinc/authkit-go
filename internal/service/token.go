@@ -114,26 +114,25 @@ func NewTokenService(
 	}
 }
 
-// GenerateTokenPair generates both access token (JWT) and refresh token
+// GenerateTokenPair generates a workspace-scoped access token (JWT) plus a new
+// identity-session refresh token.
 //
 // Parameters:
 //   - ctx: Context for database operations
-//   - user: User model for JWT claims
+//   - user: the global identity (JWT identity claims)
+//   - membership: the active membership the access token is scoped to (tenant + roles)
 //   - sessionInfo: Session metadata (IP, user agent, device)
 //
 // Returns:
 //   - TokenPairResponse with access token, refresh token, and expiration
 //
-// Flow:
-//  1. Generate JWT access token via JWTService
-//  2. Generate random refresh token (32 bytes, base64-encoded)
-//  3. Hash refresh token with HMAC-SHA256 (defense in depth)
-//  4. Store hash in database with session metadata
-//  5. Return plaintext tokens (refresh token only visible here)
+// The access token is workspace-scoped (user + membership); the refresh token opens
+// a new identity session (user-scoped, no tenant). From one refresh token a caller
+// can mint access tokens for any of the user's memberships (see MintAccessToken).
 //
 // Example:
 //
-//	response, err := tokenService.GenerateTokenPair(ctx, user, sessionInfo)
+//	response, err := tokenService.GenerateTokenPair(ctx, user, membership, sessionInfo)
 //	if err != nil {
 //	    return fmt.Errorf("failed to generate tokens: %w", err)
 //	}
@@ -141,58 +140,25 @@ func NewTokenService(
 func (s *TokenService) GenerateTokenPair(
 	ctx context.Context,
 	user *model.User,
+	membership *model.Membership,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
 	s.logger.Info(ctx, "Generating token pair",
 		"user_id", user.ID,
 		"email", maskEmail(user.Email),
-		"tenant_id", user.TenantID,
+		"tenant_id", membership.TenantID,
 	)
 
-	// 1. Generate JWT access token
-	accessToken, err := s.jwtService.GenerateAccessToken(user)
+	// 1. Mint the workspace-scoped access token (stateless; no DB write).
+	accessToken, expiresIn, err := s.MintAccessToken(ctx, user, membership)
 	if err != nil {
-		s.logger.Error(ctx, "Failed to generate access token", "error", err.Error())
-		return nil, sanitizeError(ctx, s.logger, "generate access token", err)
+		return nil, err
 	}
 
-	// 2. Generate random refresh token
-	refreshToken, err := s.jwtService.GenerateRefreshToken()
+	// 2. Open the identity session (stores the refresh-token HMAC).
+	refreshToken, err := s.CreateIdentitySession(ctx, user.ID, sessionInfo)
 	if err != nil {
-		s.logger.Error(ctx, "Failed to generate refresh token", "error", err.Error())
-		return nil, sanitizeError(ctx, s.logger, "generate refresh token", err)
-	}
-
-	// 3. Hash refresh token with HMAC-SHA256
-	tokenHash := s.hashToken(refreshToken)
-
-	// 4. Store hash in database with session metadata
-	expiresAt := time.Now().Add(s.refreshExpiry)
-
-	var ipAddress, userAgent, deviceName *string
-	if sessionInfo != nil {
-		if sessionInfo.IPAddress != "" {
-			ipAddress = &sessionInfo.IPAddress
-		}
-		if sessionInfo.UserAgent != "" {
-			userAgent = &sessionInfo.UserAgent
-		}
-		if sessionInfo.DeviceName != "" {
-			deviceName = &sessionInfo.DeviceName
-		}
-	}
-
-	_, err = s.repo.CreateRefreshToken(ctx, repository.CreateRefreshTokenRequest{
-		UserID:     user.ID,
-		TokenHash:  tokenHash,
-		IPAddress:  ipAddress,
-		UserAgent:  userAgent,
-		DeviceName: deviceName,
-		ExpiresAt:  expiresAt,
-	})
-	if err != nil {
-		s.logger.Error(ctx, "Failed to store refresh token", "error", err.Error())
-		return nil, sanitizeError(ctx, s.logger, "store refresh token", err)
+		return nil, err
 	}
 
 	s.logger.Info(ctx, "Token pair generated successfully",
@@ -204,8 +170,72 @@ func (s *TokenService) GenerateTokenPair(
 	return &model.TokenPairResponse{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
-		ExpiresIn:    int64(s.jwtService.GetAccessExpiry().Seconds()),
+		ExpiresIn:    expiresIn,
 	}, nil
+}
+
+// MintAccessToken mints a workspace-scoped access token for user's membership and
+// returns it with its lifetime in seconds. It performs NO database write — access
+// tokens are stateless (only the refresh token, the identity session, is stored), so
+// this is the cheap call used to issue or switch the active workspace from an
+// existing session.
+func (s *TokenService) MintAccessToken(ctx context.Context, user *model.User, membership *model.Membership) (string, int64, error) {
+	accessToken, err := s.jwtService.GenerateAccessToken(user, membership)
+	if err != nil {
+		s.logger.Error(ctx, "Failed to generate access token", "error", err.Error())
+		return "", 0, sanitizeError(ctx, s.logger, "generate access token", err)
+	}
+	return accessToken, int64(s.jwtService.GetAccessExpiry().Seconds()), nil
+}
+
+// CreateIdentitySession opens a new identity session: it generates a refresh token,
+// stores its HMAC-SHA256 (a fresh token family) with the session metadata, and
+// returns the plaintext refresh token (the only time it is visible). The session is
+// user-scoped, not tied to any tenant — workspace access tokens are minted from it
+// per membership.
+func (s *TokenService) CreateIdentitySession(ctx context.Context, userID string, sessionInfo *model.SessionInfo) (string, error) {
+	refreshToken, err := s.jwtService.GenerateRefreshToken()
+	if err != nil {
+		s.logger.Error(ctx, "Failed to generate refresh token", "error", err.Error())
+		return "", sanitizeError(ctx, s.logger, "generate refresh token", err)
+	}
+
+	tokenHash := s.hashToken(refreshToken)
+	expiresAt := time.Now().Add(s.refreshExpiry)
+	ipAddress, userAgent, deviceName := sessionPointers(sessionInfo)
+
+	if _, err := s.repo.CreateRefreshToken(ctx, repository.CreateRefreshTokenRequest{
+		UserID:     userID,
+		TokenHash:  tokenHash,
+		IPAddress:  ipAddress,
+		UserAgent:  userAgent,
+		DeviceName: deviceName,
+		ExpiresAt:  expiresAt,
+	}); err != nil {
+		s.logger.Error(ctx, "Failed to store refresh token", "error", err.Error())
+		return "", sanitizeError(ctx, s.logger, "store refresh token", err)
+	}
+
+	return refreshToken, nil
+}
+
+// sessionPointers converts a *model.SessionInfo into the nullable string pointers
+// the repository stores: a nil SessionInfo or an empty field becomes a nil pointer
+// (stored as SQL NULL).
+func sessionPointers(sessionInfo *model.SessionInfo) (ipAddress, userAgent, deviceName *string) {
+	if sessionInfo == nil {
+		return nil, nil, nil
+	}
+	if sessionInfo.IPAddress != "" {
+		ipAddress = &sessionInfo.IPAddress
+	}
+	if sessionInfo.UserAgent != "" {
+		userAgent = &sessionInfo.UserAgent
+	}
+	if sessionInfo.DeviceName != "" {
+		deviceName = &sessionInfo.DeviceName
+	}
+	return ipAddress, userAgent, deviceName
 }
 
 // ValidateRefreshToken validates a refresh token and returns the associated user
@@ -249,8 +279,11 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 		return nil, sanitizeError(ctx, s.logger, "lookup refresh token", err)
 	}
 
-	// 3. Fetch user by user_id (no tenant_id needed since user_id is unique)
-	user, err := s.repo.GetByIDOnly(ctx, storedToken.UserID)
+	// 3. Fetch the global identity by user_id (the refresh token is user-scoped). Read
+	// from the PRIMARY: the disabled/locked freeze gate below (and the MintWorkspaceToken
+	// path that relies on it) must observe an admin disable/lock immediately, not after
+	// replica catch-up — matching the FromPrimary reads on the other security gates.
+	user, err := s.repo.GetByIDFromPrimary(ctx, storedToken.UserID)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to fetch user for refresh token", "error", err.Error())
 		return nil, sanitizeError(ctx, s.logger, "fetch user for refresh token", err)
@@ -287,23 +320,25 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 //
 // Parameters:
 //   - ctx: Context for database operations
-//   - refreshToken: Current refresh token from client
-//   - sessionInfo: Session metadata for new refresh token
+//   - refreshToken: Current refresh token from client (the identity session)
+//   - tenantID: Workspace the rotated access token should be scoped to (the user
+//     must have an active membership there)
+//   - sessionInfo: Session metadata for the new refresh token
 //
 // Returns:
-//   - New token pair with rotated refresh token
-//   - Error if validation fails
+//   - New token pair: a rotated refresh token + a workspace-scoped access token
+//   - model.ErrNoActiveMembership if the identity has no active membership in tenantID
+//   - Error if the refresh token is invalid/expired/reused or the account is inactive
 //
 // Flow:
-//  1. Validate current refresh token
-//  2. Get user
-//  3. Delete old refresh token (revoke it)
-//  4. Generate new token pair
-//  5. Return new tokens
+//  1. Verify an active membership in tenantID WITHOUT consuming the refresh token
+//  2. Atomically rotate the refresh token (consume old, store replacement; reuse-detecting)
+//  3. Re-check account standing
+//  4. Mint the workspace-scoped access token
 //
 // Example:
 //
-//	response, err := tokenService.RefreshTokenPair(ctx, oldRefreshToken, sessionInfo)
+//	response, err := tokenService.RefreshTokenPair(ctx, oldRefreshToken, tenantID, sessionInfo)
 //	if err != nil {
 //	    return fmt.Errorf("token refresh failed: %w", err)
 //	}
@@ -311,9 +346,47 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 func (s *TokenService) RefreshTokenPair(
 	ctx context.Context,
 	refreshToken string,
+	tenantID string,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
-	s.logger.Info(ctx, "Refreshing token pair")
+	s.logger.Info(ctx, "Refreshing token pair", "tenant_id", tenantID)
+
+	// 0. Verify the identity has an ACTIVE membership in tenantID BEFORE rotating the
+	// refresh token. The refresh token is the identity session (one per login, shared
+	// across all of the user's workspaces); rotating it and only then discovering the
+	// user no longer belongs to tenantID would consume the presented token and strand
+	// its replacement (the client never receives it), so the next refresh of ANY
+	// workspace would trip reuse detection and revoke the whole family.
+	//
+	// The token is looked up WITHOUT filtering on revoked state: a REVOKED token is NOT
+	// short-circuited here — it must fall through to RotateRefreshToken so its
+	// reuse/theft detection (family revoke + token_version bump + alert) still fires. So
+	// only a LIVE token gets the non-destructive membership pre-check; a missing or
+	// suspended membership is rejected with ErrNoActiveMembership without touching the
+	// session. The membership is read from the PRIMARY so a just-committed revoke/suspend
+	// is observed immediately.
+	oldTokenHash := s.hashToken(refreshToken)
+	userID, revoked, err := s.repo.GetRefreshTokenUserByHash(ctx, oldTokenHash)
+	if err != nil {
+		s.logger.Warn(ctx, "Refresh token not found", "error", err.Error())
+		return nil, sanitizeError(ctx, s.logger, "lookup refresh token", err)
+	}
+	var preCheckedMembership *model.Membership
+	if !revoked {
+		membership, mErr := s.repo.GetMembershipFromPrimary(ctx, userID, tenantID)
+		if mErr != nil {
+			if errors.Is(mErr, model.ErrNotFound) {
+				s.logger.Warn(ctx, "Refresh denied: no membership in tenant", "user_id", userID, "tenant_id", tenantID)
+				return nil, model.ErrNoActiveMembership
+			}
+			return nil, sanitizeError(ctx, s.logger, "load membership for refresh", mErr)
+		}
+		if !membership.IsActive() {
+			s.logger.Warn(ctx, "Refresh denied: membership not active", "user_id", userID, "tenant_id", tenantID)
+			return nil, model.ErrNoActiveMembership
+		}
+		preCheckedMembership = membership
+	}
 
 	// 1. Generate the replacement refresh token before entering the DB transaction.
 	newRefreshToken, err := s.jwtService.GenerateRefreshToken()
@@ -322,22 +395,9 @@ func (s *TokenService) RefreshTokenPair(
 		return nil, sanitizeError(ctx, s.logger, "generate replacement refresh token", err)
 	}
 
-	oldTokenHash := s.hashToken(refreshToken)
 	newTokenHash := s.hashToken(newRefreshToken)
 	expiresAt := time.Now().Add(s.refreshExpiry)
-
-	var ipAddress, userAgent, deviceName *string
-	if sessionInfo != nil {
-		if sessionInfo.IPAddress != "" {
-			ipAddress = &sessionInfo.IPAddress
-		}
-		if sessionInfo.UserAgent != "" {
-			userAgent = &sessionInfo.UserAgent
-		}
-		if sessionInfo.DeviceName != "" {
-			deviceName = &sessionInfo.DeviceName
-		}
-	}
+	ipAddress, userAgent, deviceName := sessionPointers(sessionInfo)
 
 	// 2. Atomically consume the old refresh token and store the replacement.
 	user, tokenID, err := s.repo.RotateRefreshToken(ctx, oldTokenHash, repository.CreateRefreshTokenRequest{
@@ -400,8 +460,22 @@ func (s *TokenService) RefreshTokenPair(
 		return nil, fmt.Errorf("account is not active: %w", model.ErrInvalidRefreshToken)
 	}
 
-	// 4. Generate a new access token for the user tied to the consumed token.
-	accessToken, err := s.jwtService.GenerateAccessToken(user)
+	// 4. Mint the workspace-scoped access token for the membership verified in step 0.
+	// We deliberately reuse that membership rather than re-loading it after the rotate:
+	// re-loading and finding it suspended would force a reject AFTER the old token was
+	// consumed, recreating the stranded-replacement problem step 0 avoids. If the
+	// membership was revoked/role-changed in the tiny window since step 0, the minted
+	// token's membership_token_version is already stale and ValidateJWT rejects it on
+	// first use — a safe born-revoked token, not an authorization gap.
+	//
+	// preCheckedMembership is non-nil here: mint is reached only when the token was live
+	// (revoked == false, so the pre-check ran) AND the rotate succeeded — a revoked token
+	// would have been caught by RotateRefreshToken's reuse path above. The guard makes
+	// that invariant explicit and prevents a nil deref if the flow is ever refactored.
+	if preCheckedMembership == nil {
+		return nil, sanitizeError(ctx, s.logger, "mint rotated access token", fmt.Errorf("internal: missing pre-checked membership for refresh"))
+	}
+	accessToken, err := s.jwtService.GenerateAccessToken(user, preCheckedMembership)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to generate rotated access token", "error", err.Error())
 		// Detached cleanup: drop the just-persisted rotated token even if the request
@@ -485,12 +559,11 @@ func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString strin
 // This method is intentionally NOT part of the public TokenService interface
 // (services.go) — it is reachable only internally, via AuthService.LogoutAll.
 //
-// Precondition: the caller MUST have already verified that userID belongs to the
-// caller's tenant. This method scopes by user_id only and does not re-check
-// tenant membership (refresh tokens are not tenant-columned); passing a
-// caller-supplied id without that check is a cross-tenant authorization gap.
-// AuthService.LogoutAll satisfies this by calling IncrementTokenVersionByTenant
-// first, which fails closed (ErrNotFound) for a cross-tenant id.
+// It scopes by user_id only (refresh tokens are the identity session and carry no
+// tenant column) and performs no authorization check. AuthService.LogoutAll is the
+// identity-level entry point: it calls IncrementTokenVersion(ctx, userID) first (a
+// non-existent user fails closed with ErrNotFound) and then this method. The caller of
+// LogoutAll is responsible for authorizing that it may act on userID.
 //
 // Example:
 //

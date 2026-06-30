@@ -39,6 +39,17 @@ type LoginResponse struct {
 	TenantID     string       `json:"tenant_id,omitempty"` // active workspace the AccessToken is scoped to
 }
 
+// WorkspaceTokenResponse is returned by AuthService.MintWorkspaceToken (the
+// select-workspace / switch-workspace call): a freshly minted workspace-scoped
+// access token for an existing identity session. The refresh token is unchanged
+// (the identity session is not rotated), so only the access token and its scope are
+// returned.
+type WorkspaceTokenResponse struct {
+	AccessToken string `json:"access_token"`
+	ExpiresIn   int64  `json:"expires_in"` // Access token expiration in seconds
+	TenantID    string `json:"tenant_id"`  // Workspace the AccessToken is scoped to
+}
+
 // RefreshRequest contains parameters for token refresh. TenantID is the workspace
 // the new access token should be scoped to (the active membership); the identity
 // session is the refresh token.

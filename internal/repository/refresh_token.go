@@ -288,6 +288,32 @@ func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*Ref
 }
 
 // ============================================================================
+// GetRefreshTokenUserByHash - Returns the user_id for a refresh token hash and
+// whether the token is currently revoked, WITHOUT filtering on revoked/expired state.
+//
+// It backs RefreshTokenPair's non-destructive membership pre-check: a LIVE token's
+// workspace membership is verified before rotation (so refreshing a workspace the user
+// has left does not strand the rotated token and kill the whole identity session),
+// while a REVOKED token must NOT be short-circuited on this path — the caller routes it
+// into RotateRefreshToken so its reuse/theft detection (family revoke + token_version
+// bump + alert) still fires. Reads from the PRIMARY (rw): this is part of the refresh
+// gate, mirroring GetByTokenHash. Returns model.ErrInvalidRefreshToken when no row
+// matches the hash.
+// ============================================================================
+func (r *Repository) GetRefreshTokenUserByHash(ctx context.Context, tokenHash string) (userID string, revoked bool, err error) {
+	query := `SELECT user_id, revoked_at FROM {{schema}}.refresh_tokens WHERE token_hash = $1`
+
+	var revokedAt *time.Time
+	if err := r.rw.QueryRowContext(ctx, r.q(query), tokenHash).Scan(&userID, &revokedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, fmt.Errorf("refresh token not found: %w", model.ErrInvalidRefreshToken)
+		}
+		return "", false, fmt.Errorf("failed to look up refresh token: %w", err)
+	}
+	return userID, revokedAt != nil, nil
+}
+
+// ============================================================================
 // GetByUserID - Lists all refresh tokens for a specific user
 // Returns active and expired tokens (caller should filter if needed)
 // Ordered by created_at DESC (newest first)
