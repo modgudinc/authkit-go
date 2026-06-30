@@ -53,7 +53,7 @@ var (
 	ErrOTPLockedOut = errors.New("authkit: too many invalid OTP attempts")
 
 	// ErrOTPRateLimited is returned by OTP generation when a new code is requested
-	// before the per-(tenant, email, purpose) rate-limit window has elapsed.
+	// before the per-(email, purpose) rate-limit window has elapsed.
 	ErrOTPRateLimited = errors.New("authkit: OTP rate limit exceeded")
 
 	// ErrOTPSecretMissing is returned by OTPService.Generate/Validate when no OTP
@@ -74,9 +74,10 @@ var (
 	// or has no remaining uses.
 	ErrInvitationInvalid = errors.New("authkit: invitation is invalid or expired")
 
-	// ErrUserExists is returned (wrapped) when creating a user that already exists
-	// for the tenant — i.e. a (tenant_id, email) uniqueness conflict, including
-	// when accepting an invitation for an email that already has an account.
+	// ErrUserExists is returned (wrapped) when creating a global user whose email
+	// already exists — i.e. a lower(email) uniqueness conflict. (Accepting an
+	// invitation for an email that already has an identity is NOT an error: the
+	// existing identity is reused and granted the invited membership.)
 	ErrUserExists = errors.New("authkit: user already exists")
 
 	// ErrPasswordTooWeak is returned (wrapped) when a password fails the strength

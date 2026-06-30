@@ -15,9 +15,10 @@ import (
 )
 
 // VerificationCode represents an OTP code for email verification. The OTP itself
-// is stored only as a keyed HMAC (CodeHash), never in plaintext.
+// is stored only as a keyed HMAC (CodeHash), never in plaintext. Codes are keyed by
+// (email, purpose) globally — email is a global identity now, so an OTP for
+// signup/reset is identity-level rather than tenant-scoped.
 type VerificationCode struct {
-	TenantID  string    `json:"tenant_id" db:"tenant_id"`
 	Email     string    `json:"email" db:"email"`
 	CodeHash  string    `json:"-" db:"code_hash"` // HMAC-SHA256 of the code; never the plaintext
 	Purpose   string    `json:"purpose" db:"purpose"`
@@ -30,7 +31,6 @@ type VerificationCode struct {
 // CodeHash is the keyed HMAC of the plaintext code (the service hashes it before
 // calling); the repository never sees or stores the plaintext.
 type CreateVerificationCodeRequest struct {
-	TenantID  string
 	Email     string
 	CodeHash  string
 	Purpose   string
@@ -42,8 +42,8 @@ type OTPConsumeResult int
 
 const (
 	// OTPConsumeInvalid means no active code matched (wrong code, wrong
-	// tenant/email/purpose, expired, or not found). The code, if any, was not
-	// consumed; the failed attempt may have been counted.
+	// email/purpose, expired, or not found). The code, if any, was not consumed;
+	// the failed attempt may have been counted.
 	OTPConsumeInvalid OTPConsumeResult = iota
 	// OTPConsumeValid means the code matched and was consumed (single-use).
 	OTPConsumeValid
@@ -55,48 +55,46 @@ const (
 // OTP Repository Methods:
 //
 // Code Management:
-// - Upsert       - Creates or updates a verification code for (tenant, email, purpose)
-// - Get          - Retrieves a verification code by (tenant, email, purpose)
-// - Verify       - Verifies an OTP code (checks existence, match, and expiration)
+// - Upsert       - Creates or updates a verification code for (email, purpose)
+// - Get          - Retrieves a verification code by (email, purpose)
 // - Consume      - Atomically validates and consumes a code, counting failed attempts
 // - Delete       - Deletes a verification code after use
 //
 // Maintenance:
 // - DeleteExpired - Cleanup method to remove expired verification codes
 //
-// All single-code operations are scoped by tenant_id so a code issued in one
-// tenant can never be read, overwritten, or verified in another tenant.
+// All single-code operations are keyed by (email, purpose) globally; purpose keeps
+// codes for distinct flows (signup vs reset) from evicting each other.
 
 // ============================================================================
-// Upsert - Creates or updates a verification code for (tenant, email, purpose)
+// Upsert - Creates or updates a verification code for (email, purpose)
 // Uses UPSERT to replace any existing code for the same key and resets the
 // failed-attempt counter so a freshly issued code starts with a full budget.
 // ============================================================================
-// UpsertVerificationCode atomically issues a code for (tenant, email, purpose),
-// enforcing the generation rate limit in the same statement to avoid a
-// check-then-write TOCTOU. The ON CONFLICT update only replaces an existing code
-// once it is older than rateLimit; if a more recent code exists the update
-// affects zero rows and stored is false (rate-limited). A fresh insert (no
-// existing code) always stores. rateLimit <= 0 disables the limit.
+// UpsertVerificationCode atomically issues a code for (email, purpose), enforcing
+// the generation rate limit in the same statement to avoid a check-then-write
+// TOCTOU. The ON CONFLICT update only replaces an existing code once it is older
+// than rateLimit; if a more recent code exists the update affects zero rows and
+// stored is false (rate-limited). A fresh insert (no existing code) always stores.
+// rateLimit <= 0 disables the limit.
 func (r *Repository) UpsertVerificationCode(ctx context.Context, req CreateVerificationCodeRequest, rateLimit time.Duration) (stored bool, err error) {
 	query := `
 		INSERT INTO {{schema}}.verification_codes (
-			tenant_id, email, code_hash, purpose, attempts, expires_at, created_at
+			email, code_hash, purpose, attempts, expires_at, created_at
 		)
-		VALUES ($1, $2, $3, $4, 0, $5, $6)
-		ON CONFLICT (tenant_id, email, purpose)
+		VALUES ($1, $2, $3, 0, $4, $5)
+		ON CONFLICT (email, purpose)
 		DO UPDATE SET
 			code_hash = EXCLUDED.code_hash,
 			attempts = 0,
 			expires_at = EXCLUDED.expires_at,
 			created_at = EXCLUDED.created_at
-		WHERE verification_codes.created_at <= $7
+		WHERE verification_codes.created_at <= $6
 	`
 
 	now := time.Now()
 	cutoff := now.Add(-rateLimit) // existing code must be at least this old to be replaced
 	result, err := r.rw.ExecContext(ctx, r.q(query),
-		req.TenantID,
 		req.Email,
 		req.CodeHash,
 		req.Purpose,
@@ -117,7 +115,7 @@ func (r *Repository) UpsertVerificationCode(ctx context.Context, req CreateVerif
 }
 
 // ============================================================================
-// Get - Retrieves a verification code by (tenant, email, purpose)
+// Get - Retrieves a verification code by (email, purpose)
 // Returns the full VerificationCode record including expiration and attempts.
 //
 // Reads from the PRIMARY (rw), not a read replica: the sole caller is OTP
@@ -129,18 +127,16 @@ func (r *Repository) UpsertVerificationCode(ctx context.Context, req CreateVerif
 // needs created_at, and the stored hash is only ever read back under a FOR UPDATE
 // row lock by ConsumeVerificationCode for the constant-time match.
 // ============================================================================
-func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*VerificationCode, error) {
+func (r *Repository) GetVerificationCode(ctx context.Context, email, purpose string) (*VerificationCode, error) {
 	query := `
-		SELECT tenant_id, email, purpose, attempts, expires_at, created_at
+		SELECT email, purpose, attempts, expires_at, created_at
 		FROM {{schema}}.verification_codes
-		WHERE tenant_id = $1
-		  AND email = $2
-		  AND purpose = $3
+		WHERE email = $1
+		  AND purpose = $2
 	`
 
 	var vc VerificationCode
-	err := r.rw.QueryRowContext(ctx, r.q(query), tenantID, email, purpose).Scan(
-		&vc.TenantID,
+	err := r.rw.QueryRowContext(ctx, r.q(query), email, purpose).Scan(
 		&vc.Email,
 		&vc.Purpose,
 		&vc.Attempts,
@@ -171,8 +167,8 @@ func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, p
 //
 // A locked-out code's row is deliberately NOT deleted: its created_at keeps
 // enforcing the generation rate limit, so repeatedly failing a code cannot reset
-// the per-(tenant, email, purpose) cooldown and drive unlimited OTP resends. The
-// row is replaced by the next generation once the cooldown elapses, and removed by
+// the per-(email, purpose) cooldown and drive unlimited OTP resends. The row is
+// replaced by the next generation once the cooldown elapses, and removed by
 // DeleteExpiredVerificationCodes at expiry.
 //
 // The code comparison is constant-time to avoid leaking match progress via timing.
@@ -180,7 +176,7 @@ func (r *Repository) GetVerificationCode(ctx context.Context, tenantID, email, p
 // before calling); the stored value is the same HMAC, so the compare is
 // hash-to-hash. maxAttempts <= 0 disables lockout (attempts are not enforced).
 // ============================================================================
-func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, email, codeHash, purpose string, maxAttempts int) (OTPConsumeResult, error) {
+func (r *Repository) ConsumeVerificationCode(ctx context.Context, email, codeHash, purpose string, maxAttempts int) (OTPConsumeResult, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
 		return OTPConsumeInvalid, fmt.Errorf("failed to begin verification code consumption: %w", err)
@@ -196,19 +192,18 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 	selectQuery := `
 		SELECT code_hash, attempts, expires_at
 		FROM {{schema}}.verification_codes
-		WHERE tenant_id = $1
-		  AND email = $2
-		  AND purpose = $3
+		WHERE email = $1
+		  AND purpose = $2
 		FOR UPDATE
 	`
 
 	var storedHash string
 	var attempts int
 	var expiresAt time.Time
-	err = tx.QueryRowContext(ctx, r.q(selectQuery), tenantID, email, purpose).Scan(&storedHash, &attempts, &expiresAt)
+	err = tx.QueryRowContext(ctx, r.q(selectQuery), email, purpose).Scan(&storedHash, &attempts, &expiresAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// No active code for this (tenant, email, purpose); nothing to consume.
+			// No active code for this (email, purpose); nothing to consume.
 			if cErr := tx.Commit(); cErr != nil {
 				return OTPConsumeInvalid, fmt.Errorf("failed to commit verification code consumption: %w", cErr)
 			}
@@ -220,13 +215,12 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 
 	deleteQuery := `
 		DELETE FROM {{schema}}.verification_codes
-		WHERE tenant_id = $1
-		  AND email = $2
-		  AND purpose = $3
+		WHERE email = $1
+		  AND purpose = $2
 	`
 
 	deleteAndCommit := func() error {
-		if _, err := tx.ExecContext(ctx, r.q(deleteQuery), tenantID, email, purpose); err != nil {
+		if _, err := tx.ExecContext(ctx, r.q(deleteQuery), email, purpose); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -269,12 +263,11 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 	newAttempts := attempts + 1
 	updateQuery := `
 		UPDATE {{schema}}.verification_codes
-		SET attempts = $4
-		WHERE tenant_id = $1
-		  AND email = $2
-		  AND purpose = $3
+		SET attempts = $3
+		WHERE email = $1
+		  AND purpose = $2
 	`
-	if _, err := tx.ExecContext(ctx, r.q(updateQuery), tenantID, email, purpose, newAttempts); err != nil {
+	if _, err := tx.ExecContext(ctx, r.q(updateQuery), email, purpose, newAttempts); err != nil {
 		return OTPConsumeInvalid, fmt.Errorf("failed to record failed verification attempt: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -289,18 +282,17 @@ func (r *Repository) ConsumeVerificationCode(ctx context.Context, tenantID, emai
 }
 
 // ============================================================================
-// Delete - Deletes a verification code for (tenant, email, purpose)
+// Delete - Deletes a verification code for (email, purpose)
 // Used to explicitly revoke a pending code before it is used.
 // ============================================================================
-func (r *Repository) DeleteVerificationCode(ctx context.Context, tenantID, email, purpose string) error {
+func (r *Repository) DeleteVerificationCode(ctx context.Context, email, purpose string) error {
 	query := `
 		DELETE FROM {{schema}}.verification_codes
-		WHERE tenant_id = $1
-		  AND email = $2
-		  AND purpose = $3
+		WHERE email = $1
+		  AND purpose = $2
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, email, purpose)
+	result, err := r.rw.ExecContext(ctx, r.q(query), email, purpose)
 	if err != nil {
 		return fmt.Errorf("failed to delete verification code: %w", err)
 	}
