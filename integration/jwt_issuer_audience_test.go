@@ -73,17 +73,23 @@ func TestAuthServiceJWTIssuerAudience(t *testing.T) {
 		t.Fatalf("expected token with configured iss/aud to validate: %v", err)
 	}
 
-	user, err := repo.GetByEmail(ctx, email, tenantID)
+	user, err := repo.GetByEmail(ctx, email)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
+	}
+	// The access token is workspace-scoped, so minting one requires the active
+	// membership (tenant + roles + membership token_version) too.
+	membership, err := repo.GetMembership(ctx, user.ID, tenantID)
+	if err != nil {
+		t.Fatalf("get membership: %v", err)
 	}
 
 	// A token signed with the SAME secret but a WRONG issuer/audience is rejected.
 	// The iss/aud check runs before any DB lookup, so the user being perfectly valid
-	// (correct token_version, enabled, unlocked) does not let it through.
+	// (correct token_version, enabled, unlocked, active membership) does not let it through.
 	wrong := service.NewJWTService(accessSecret, 5*time.Minute, time.Hour, nil,
 		service.WithIssuer("evil-issuer"), service.WithAudience("evil-aud"))
-	wrongToken, err := wrong.GenerateAccessToken(user)
+	wrongToken, err := wrong.GenerateAccessToken(user, membership)
 	if err != nil {
 		t.Fatalf("generate wrong iss/aud token: %v", err)
 	}
@@ -93,7 +99,7 @@ func TestAuthServiceJWTIssuerAudience(t *testing.T) {
 
 	// A token carrying NO iss/aud is likewise rejected by the configured validator.
 	plain := service.NewJWTService(accessSecret, 5*time.Minute, time.Hour, nil)
-	plainToken, err := plain.GenerateAccessToken(user)
+	plainToken, err := plain.GenerateAccessToken(user, membership)
 	if err != nil {
 		t.Fatalf("generate plain token: %v", err)
 	}

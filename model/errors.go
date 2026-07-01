@@ -33,8 +33,17 @@ var (
 	ErrInvalidToken = errors.New("authkit: invalid token")
 
 	// ErrTokenRevoked is returned when an access token is well-formed but has been
-	// revoked (token_version mismatch).
+	// revoked: the identity token_version or the membership token_version no longer
+	// matches, or the active membership the token is scoped to is suspended/removed.
 	ErrTokenRevoked = errors.New("authkit: token has been revoked")
+
+	// ErrNoActiveMembership is returned when an authenticated identity has no active
+	// membership in the requested tenant — there is no membership row, or it is
+	// suspended. It is the workspace-scoping outcome of the decoupled-identity model:
+	// the credentials are valid but the user is not (or no longer) a member of that
+	// workspace. Login/LoginByEmail/MintWorkspaceToken/RefreshToken return it; map it
+	// to HTTP 403.
+	ErrNoActiveMembership = errors.New("authkit: no active membership in tenant")
 
 	// ErrInvalidRefreshToken is returned when a refresh token is unknown, expired,
 	// or already consumed.
@@ -53,7 +62,7 @@ var (
 	ErrOTPLockedOut = errors.New("authkit: too many invalid OTP attempts")
 
 	// ErrOTPRateLimited is returned by OTP generation when a new code is requested
-	// before the per-(tenant, email, purpose) rate-limit window has elapsed.
+	// before the per-(email, purpose) rate-limit window has elapsed.
 	ErrOTPRateLimited = errors.New("authkit: OTP rate limit exceeded")
 
 	// ErrOTPSecretMissing is returned by OTPService.Generate/Validate when no OTP
@@ -74,9 +83,10 @@ var (
 	// or has no remaining uses.
 	ErrInvitationInvalid = errors.New("authkit: invitation is invalid or expired")
 
-	// ErrUserExists is returned (wrapped) when creating a user that already exists
-	// for the tenant — i.e. a (tenant_id, email) uniqueness conflict, including
-	// when accepting an invitation for an email that already has an account.
+	// ErrUserExists is returned (wrapped) when creating a global user whose email
+	// already exists — i.e. a lower(email) uniqueness conflict. (Accepting an
+	// invitation for an email that already has an identity is NOT an error: the
+	// existing identity is reused and granted the invited membership.)
 	ErrUserExists = errors.New("authkit: user already exists")
 
 	// ErrPasswordTooWeak is returned (wrapped) when a password fails the strength

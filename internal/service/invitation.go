@@ -244,48 +244,53 @@ func (s *InvitationService) Validate(ctx context.Context, code string) (bool, er
 	return valid, nil
 }
 
-// Accept atomically redeems an invitation and creates the user.
+// Accept atomically redeems an invitation, resolving the invitee's GLOBAL identity
+// and granting the invited membership.
 //
-// This is the preferred way to onboard an invited user: it validates the
-// invitation, consumes one use, and creates the user in a single transaction,
-// so a single-use invitation cannot onboard more than one account (no TOCTOU
-// over-redemption). The new user's tenant and roles are taken from the
-// invitation, and the user is bound to the invitation's target email — only the
-// display name and (already-hashed) password come from the caller.
+// This is the preferred way to onboard an invited user: in a single transaction it
+// validates the invitation, consumes one use, reuses the existing global identity for
+// the email (or creates one when the email is new — invited users do not get a second
+// account/password), and grants a membership to the invitation's tenant with the
+// invitation's roles. A single-use invitation therefore cannot onboard more than once
+// (no TOCTOU over-redemption), and the grant is bound to the invitation's target email
+// and roles (no privilege hijack). Only the display name and (already-hashed) password
+// are used, and only when creating a brand-new identity.
 //
-// Note: it validates expiry, remaining uses, and the email-matches-invitation,
-// but does NOT check the tenant's allowed_domains (enforce that at invitation
-// creation time if you need it).
+// Note: it validates expiry, remaining uses, and the email-matches-invitation, but
+// does NOT check the tenant's allowed_domains (enforce that at invitation creation
+// time if you need it).
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
 //   - req: AcceptInvitationRequest with the code, target email, display name, and
 //     pre-hashed password
 //
-// Returns the new user's ID, or an error wrapping model.ErrInvitationInvalid if
-// the invitation is unknown, expired, exhausted, or the email does not match.
-func (s *InvitationService) Accept(ctx context.Context, req model.AcceptInvitationRequest) (string, error) {
+// Returns the resolved user's ID and whether a NEW identity was created (false when an
+// existing one was reused), or an error wrapping model.ErrInvitationInvalid if the
+// invitation is unknown, expired, exhausted, or the email does not match.
+func (s *InvitationService) Accept(ctx context.Context, req model.AcceptInvitationRequest) (string, bool, error) {
 	s.logger.Info(ctx, "Accepting invitation",
 		"code", maskCode(req.Code),
 		"email", maskEmail(req.Email),
 	)
 
-	userID, err := s.repo.AcceptInvitation(ctx, req.Code, req.Email, req.DisplayName, req.PasswordHash)
+	userID, created, err := s.repo.AcceptInvitation(ctx, req.Code, req.Email, req.DisplayName, req.PasswordHash)
 	if err != nil {
 		s.logger.Warn(ctx, "Failed to accept invitation",
 			"code", maskCode(req.Code),
 			"email", maskEmail(req.Email),
 			"error", err.Error(),
 		)
-		return "", sanitizeError(ctx, s.logger, "accept invitation", err)
+		return "", false, sanitizeError(ctx, s.logger, "accept invitation", err)
 	}
 
 	s.logger.Info(ctx, "Invitation accepted successfully",
 		"code", maskCode(req.Code),
 		"user_id", userID,
+		"created", created,
 	)
 
-	return userID, nil
+	return userID, created, nil
 }
 
 // List lists all invitations for a tenant

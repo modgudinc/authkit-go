@@ -46,18 +46,19 @@ func TestUserStatusHistoryAndAudit(t *testing.T) {
 
 	// Drive four real transitions through the service layer. Each records one audit
 	// row (with changed_by NULL, changed_by_type "admin") and Lock/Disable also revoke
-	// refresh tokens (repo.DeleteByUserID).
+	// refresh tokens (repo.DeleteByUserID). Status operations are identity-level (no
+	// tenant) in the decoupled model.
 	until := time.Now().Add(time.Hour)
-	if err := users.Lock(ctx, userID, tenantID, &until); err != nil {
+	if err := users.Lock(ctx, userID, &until); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	if err := users.Unlock(ctx, userID, tenantID); err != nil {
+	if err := users.Unlock(ctx, userID); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
-	if err := users.Disable(ctx, userID, tenantID); err != nil {
+	if err := users.Disable(ctx, userID); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	if err := users.Enable(ctx, userID, tenantID); err != nil {
+	if err := users.Enable(ctx, userID); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 
@@ -71,7 +72,7 @@ func TestUserStatusHistoryAndAudit(t *testing.T) {
 		t.Fatalf("insert manual status change: %v", err)
 	}
 
-	history, err := users.StatusHistory(ctx, userID, tenantID)
+	history, err := users.StatusHistory(ctx, userID)
 	if err != nil {
 		t.Fatalf("status history: %v", err)
 	}
@@ -104,13 +105,16 @@ func TestUserStatusHistoryAndAudit(t *testing.T) {
 		t.Fatal("expected the manually inserted row with non-NULL changed_by (sql.NullString valid branch)")
 	}
 
-	// Tenant scoping: a cross-tenant read returns no rows (not another tenant's trail).
-	other, err := users.StatusHistory(ctx, userID, "other.tenant")
+	// Identity scoping: the audit trail is keyed by the global user id. A different
+	// identity (no status transitions) has its own, empty trail — one user's trail is
+	// never returned for another.
+	otherID := createUserWithPassword(t, ctx, &repo, tenantID, "other@"+tenantID, "ValidPass1!", service.NewPasswordService(4, nil))
+	other, err := users.StatusHistory(ctx, otherID)
 	if err != nil {
-		t.Fatalf("cross-tenant status history: %v", err)
+		t.Fatalf("other-identity status history: %v", err)
 	}
 	if len(other) != 0 {
-		t.Fatalf("expected empty cross-tenant history, got %d", len(other))
+		t.Fatalf("expected empty history for an untouched identity, got %d", len(other))
 	}
 }
 
@@ -261,7 +265,7 @@ func TestInvitationServiceAcceptFlow(t *testing.T) {
 		t.Fatalf("hash password: %v", err)
 	}
 
-	newUserID, err := invites.Accept(ctx, model.AcceptInvitationRequest{
+	newUserID, created, err := invites.Accept(ctx, model.AcceptInvitationRequest{
 		Code:         inv.Code,
 		Email:        inviteeEmail,
 		DisplayName:  "New Hire",
@@ -273,21 +277,29 @@ func TestInvitationServiceAcceptFlow(t *testing.T) {
 	if newUserID == "" {
 		t.Fatal("expected new user id, got empty")
 	}
+	if !created {
+		t.Fatal("expected a brand-new global identity to be created")
+	}
 
-	// The new user exists with the invitation's tenant and roles.
-	createdUser, err := repo.GetByEmail(ctx, inviteeEmail, tenantID)
+	// The new GLOBAL identity exists (email lookup is tenant-agnostic now).
+	createdUser, err := repo.GetByEmail(ctx, inviteeEmail)
 	if err != nil {
 		t.Fatalf("get accepted user: %v", err)
 	}
 	if createdUser.ID != newUserID {
 		t.Fatalf("accepted user id mismatch: %s vs %s", createdUser.ID, newUserID)
 	}
-	if len(createdUser.Roles) != 1 || createdUser.Roles[0] != "Member" {
-		t.Fatalf("expected roles [Member], got %v", createdUser.Roles)
+	// Roles live on the membership granted in the invitation's tenant.
+	membership, err := repo.GetMembership(ctx, newUserID, tenantID)
+	if err != nil {
+		t.Fatalf("get accepted membership: %v", err)
+	}
+	if !membership.IsActive() || len(membership.Roles) != 1 || membership.Roles[0] != "Member" {
+		t.Fatalf("expected active membership with roles [Member], got %+v", membership)
 	}
 
 	// Single-use: a second redemption fails as invalid/exhausted.
-	if _, err := invites.Accept(ctx, model.AcceptInvitationRequest{
+	if _, _, err := invites.Accept(ctx, model.AcceptInvitationRequest{
 		Code:         inv.Code,
 		Email:        inviteeEmail,
 		DisplayName:  "Dup",
@@ -306,7 +318,7 @@ func TestInvitationServiceAcceptFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create second invitation: %v", err)
 	}
-	if _, err := invites.Accept(ctx, model.AcceptInvitationRequest{
+	if _, _, err := invites.Accept(ctx, model.AcceptInvitationRequest{
 		Code:         inv2.Code,
 		Email:        "attacker@" + tenantID,
 		DisplayName:  "X",
@@ -319,7 +331,7 @@ func TestInvitationServiceAcceptFlow(t *testing.T) {
 	if err := invites.Revoke(ctx, inv2.Code); err != nil {
 		t.Fatalf("revoke invitation: %v", err)
 	}
-	if _, err := invites.Accept(ctx, model.AcceptInvitationRequest{
+	if _, _, err := invites.Accept(ctx, model.AcceptInvitationRequest{
 		Code:         inv2.Code,
 		Email:        "exact@" + tenantID,
 		DisplayName:  "Y",
@@ -329,9 +341,11 @@ func TestInvitationServiceAcceptFlow(t *testing.T) {
 	}
 }
 
-// TestUserServiceSecurityMutations covers the token-invalidating admin mutations:
-// UpdateRoles and IncrementTokenVersion must bump token_version, and SetPassword must
-// replace the stored hash (all three also revoke refresh tokens).
+// TestUserServiceSecurityMutations covers the token-invalidating admin mutations in
+// the decoupled model: MembershipService.UpdateRoles bumps the per-workspace
+// (membership) token_version; UserService.IncrementTokenVersion bumps the identity
+// token_version; and UserService.SetPassword replaces the stored hash. (UserService no
+// longer has UpdateRoles — roles moved onto the membership graph.)
 func TestUserServiceSecurityMutations(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -346,40 +360,41 @@ func TestUserServiceSecurityMutations(t *testing.T) {
 	repo := repository.New(db, db)
 	authKit := newIntegrationAuthKit(t, db)
 	users := authKit.UserService()
+	memberships := authKit.MembershipService()
 	pw := service.NewPasswordService(4, nil)
 
 	tenantID := "usermut.test"
-	userID := createTenantAndUser(t, ctx, &repo, tenantID) // roles: [Admin]
+	userID := createTenantAndUser(t, ctx, &repo, tenantID) // membership roles: [Admin]
 
-	before, err := repo.GetByID(ctx, userID, tenantID)
+	// MembershipService.UpdateRoles replaces the workspace roles and bumps the
+	// MEMBERSHIP token_version (only this workspace's access tokens are invalidated).
+	mBefore, err := repo.GetMembership(ctx, userID, tenantID)
 	if err != nil {
-		t.Fatalf("get user before: %v", err)
+		t.Fatalf("get membership before: %v", err)
 	}
-
-	// UpdateRoles replaces roles and bumps token_version.
-	if err := users.UpdateRoles(ctx, userID, tenantID, []string{"Member", "Viewer"}); err != nil {
-		t.Fatalf("update roles: %v", err)
+	if err := memberships.UpdateRoles(ctx, userID, tenantID, []string{"Member", "Viewer"}); err != nil {
+		t.Fatalf("update membership roles: %v", err)
 	}
-	afterRoles, err := repo.GetByID(ctx, userID, tenantID)
+	mAfter, err := repo.GetMembership(ctx, userID, tenantID)
 	if err != nil {
-		t.Fatalf("get user after roles: %v", err)
+		t.Fatalf("get membership after roles: %v", err)
 	}
-	if afterRoles.TokenVersion <= before.TokenVersion {
-		t.Fatalf("UpdateRoles did not bump token_version (%d -> %d)", before.TokenVersion, afterRoles.TokenVersion)
+	if mAfter.TokenVersion <= mBefore.TokenVersion {
+		t.Fatalf("UpdateRoles did not bump membership token_version (%d -> %d)", mBefore.TokenVersion, mAfter.TokenVersion)
 	}
-	if len(afterRoles.Roles) != 2 {
-		t.Fatalf("expected 2 roles after update, got %v", afterRoles.Roles)
+	if len(mAfter.Roles) != 2 {
+		t.Fatalf("expected 2 roles after update, got %v", mAfter.Roles)
 	}
 
-	// SetPassword replaces the stored hash.
+	// SetPassword replaces the stored hash (identity-level).
 	newHash, err := pw.HashPassword("NewValidPass1!")
 	if err != nil {
 		t.Fatalf("hash new password: %v", err)
 	}
-	if err := users.SetPassword(ctx, userID, tenantID, newHash); err != nil {
+	if err := users.SetPassword(ctx, userID, newHash); err != nil {
 		t.Fatalf("set password: %v", err)
 	}
-	gotHash, err := users.VerifyPassword(ctx, userID, tenantID)
+	gotHash, err := users.VerifyPassword(ctx, userID)
 	if err != nil {
 		t.Fatalf("verify password: %v", err)
 	}
@@ -387,20 +402,21 @@ func TestUserServiceSecurityMutations(t *testing.T) {
 		t.Fatal("stored password hash was not updated by SetPassword")
 	}
 
-	// IncrementTokenVersion bumps again (full revocation).
-	preBump, err := repo.GetByID(ctx, userID, tenantID)
+	// IncrementTokenVersion bumps the IDENTITY token_version (full revocation across
+	// every workspace).
+	preBump, err := repo.GetByID(ctx, userID)
 	if err != nil {
 		t.Fatalf("get user pre-bump: %v", err)
 	}
-	if err := users.IncrementTokenVersion(ctx, userID, tenantID); err != nil {
+	if err := users.IncrementTokenVersion(ctx, userID); err != nil {
 		t.Fatalf("increment token version: %v", err)
 	}
-	postBump, err := repo.GetByID(ctx, userID, tenantID)
+	postBump, err := repo.GetByID(ctx, userID)
 	if err != nil {
 		t.Fatalf("get user post-bump: %v", err)
 	}
 	if postBump.TokenVersion <= preBump.TokenVersion {
-		t.Fatalf("IncrementTokenVersion did not bump token_version (%d -> %d)", preBump.TokenVersion, postBump.TokenVersion)
+		t.Fatalf("IncrementTokenVersion did not bump identity token_version (%d -> %d)", preBump.TokenVersion, postBump.TokenVersion)
 	}
 }
 
@@ -428,18 +444,24 @@ func TestRefreshTokenPairGatesAndErrors(t *testing.T) {
 	tenantID := "refresh.test"
 	userID := createTenantAndUser(t, ctx, &repo, tenantID)
 
-	user, err := repo.GetByID(ctx, userID, tenantID)
+	user, err := repo.GetByID(ctx, userID)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
+	// The token pair is workspace-scoped, so minting one needs the active membership.
+	membership, err := repo.GetMembership(ctx, userID, tenantID)
+	if err != nil {
+		t.Fatalf("get membership: %v", err)
+	}
 
 	// 0. Happy-path rotation WITH session info, exercising the IP/user-agent/device
-	// extraction branch (the other refresh tests pass a nil SessionInfo).
-	seed, err := tokens.GenerateTokenPair(ctx, user, nil)
+	// extraction branch (the other refresh tests pass a nil SessionInfo). RefreshTokenPair
+	// is workspace-scoped now and rotates into tenantID.
+	seed, err := tokens.GenerateTokenPair(ctx, user, membership, nil)
 	if err != nil {
 		t.Fatalf("seed token pair: %v", err)
 	}
-	rotated, err := tokens.RefreshTokenPair(ctx, seed.RefreshToken, &model.SessionInfo{
+	rotated, err := tokens.RefreshTokenPair(ctx, seed.RefreshToken, tenantID, &model.SessionInfo{
 		IPAddress:  "10.0.0.9",
 		UserAgent:  "integration-agent",
 		DeviceName: "integration-device",
@@ -452,7 +474,7 @@ func TestRefreshTokenPairGatesAndErrors(t *testing.T) {
 	}
 
 	// 1. Unknown/garbage refresh token -> routine invalid (not reuse) -> ErrInvalidRefreshToken.
-	if _, err := tokens.RefreshTokenPair(ctx, "not-a-real-refresh-token", nil); !errors.Is(err, model.ErrInvalidRefreshToken) {
+	if _, err := tokens.RefreshTokenPair(ctx, "not-a-real-refresh-token", tenantID, nil); !errors.Is(err, model.ErrInvalidRefreshToken) {
 		t.Fatalf("refresh with unknown token: expected ErrInvalidRefreshToken, got %v", err)
 	}
 
@@ -460,14 +482,14 @@ func TestRefreshTokenPairGatesAndErrors(t *testing.T) {
 	// Mint a valid refresh token, then disable at the repo layer (which, unlike
 	// UserService.Disable, does NOT revoke tokens), so the token survives to reach the
 	// post-rotation gate inside RefreshTokenPair.
-	pair, err := tokens.GenerateTokenPair(ctx, user, &model.SessionInfo{IPAddress: "127.0.0.1"})
+	pair, err := tokens.GenerateTokenPair(ctx, user, membership, &model.SessionInfo{IPAddress: "127.0.0.1"})
 	if err != nil {
 		t.Fatalf("generate token pair: %v", err)
 	}
-	if err := repo.DisableByTenant(ctx, userID, tenantID); err != nil {
+	if err := repo.Disable(ctx, userID); err != nil {
 		t.Fatalf("disable user: %v", err)
 	}
-	if _, err := tokens.RefreshTokenPair(ctx, pair.RefreshToken, nil); !errors.Is(err, model.ErrInvalidRefreshToken) {
+	if _, err := tokens.RefreshTokenPair(ctx, pair.RefreshToken, tenantID, nil); !errors.Is(err, model.ErrInvalidRefreshToken) {
 		t.Fatalf("refresh on disabled account: expected ErrInvalidRefreshToken, got %v", err)
 	}
 	// The gate revokes the whole family: the consumed token AND its just-minted replacement.
@@ -481,22 +503,22 @@ func TestRefreshTokenPairGatesAndErrors(t *testing.T) {
 
 	// 3. Account-not-active gate: LOCKED.
 	// Re-enable, mint a fresh token, then lock until a future time.
-	if err := repo.EnableByTenant(ctx, userID, tenantID); err != nil {
+	if err := repo.Enable(ctx, userID); err != nil {
 		t.Fatalf("re-enable user: %v", err)
 	}
-	reUser, err := repo.GetByID(ctx, userID, tenantID)
+	reUser, err := repo.GetByID(ctx, userID)
 	if err != nil {
 		t.Fatalf("get re-enabled user: %v", err)
 	}
-	pair2, err := tokens.GenerateTokenPair(ctx, reUser, nil)
+	pair2, err := tokens.GenerateTokenPair(ctx, reUser, membership, nil)
 	if err != nil {
 		t.Fatalf("generate token pair (locked case): %v", err)
 	}
 	until := time.Now().Add(time.Hour)
-	if err := repo.LockByTenant(ctx, userID, tenantID, &until); err != nil {
+	if err := repo.Lock(ctx, userID, &until); err != nil {
 		t.Fatalf("lock user: %v", err)
 	}
-	if _, err := tokens.RefreshTokenPair(ctx, pair2.RefreshToken, nil); !errors.Is(err, model.ErrInvalidRefreshToken) {
+	if _, err := tokens.RefreshTokenPair(ctx, pair2.RefreshToken, tenantID, nil); !errors.Is(err, model.ErrInvalidRefreshToken) {
 		t.Fatalf("refresh on locked account: expected ErrInvalidRefreshToken, got %v", err)
 	}
 	active, err = repo.GetByUserID(ctx, userID)

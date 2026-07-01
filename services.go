@@ -43,12 +43,38 @@ type APIKeyService interface {
 // The embedding application MUST add IP-/client-based rate limiting in front of
 // these methods. See SECURITY.md ("Caller-Owned Controls").
 type AuthService interface {
+	// Login authenticates into a known workspace (req.TenantID) and returns a
+	// workspace-scoped access token + identity-session refresh token.
 	Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error)
+	// LoginByEmail authenticates the identity without a known workspace: it opens the
+	// session and either mints a token (when the workspace is given or the identity
+	// has exactly one active membership) or returns the membership list to choose from.
+	LoginByEmail(ctx context.Context, req model.LoginByEmailRequest) (*model.LoginResponse, error)
+	// MintWorkspaceToken mints a fresh workspace-scoped access token from an existing
+	// identity session (the refresh token) — the select-/switch-workspace call.
+	MintWorkspaceToken(ctx context.Context, refreshToken, tenantID string) (*model.WorkspaceTokenResponse, error)
 	Logout(ctx context.Context, refreshToken string) error
-	LogoutAll(ctx context.Context, userID string, tenantID string) error
+	// LogoutAll invalidates every workspace's access tokens and revokes all refresh
+	// tokens for an identity (identity-level; the caller authorizes userID).
+	LogoutAll(ctx context.Context, userID string) error
 	RefreshToken(ctx context.Context, req model.RefreshRequest) (*model.RefreshResponse, error)
 	ValidateJWT(ctx context.Context, token string) (*model.JWTClaims, error)
 	ChangePassword(ctx context.Context, req model.ChangePasswordRequest) error
+}
+
+// MembershipService manages the user<->tenant membership graph: which global
+// identity belongs to which tenant, with which (opaque) roles. authkit owns the
+// graph; the embedding application interprets the role strings. Remove is a
+// soft-revoke (the membership is suspended and its token_version bumped); Add is an
+// idempotent upsert that re-grants/reactivates.
+type MembershipService interface {
+	Add(ctx context.Context, req model.AddMembershipRequest) error
+	Remove(ctx context.Context, userID, tenantID string) error
+	UpdateRoles(ctx context.Context, userID, tenantID string, roles []string) error
+	Get(ctx context.Context, userID, tenantID string) (*model.Membership, error)
+	ListByUser(ctx context.Context, userID string) ([]*model.Membership, error)
+	ListByTenant(ctx context.Context, tenantID string) ([]*model.Membership, error)
+	CountByTenant(ctx context.Context, tenantID string) (int, error)
 }
 
 // InvitationService manages invitation lifecycle and redemption.
@@ -65,7 +91,7 @@ type InvitationService interface {
 	Create(ctx context.Context, req model.CreateInvitationRequest) (*model.Invitation, error)
 	Get(ctx context.Context, code string) (*model.Invitation, error)
 	Validate(ctx context.Context, code string) (bool, error)
-	Accept(ctx context.Context, req model.AcceptInvitationRequest) (string, error)
+	Accept(ctx context.Context, req model.AcceptInvitationRequest) (userID string, created bool, err error)
 	List(ctx context.Context, tenantID string) ([]*model.Invitation, error)
 	ListActive(ctx context.Context, tenantID string) ([]*model.Invitation, error)
 	Revoke(ctx context.Context, code string) error
@@ -77,12 +103,13 @@ type InvitationService interface {
 
 // JWTService generates and validates JWT access tokens and opaque refresh tokens.
 //
-// GenerateAccessToken copies the supplied *model.User's fields (including
-// TokenVersion and Roles) verbatim into the signed claims, so it must be a
-// complete, freshly loaded record — a partial/hand-built User can mint a token that
-// ValidateJWT treats as revoked. Prefer the AuthService flows, which load the user.
+// GenerateAccessToken copies the supplied user's identity fields (TokenVersion) and
+// the membership's workspace fields (TenantID, Roles, membership TokenVersion)
+// verbatim into the signed claims, so both must be complete, freshly loaded records —
+// a partial/hand-built record can mint a token that ValidateJWT treats as revoked.
+// Prefer the AuthService flows, which load both.
 type JWTService interface {
-	GenerateAccessToken(user *model.User) (string, error)
+	GenerateAccessToken(user *model.User, membership *model.Membership) (string, error)
 	ValidateAccessToken(tokenString string) (*model.JWTClaims, error)
 	GenerateRefreshToken() (string, error)
 	GetAccessExpiry() time.Duration
@@ -93,7 +120,7 @@ type JWTService interface {
 type OTPService interface {
 	Generate(ctx context.Context, req model.OTPGenerateRequest) (*model.GenerateResponse, error)
 	Validate(ctx context.Context, req model.OTPValidateRequest) error
-	Delete(ctx context.Context, tenantID, email, purpose string) error
+	Delete(ctx context.Context, email, purpose string) error
 	CleanupExpired(ctx context.Context) (int64, error)
 }
 
@@ -145,51 +172,53 @@ type TenantService interface {
 // As with JWTService, GenerateTokenPair stamps the supplied *model.User's fields
 // into the access token, so pass a complete, freshly loaded record (see JWTService).
 type TokenService interface {
-	GenerateTokenPair(ctx context.Context, user *model.User, sessionInfo *model.SessionInfo) (*model.TokenPairResponse, error)
+	GenerateTokenPair(ctx context.Context, user *model.User, membership *model.Membership, sessionInfo *model.SessionInfo) (*model.TokenPairResponse, error)
 	ValidateRefreshToken(ctx context.Context, tokenString string) (*model.User, error)
-	RefreshTokenPair(ctx context.Context, refreshToken string, sessionInfo *model.SessionInfo) (*model.TokenPairResponse, error)
+	RefreshTokenPair(ctx context.Context, refreshToken string, tenantID string, sessionInfo *model.SessionInfo) (*model.TokenPairResponse, error)
 	RevokeRefreshToken(ctx context.Context, tokenString string) error
-	// RevokeAllUserTokens is intentionally NOT exposed here: it scopes by user_id
-	// only (refresh tokens carry no tenant column), so calling it with a
-	// caller-supplied id and no prior tenant-ownership check is a cross-tenant
-	// authorization gap. Use AuthService.LogoutAll(ctx, userID, tenantID), which
-	// proves tenant membership first and also invalidates access tokens.
+	// RevokeAllUserTokens is intentionally NOT exposed here: it revokes every refresh
+	// token for a user id without any authorization check. Use AuthService.LogoutAll(ctx,
+	// userID), which is identity-level — it bumps the identity token_version (invalidating
+	// every workspace's access tokens) and then revokes the user's refresh tokens; the
+	// caller is responsible for authorizing that it may act on userID.
 	CleanupExpired(ctx context.Context) (int64, error)
 }
 
-// UserService manages users, their queries, and account status operations.
+// UserService manages GLOBAL identities, their queries, and account status
+// operations. A user carries no tenant or roles (those live on memberships — see
+// MembershipService); every operation is keyed by the global user id or the
+// globally-unique email.
 //
-// Convention: create/update operations take a keyed request struct with the
-// identity inside (Create, Update, plus AuthService.ChangePassword); simple
-// get/delete/status/role operations take positional ids (userID, tenantID). Every
-// mutator is tenant-scoped — a cross-tenant userID matches no row (ErrNotFound).
+// Convention: create/update operations take a keyed request struct with the identity
+// inside (Create, Update, plus AuthService.ChangePassword); simple get/delete/status
+// operations take a positional userID (or email for lookups).
 type UserService interface {
 	Create(ctx context.Context, req model.CreateUserRequest) (string, error)
 	Update(ctx context.Context, req model.UpdateUserRequest) error
-	Delete(ctx context.Context, userID string, tenantID string) error
-	GetByID(ctx context.Context, userID string, tenantID string) (*model.User, error)
-	GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error)
-	Exists(ctx context.Context, email, tenantID string) (bool, error)
-	List(ctx context.Context, tenantID string, limit, offset int) ([]*model.User, error)
-	ExistsActive(ctx context.Context, email, tenantID string) (bool, error)
-	GetDisplayName(ctx context.Context, userID string, tenantID string) (string, error)
-	GetActiveUserIDByEmail(ctx context.Context, email, tenantID string) (string, error)
-	Enable(ctx context.Context, userID string, tenantID string) error
-	Disable(ctx context.Context, userID string, tenantID string) error
-	Lock(ctx context.Context, userID string, tenantID string, lockedUntil *time.Time) error
-	Unlock(ctx context.Context, userID string, tenantID string) error
-	SetPassword(ctx context.Context, userID string, tenantID, hashedPassword string) error
-	VerifyPassword(ctx context.Context, userID string, tenantID string) (string, error)
-	UpdateLastLogin(ctx context.Context, userID string, tenantID string) error
-	IncrementFailedLoginCount(ctx context.Context, userID string, tenantID string) error
-	IncrementTokenVersion(ctx context.Context, userID string, tenantID string) error
-	UpdateRoles(ctx context.Context, userID string, tenantID string, roles []string) error
-	Count(ctx context.Context, tenantID string) (int, error)
+	Delete(ctx context.Context, userID string) error
+	GetByID(ctx context.Context, userID string) (*model.User, error)
+	GetByEmail(ctx context.Context, email string) (*model.User, error)
+	Exists(ctx context.Context, email string) (bool, error)
+	// List is a global (cross-tenant) admin listing; for a tenant's members use
+	// MembershipService.ListByTenant.
+	List(ctx context.Context, limit, offset int) ([]*model.User, error)
+	ExistsActive(ctx context.Context, email string) (bool, error)
+	GetDisplayName(ctx context.Context, userID string) (string, error)
+	GetActiveUserIDByEmail(ctx context.Context, email string) (string, error)
+	Enable(ctx context.Context, userID string) error
+	Disable(ctx context.Context, userID string) error
+	Lock(ctx context.Context, userID string, lockedUntil *time.Time) error
+	Unlock(ctx context.Context, userID string) error
+	SetPassword(ctx context.Context, userID, hashedPassword string) error
+	VerifyPassword(ctx context.Context, userID string) (string, error)
+	UpdateLastLogin(ctx context.Context, userID string) error
+	IncrementFailedLoginCount(ctx context.Context, userID string) error
+	IncrementTokenVersion(ctx context.Context, userID string) error
 	// StatusHistory returns a user's account status-change audit trail (newest
-	// first), tenant-scoped. CleanupStatusChanges deletes audit rows older than
-	// olderThan (which must be positive) and returns the count removed; run it
-	// periodically to bound the otherwise unbounded audit table.
-	StatusHistory(ctx context.Context, userID string, tenantID string) ([]*model.UserStatusChange, error)
+	// first). CleanupStatusChanges deletes audit rows older than olderThan (which must
+	// be positive) and returns the count removed; run it periodically to bound the
+	// otherwise unbounded audit table.
+	StatusHistory(ctx context.Context, userID string) ([]*model.UserStatusChange, error)
 	CleanupStatusChanges(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
@@ -201,6 +230,7 @@ var (
 	_ AuthService       = (*service.AuthService)(nil)
 	_ InvitationService = (*service.InvitationService)(nil)
 	_ JWTService        = (*service.JWTService)(nil)
+	_ MembershipService = (*service.MembershipService)(nil)
 	_ OTPService        = (*service.OTPService)(nil)
 	_ PasswordService   = (*service.PasswordService)(nil)
 	_ SecretService     = (*service.SecretService)(nil)

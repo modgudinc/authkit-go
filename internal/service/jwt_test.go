@@ -15,17 +15,20 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
+// jwtTestMembership builds an active membership for the JWT generation tests, where
+// the workspace claims (tenant_id, roles, membership_token_version) come from.
+func jwtTestMembership(tenantID string, roles ...string) *model.Membership {
+	return &model.Membership{TenantID: tenantID, Roles: roles, Status: model.MembershipActive}
+}
+
 func TestJWTServiceGenerateAndValidateAccessToken(t *testing.T) {
 	userID := uuid.Must(uuid.NewV7()).String()
 	service := NewJWTService("access-secret", time.Minute, time.Hour, nil)
 
-	token, err := service.GenerateAccessToken(&model.User{
-		ID:           userID,
-		Email:        "user@example.com",
-		TenantID:     "tenant-a",
-		Roles:        []string{"Admin", "Member"},
-		TokenVersion: 7,
-	})
+	token, err := service.GenerateAccessToken(
+		&model.User{ID: userID, Email: "user@example.com", TokenVersion: 7},
+		&model.Membership{TenantID: "tenant-a", Roles: []string{"Admin", "Member"}, TokenVersion: 2, Status: model.MembershipActive},
+	)
 	if err != nil {
 		t.Fatalf("generate access token: %v", err)
 	}
@@ -37,7 +40,7 @@ func TestJWTServiceGenerateAndValidateAccessToken(t *testing.T) {
 	if claims.UserID != userID {
 		t.Fatalf("user id = %s, want %s", claims.UserID, userID)
 	}
-	if claims.Email != "user@example.com" || claims.TenantID != "tenant-a" || claims.TokenVersion != 7 {
+	if claims.Email != "user@example.com" || claims.TenantID != "tenant-a" || claims.TokenVersion != 7 || claims.MembershipTokenVersion != 2 {
 		t.Fatalf("unexpected claims: %+v", claims)
 	}
 	if len(claims.Roles) != 2 || claims.Roles[0] != "Admin" || claims.Roles[1] != "Member" {
@@ -48,7 +51,7 @@ func TestJWTServiceGenerateAndValidateAccessToken(t *testing.T) {
 func TestJWTServiceRejectsWrongSecretAndExpiredToken(t *testing.T) {
 	userID := uuid.Must(uuid.NewV7()).String()
 	service := NewJWTService("access-secret", -time.Minute, time.Hour, nil)
-	token, err := service.GenerateAccessToken(&model.User{ID: userID, Email: "user@example.com", TenantID: "tenant-a"})
+	token, err := service.GenerateAccessToken(&model.User{ID: userID, Email: "user@example.com"}, jwtTestMembership("tenant-a"))
 	if err != nil {
 		t.Fatalf("generate expired token: %v", err)
 	}
@@ -58,7 +61,7 @@ func TestJWTServiceRejectsWrongSecretAndExpiredToken(t *testing.T) {
 	}
 
 	freshService := NewJWTService("access-secret", time.Minute, time.Hour, nil)
-	freshToken, err := freshService.GenerateAccessToken(&model.User{ID: userID, Email: "user@example.com", TenantID: "tenant-a"})
+	freshToken, err := freshService.GenerateAccessToken(&model.User{ID: userID, Email: "user@example.com"}, jwtTestMembership("tenant-a"))
 	if err != nil {
 		t.Fatalf("generate fresh token: %v", err)
 	}
@@ -120,11 +123,12 @@ func TestJWTServiceRejectsAlgorithmConfusion(t *testing.T) {
 }
 
 func TestJWTServiceIssuerAudience(t *testing.T) {
-	user := &model.User{ID: uuid.Must(uuid.NewV7()).String(), Email: "u@x.com", TenantID: "t"}
+	user := &model.User{ID: uuid.Must(uuid.NewV7()).String(), Email: "u@x.com"}
+	mem := jwtTestMembership("t")
 
 	issued := NewJWTService("access-secret", time.Minute, time.Hour, nil,
 		WithIssuer("authkit"), WithAudience("api"))
-	token, err := issued.GenerateAccessToken(user)
+	token, err := issued.GenerateAccessToken(user, mem)
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}
@@ -143,7 +147,7 @@ func TestJWTServiceIssuerAudience(t *testing.T) {
 
 	// A validator requiring an audience rejects a token that has none.
 	plain := NewJWTService("access-secret", time.Minute, time.Hour, nil)
-	plainToken, err := plain.GenerateAccessToken(user)
+	plainToken, err := plain.GenerateAccessToken(user, mem)
 	if err != nil {
 		t.Fatalf("generate plain token: %v", err)
 	}
@@ -158,11 +162,12 @@ func TestJWTServiceIssuerAudience(t *testing.T) {
 // that every iss/aud failure surfaces the model.ErrInvalidToken sentinel so callers
 // can errors.Is them like any other validation failure.
 func TestJWTServiceIssuerAudienceMismatches(t *testing.T) {
-	user := &model.User{ID: uuid.Must(uuid.NewV7()).String(), Email: "u@x.com", TenantID: "t"}
+	user := &model.User{ID: uuid.Must(uuid.NewV7()).String(), Email: "u@x.com"}
+	mem := jwtTestMembership("t")
 
 	// Token minted with iss="authkit", aud="api".
 	issued := NewJWTService("access-secret", time.Minute, time.Hour, nil, WithIssuer("authkit"), WithAudience("api"))
-	token, err := issued.GenerateAccessToken(user)
+	token, err := issued.GenerateAccessToken(user, mem)
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}
@@ -175,7 +180,7 @@ func TestJWTServiceIssuerAudienceMismatches(t *testing.T) {
 
 	// Missing issuer: token carries no iss, validator requires one.
 	audOnly := NewJWTService("access-secret", time.Minute, time.Hour, nil, WithAudience("api"))
-	audOnlyToken, err := audOnly.GenerateAccessToken(user)
+	audOnlyToken, err := audOnly.GenerateAccessToken(user, mem)
 	if err != nil {
 		t.Fatalf("generate aud-only token: %v", err)
 	}
@@ -228,7 +233,8 @@ func TestJWTServiceRejectsMalformedToken(t *testing.T) {
 // the same way it can with AuthService.ValidateJWT.
 func TestJWTServiceWrapsInvalidTokenSentinel(t *testing.T) {
 	valid := NewJWTService("access-secret", time.Minute, time.Hour, nil)
-	user := &model.User{ID: uuid.Must(uuid.NewV7()).String(), Email: "u@x.com", TenantID: "t"}
+	user := &model.User{ID: uuid.Must(uuid.NewV7()).String(), Email: "u@x.com"}
+	mem := jwtTestMembership("t")
 
 	// Malformed token.
 	if _, err := valid.ValidateAccessToken("not-a-jwt"); !errors.Is(err, model.ErrInvalidToken) {
@@ -236,7 +242,7 @@ func TestJWTServiceWrapsInvalidTokenSentinel(t *testing.T) {
 	}
 
 	// Token signed with a different secret.
-	token, err := valid.GenerateAccessToken(user)
+	token, err := valid.GenerateAccessToken(user, mem)
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}
@@ -247,7 +253,7 @@ func TestJWTServiceWrapsInvalidTokenSentinel(t *testing.T) {
 
 	// Expired token.
 	expiredSvc := NewJWTService("access-secret", -time.Minute, time.Hour, nil)
-	expired, err := expiredSvc.GenerateAccessToken(user)
+	expired, err := expiredSvc.GenerateAccessToken(user, mem)
 	if err != nil {
 		t.Fatalf("generate expired token: %v", err)
 	}

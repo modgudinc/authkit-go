@@ -14,8 +14,6 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
-const testTenantID = "acme.test"
-
 // testOTPHMAC keys the HMAC used to hash OTP codes at rest in these unit tests;
 // otpHash reproduces the service's hashing so a fake can store the same value the
 // service will compare against. The name/value avoid gosec's hardcoded-credential
@@ -33,15 +31,14 @@ type fakeOTPRepository struct {
 	cleanupErr error
 }
 
-func (f *fakeOTPRepository) matches(tenantID, email, purpose string) bool {
+func (f *fakeOTPRepository) matches(email, purpose string) bool {
 	return f.code != nil &&
-		f.code.TenantID == tenantID &&
 		f.code.Email == email &&
 		f.code.Purpose == purpose
 }
 
-func (f *fakeOTPRepository) GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*repository.VerificationCode, error) {
-	if !f.matches(tenantID, email, purpose) {
+func (f *fakeOTPRepository) GetVerificationCode(ctx context.Context, email, purpose string) (*repository.VerificationCode, error) {
+	if !f.matches(email, purpose) {
 		// Mirror the real repository: not-found is reported as model.ErrNotFound
 		// (the rate-limit check treats only ErrNotFound as "no active code" and
 		// any other error as a hard failure).
@@ -53,7 +50,6 @@ func (f *fakeOTPRepository) GetVerificationCode(ctx context.Context, tenantID, e
 func (f *fakeOTPRepository) UpsertVerificationCode(ctx context.Context, req repository.CreateVerificationCodeRequest, rateLimit time.Duration) (bool, error) {
 	f.upserted = &req
 	f.code = &repository.VerificationCode{
-		TenantID:  req.TenantID,
 		Email:     req.Email,
 		CodeHash:  req.CodeHash,
 		Purpose:   req.Purpose,
@@ -62,8 +58,8 @@ func (f *fakeOTPRepository) UpsertVerificationCode(ctx context.Context, req repo
 	return true, nil
 }
 
-func (f *fakeOTPRepository) ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (repository.OTPConsumeResult, error) {
-	if !f.matches(tenantID, email, purpose) || time.Now().After(f.code.ExpiresAt) {
+func (f *fakeOTPRepository) ConsumeVerificationCode(ctx context.Context, email, code, purpose string, maxAttempts int) (repository.OTPConsumeResult, error) {
+	if !f.matches(email, purpose) || time.Now().After(f.code.ExpiresAt) {
 		return repository.OTPConsumeInvalid, nil
 	}
 	// Already locked out: the row is retained (its created_at keeps enforcing the
@@ -84,7 +80,7 @@ func (f *fakeOTPRepository) ConsumeVerificationCode(ctx context.Context, tenantI
 	return repository.OTPConsumeInvalid, nil
 }
 
-func (f *fakeOTPRepository) DeleteVerificationCode(ctx context.Context, tenantID, email, purpose string) error {
+func (f *fakeOTPRepository) DeleteVerificationCode(ctx context.Context, email, purpose string) error {
 	f.deleted = true
 	f.code = nil
 	return nil
@@ -100,7 +96,6 @@ func (f *fakeOTPRepository) DeleteExpiredVerificationCodes(ctx context.Context) 
 func TestOTPValidateRejectsPurposeMismatch(t *testing.T) {
 	repo := &fakeOTPRepository{
 		code: &repository.VerificationCode{
-			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			CodeHash:  otpHash("123456"),
 			Purpose:   "signup",
@@ -110,7 +105,7 @@ func TestOTPValidateRejectsPurposeMismatch(t *testing.T) {
 	}
 	service := &OTPService{repo: repo, rateLimitDuration: time.Minute, hmacSecret: testOTPHMAC, logger: ensureLogger(nil)}
 
-	err := service.Validate(context.Background(), model.OTPValidateRequest{TenantID: testTenantID, Email: "user@example.com", Code: "123456", Purpose: "reset-password"})
+	err := service.Validate(context.Background(), model.OTPValidateRequest{Email: "user@example.com", Code: "123456", Purpose: "reset-password"})
 	if err == nil {
 		t.Fatal("expected purpose mismatch to fail")
 	}
@@ -119,10 +114,9 @@ func TestOTPValidateRejectsPurposeMismatch(t *testing.T) {
 	}
 }
 
-func TestOTPValidateRejectsTenantMismatch(t *testing.T) {
+func TestOTPValidateRejectsEmailMismatch(t *testing.T) {
 	repo := &fakeOTPRepository{
 		code: &repository.VerificationCode{
-			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			CodeHash:  otpHash("123456"),
 			Purpose:   "signup",
@@ -132,18 +126,17 @@ func TestOTPValidateRejectsTenantMismatch(t *testing.T) {
 	}
 	service := &OTPService{repo: repo, rateLimitDuration: time.Minute, hmacSecret: testOTPHMAC, logger: ensureLogger(nil)}
 
-	if err := service.Validate(context.Background(), model.OTPValidateRequest{TenantID: "other.test", Email: "user@example.com", Code: "123456", Purpose: "signup"}); err == nil {
-		t.Fatal("expected OTP from another tenant to be rejected")
+	if err := service.Validate(context.Background(), model.OTPValidateRequest{Email: "other@example.com", Code: "123456", Purpose: "signup"}); err == nil {
+		t.Fatal("expected OTP for another email to be rejected")
 	}
 	if repo.deleted {
-		t.Fatal("cross-tenant validation should not delete the stored OTP")
+		t.Fatal("mismatched-email validation should not delete the stored OTP")
 	}
 }
 
 func TestOTPValidateDeletesMatchingCodeWithNilLogger(t *testing.T) {
 	repo := &fakeOTPRepository{
 		code: &repository.VerificationCode{
-			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			CodeHash:  otpHash("123456"),
 			Purpose:   "signup",
@@ -153,7 +146,7 @@ func TestOTPValidateDeletesMatchingCodeWithNilLogger(t *testing.T) {
 	}
 	service := &OTPService{repo: repo, rateLimitDuration: time.Minute, hmacSecret: testOTPHMAC, logger: ensureLogger(nil)}
 
-	if err := service.Validate(context.Background(), model.OTPValidateRequest{TenantID: testTenantID, Email: "user@example.com", Code: "123456", Purpose: "signup"}); err != nil {
+	if err := service.Validate(context.Background(), model.OTPValidateRequest{Email: "user@example.com", Code: "123456", Purpose: "signup"}); err != nil {
 		t.Fatalf("expected validation to succeed: %v", err)
 	}
 	if !repo.deleted {
@@ -164,7 +157,6 @@ func TestOTPValidateDeletesMatchingCodeWithNilLogger(t *testing.T) {
 func TestOTPValidateLocksOutAfterMaxAttempts(t *testing.T) {
 	repo := &fakeOTPRepository{
 		code: &repository.VerificationCode{
-			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			CodeHash:  otpHash("123456"),
 			Purpose:   "signup",
@@ -176,7 +168,7 @@ func TestOTPValidateLocksOutAfterMaxAttempts(t *testing.T) {
 
 	// MaxOTPValidationAttempts-1 wrong guesses keep returning the generic error.
 	for i := 0; i < MaxOTPValidationAttempts-1; i++ {
-		err := service.Validate(context.Background(), model.OTPValidateRequest{TenantID: testTenantID, Email: "user@example.com", Code: "000000", Purpose: "signup"})
+		err := service.Validate(context.Background(), model.OTPValidateRequest{Email: "user@example.com", Code: "000000", Purpose: "signup"})
 		if err == nil || !strings.Contains(err.Error(), "invalid or expired OTP") {
 			t.Fatalf("attempt %d: expected invalid OTP error, got %v", i+1, err)
 		}
@@ -186,7 +178,7 @@ func TestOTPValidateLocksOutAfterMaxAttempts(t *testing.T) {
 	}
 
 	// The final wrong guess trips the lockout.
-	err := service.Validate(context.Background(), model.OTPValidateRequest{TenantID: testTenantID, Email: "user@example.com", Code: "000000", Purpose: "signup"})
+	err := service.Validate(context.Background(), model.OTPValidateRequest{Email: "user@example.com", Code: "000000", Purpose: "signup"})
 	if err == nil || !strings.Contains(err.Error(), "too many invalid attempts") {
 		t.Fatalf("expected lockout error, got %v", err)
 	}
@@ -201,7 +193,7 @@ func TestOTPValidateLocksOutAfterMaxAttempts(t *testing.T) {
 	}
 
 	// Even the correct code no longer works once locked out — it keeps rejecting.
-	if err := service.Validate(context.Background(), model.OTPValidateRequest{TenantID: testTenantID, Email: "user@example.com", Code: "123456", Purpose: "signup"}); err == nil || !strings.Contains(err.Error(), "too many invalid attempts") {
+	if err := service.Validate(context.Background(), model.OTPValidateRequest{Email: "user@example.com", Code: "123456", Purpose: "signup"}); err == nil || !strings.Contains(err.Error(), "too many invalid attempts") {
 		t.Fatalf("expected locked-out code to keep rejecting, got %v", err)
 	}
 }
@@ -209,7 +201,6 @@ func TestOTPValidateLocksOutAfterMaxAttempts(t *testing.T) {
 func TestOTPGenerateRateLimitWithNilLogger(t *testing.T) {
 	repo := &fakeOTPRepository{
 		code: &repository.VerificationCode{
-			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			CodeHash:  otpHash("123456"),
 			Purpose:   "signup",
@@ -219,7 +210,7 @@ func TestOTPGenerateRateLimitWithNilLogger(t *testing.T) {
 	}
 	service := &OTPService{repo: repo, rateLimitDuration: time.Minute, hmacSecret: testOTPHMAC, logger: ensureLogger(nil)}
 
-	_, err := service.Generate(context.Background(), model.OTPGenerateRequest{TenantID: testTenantID, Email: "user@example.com", Purpose: "signup", ExpirationDuration: time.Minute})
+	_, err := service.Generate(context.Background(), model.OTPGenerateRequest{Email: "user@example.com", Purpose: "signup", ExpirationDuration: time.Minute})
 	if err == nil {
 		t.Fatal("expected rate limit error")
 	}
@@ -235,7 +226,6 @@ func TestOTPGenerateRateLimitedAfterLockout(t *testing.T) {
 	// failing a code 5 times would wipe the rate limit and allow OTP-email spam.
 	repo := &fakeOTPRepository{
 		code: &repository.VerificationCode{
-			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			CodeHash:  otpHash("123456"),
 			Purpose:   "signup",
@@ -247,7 +237,7 @@ func TestOTPGenerateRateLimitedAfterLockout(t *testing.T) {
 	service := &OTPService{repo: repo, rateLimitDuration: time.Minute, hmacSecret: testOTPHMAC, logger: ensureLogger(nil)}
 
 	_, err := service.Generate(context.Background(), model.OTPGenerateRequest{
-		TenantID: testTenantID, Email: "user@example.com", Purpose: "signup", ExpirationDuration: time.Minute,
+		Email: "user@example.com", Purpose: "signup", ExpirationDuration: time.Minute,
 	})
 	if !errors.Is(err, model.ErrOTPRateLimited) {
 		t.Fatalf("expected ErrOTPRateLimited after lockout within cooldown, got %v", err)
@@ -261,7 +251,7 @@ func TestOTPGenerateAndCleanup(t *testing.T) {
 	repo := &fakeOTPRepository{}
 	service := &OTPService{repo: repo, rateLimitDuration: time.Minute, hmacSecret: testOTPHMAC, logger: ensureLogger(nil)}
 
-	response, err := service.Generate(context.Background(), model.OTPGenerateRequest{TenantID: testTenantID, Email: "user@example.com", Purpose: "signup", ExpirationDuration: time.Minute})
+	response, err := service.Generate(context.Background(), model.OTPGenerateRequest{Email: "user@example.com", Purpose: "signup", ExpirationDuration: time.Minute})
 	if err != nil {
 		t.Fatalf("generate OTP: %v", err)
 	}
@@ -277,7 +267,7 @@ func TestOTPGenerateAndCleanup(t *testing.T) {
 		t.Fatal("expected code to be upserted")
 	}
 	// Only the keyed HMAC of the code is persisted, never the plaintext.
-	if repo.upserted.CodeHash != otpHash(response.Code) || repo.upserted.Purpose != "signup" || repo.upserted.TenantID != testTenantID {
+	if repo.upserted.CodeHash != otpHash(response.Code) || repo.upserted.Purpose != "signup" {
 		t.Fatalf("unexpected upsert request: %+v", repo.upserted)
 	}
 	if repo.upserted.CodeHash == response.Code {
@@ -301,7 +291,7 @@ func TestOTPGenerateRejectsNonPositiveExpiration(t *testing.T) {
 	// rejected before any work — otherwise the code would be born already expired.
 	for _, d := range []time.Duration{0, -time.Minute} {
 		_, err := service.Generate(context.Background(), model.OTPGenerateRequest{
-			TenantID: testTenantID, Email: "user@example.com", Purpose: "signup", ExpirationDuration: d,
+			Email: "user@example.com", Purpose: "signup", ExpirationDuration: d,
 		})
 		if err == nil {
 			t.Fatalf("ExpirationDuration=%s: expected an error, got nil", d)
@@ -318,13 +308,13 @@ func TestOTPRequiresHMACSecret(t *testing.T) {
 	svc := &OTPService{repo: &fakeOTPRepository{}, rateLimitDuration: time.Minute, logger: ensureLogger(nil)}
 
 	if _, err := svc.Generate(context.Background(), model.OTPGenerateRequest{
-		TenantID: testTenantID, Email: "u@" + testTenantID, Purpose: "signup", ExpirationDuration: time.Minute,
+		Email: "u@example.com", Purpose: "signup", ExpirationDuration: time.Minute,
 	}); !errors.Is(err, model.ErrOTPSecretMissing) {
 		t.Fatalf("Generate without secret: expected ErrOTPSecretMissing, got %v", err)
 	}
 
 	if err := svc.Validate(context.Background(), model.OTPValidateRequest{
-		TenantID: testTenantID, Email: "u@" + testTenantID, Code: "123456", Purpose: "signup",
+		Email: "u@example.com", Code: "123456", Purpose: "signup",
 	}); !errors.Is(err, model.ErrOTPSecretMissing) {
 		t.Fatalf("Validate without secret: expected ErrOTPSecretMissing, got %v", err)
 	}
@@ -339,7 +329,6 @@ func TestGenerateSecureOTPRejectsInvalidLength(t *testing.T) {
 func TestOTPValidateRejectsExpiredCode(t *testing.T) {
 	repo := &fakeOTPRepository{
 		code: &repository.VerificationCode{
-			TenantID:  testTenantID,
 			Email:     "user@example.com",
 			CodeHash:  otpHash("123456"),
 			Purpose:   "signup",
@@ -350,7 +339,7 @@ func TestOTPValidateRejectsExpiredCode(t *testing.T) {
 	service := &OTPService{repo: repo, rateLimitDuration: time.Minute, hmacSecret: testOTPHMAC, logger: ensureLogger(nil)}
 
 	// Even with the correct code, an expired OTP surfaces ErrInvalidOTP.
-	err := service.Validate(context.Background(), model.OTPValidateRequest{TenantID: testTenantID, Email: "user@example.com", Code: "123456", Purpose: "signup"})
+	err := service.Validate(context.Background(), model.OTPValidateRequest{Email: "user@example.com", Code: "123456", Purpose: "signup"})
 	if !errors.Is(err, model.ErrInvalidOTP) {
 		t.Fatalf("expected ErrInvalidOTP for expired code, got %v", err)
 	}
