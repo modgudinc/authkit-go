@@ -1,14 +1,14 @@
-# authkit-go v0.1.0
+# authkit-go v0.20.0
 
-First release of **authkit-go** on its **decoupled-identity** model — a Go identity and authentication library backed by PostgreSQL. It gives you global user identities, `user ↔ tenant` memberships, JWT access tokens with rotating refresh tokens, API keys, OTP verification, invitations, and encrypted provider secrets — and leaves HTTP routing, authorization policy, and delivery (email/SMS) to your application.
+The **decoupled-identity** release of **authkit-go** — a Go identity and authentication library backed by PostgreSQL. It gives you global user identities, `user ↔ tenant` memberships, JWT access tokens with rotating refresh tokens, API keys, OTP verification, invitations, and encrypted provider secrets — and leaves HTTP routing, authorization policy, and delivery (email/SMS) to your application.
 
 ```bash
-go get github.com/modgudinc/authkit-go@v0.1.0
+go get github.com/modgudinc/authkit-go@v0.20.0
 ```
 
 > **Pre-1.0:** the public API may change in minor (`0.x`) releases. Pin a version.
 
-> **Version reset.** This `v0.1.0` is a clean slate, **not** a continuation of the earlier `v0.1.0`–`v0.14.0` line — those pre-release tags have been deleted. authkit had no production identity data, so the decoupled model ships as a fresh start with the `000001` schema edited in place (no data migration).
+> **Large breaking change.** `v0.20.0` is a substantial, breaking rework of authkit's identity model within the pre-1.0 (`0.x`) line. Because authkit had no production identity data, the `000001` schema was edited in place — there is **no data migration**.
 
 ## The model: global identities + tenant memberships
 
@@ -28,7 +28,7 @@ A login authenticates the identity and opens one refresh-token **identity sessio
 - **Encrypted secrets** — provider API keys stored with AES-256-GCM (authenticated, random nonce per write).
 - **Ergonomics** — single `New(Config)` constructor with fail-fast validation; injectable `logger.Logger`, `metrics.Metrics`, and `ratelimit.RateLimiter`; context-first methods; exported sentinel errors (`authkit.Err*`) for `errors.Is`.
 
-## Breaking changes (relative to the deleted pre-release line)
+## Breaking changes
 
 - `users` is a **global** identity: `tenant_id` and `roles` are removed; email is globally unique (`UNIQUE (lower(email))`). `User`, `CreateUserRequest`, `UpdateUserRequest`, `JWTClaims` (now carries `membership_token_version`), and `LoginResponse` (now carries `Memberships`) change accordingly.
 - `UserService` is identity-level (keyed by user id / email). `Count` and `UpdateRoles` are **removed** — roles move to `MembershipService.UpdateRoles`, member counts to `MembershipService.CountByTenant`.

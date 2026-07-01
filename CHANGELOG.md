@@ -8,12 +8,11 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-06-30
+## [0.20.0] - 2026-07-01
 
-Clean-slate first release of authkit-go on the **decoupled-identity** model. This
-`v0.1.0` resets the version history — it is **not** a continuation of the earlier
-`v0.1.0`–`v0.14.0` pre-release line (those tags have been deleted). authkit had no
-production identity data, so the `000001` schema was edited in place (no data migration).
+The **decoupled-identity** model — a large, breaking rework of authkit's identity model,
+in the pre-1.0 (`0.x`) line. authkit had no production identity data, so the `000001`
+schema was edited in place — there is **no data migration**.
 
 ### Added
 
@@ -32,7 +31,7 @@ production identity data, so the `000001` schema was edited in place (no data mi
 - **`ErrNoActiveMembership`** sentinel (valid credentials but not an active member of
   the requested tenant; map to HTTP 403) and **`WorkspaceTokenResponse`**.
 
-### Changed (breaking, relative to the deleted pre-release line)
+### Changed (breaking)
 
 - `users` is global: `tenant_id` and `roles` removed; email is globally unique
   (`UNIQUE (lower(email))`). `User`, `CreateUserRequest`, `UpdateUserRequest`,
@@ -61,5 +60,5 @@ production identity data, so the `000001` schema was edited in place (no data mi
 - `ErrNoActiveMembership` is an authorization outcome and never revokes the identity
   session (the user keeps access to their other workspaces).
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/modgudinc/authkit-go/releases/tag/v0.1.0
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.0
