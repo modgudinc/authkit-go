@@ -172,6 +172,139 @@ func (r *Repository) UpdateMembershipRoles(ctx context.Context, userID, tenantID
 	return requireRowsAffected(result, fmt.Errorf("membership not found: %w", model.ErrNotFound))
 }
 
+// ============================================================================
+// RemoveMembershipGuarded - RemoveMembership with a last-holder safety guard.
+//
+// Soft-revokes the membership exactly like RemoveMembership, but refuses to remove
+// the tenant's last ACTIVE member holding requireRole (e.g. the workspace's last
+// Admin): the revoke is rolled back and model.ErrLastRoleHolder is returned. The
+// revoke and the "does an active holder of requireRole still remain?" check run in
+// one transaction serialized per tenant by a transaction-scoped advisory lock, so
+// two concurrent removals of the last two holders — even from different processes /
+// instances — cannot both succeed, and a tenant can never be left with zero active
+// holders of the role. Returns model.ErrNotFound when no such membership exists. An
+// empty requireRole disables the guard (behaves like RemoveMembership).
+// ============================================================================
+func (r *Repository) RemoveMembershipGuarded(ctx context.Context, userID, tenantID, requireRole string) error {
+	return r.withGuardedTx(ctx, tenantID, requireRole, func(tx *sql.Tx) error {
+		query := `
+			UPDATE {{schema}}.memberships
+			SET status = 'suspended',
+			    token_version = token_version + CASE WHEN status = 'active' THEN 1 ELSE 0 END
+			WHERE user_id = $1 AND tenant_id = $2
+		`
+		result, err := tx.ExecContext(ctx, r.q(query), userID, tenantID)
+		if err != nil {
+			return fmt.Errorf("failed to remove membership: %w", err)
+		}
+		return requireRowsAffected(result, fmt.Errorf("membership not found: %w", model.ErrNotFound))
+	})
+}
+
+// ============================================================================
+// UpdateMembershipRolesGuarded - UpdateMembershipRoles with the same last-holder
+// guard as RemoveMembershipGuarded.
+//
+// Replaces the membership's roles (bumping the membership token_version) but refuses
+// to leave the tenant with no active member holding requireRole — e.g. demoting the
+// workspace's last Admin — rolling back and returning model.ErrLastRoleHolder. The
+// guard is enforced on the POST-update state (so promoting the target INTO requireRole
+// is always allowed) inside a per-tenant serialized transaction. Returns
+// model.ErrNotFound when no such membership exists; a nil roles slice is stored as an
+// empty JSON array; an empty requireRole disables the guard.
+// ============================================================================
+func (r *Repository) UpdateMembershipRolesGuarded(ctx context.Context, userID, tenantID string, roles []string, requireRole string) error {
+	if roles == nil {
+		roles = []string{}
+	}
+	rolesJSON, err := json.Marshal(roles)
+	if err != nil {
+		return fmt.Errorf("failed to marshal roles: %w", err)
+	}
+	return r.withGuardedTx(ctx, tenantID, requireRole, func(tx *sql.Tx) error {
+		query := `
+			UPDATE {{schema}}.memberships
+			SET roles = $3::jsonb,
+			    token_version = token_version + 1
+			WHERE user_id = $1 AND tenant_id = $2
+		`
+		result, err := tx.ExecContext(ctx, r.q(query), userID, tenantID, string(rolesJSON))
+		if err != nil {
+			return fmt.Errorf("failed to update membership roles: %w", err)
+		}
+		return requireRowsAffected(result, fmt.Errorf("membership not found: %w", model.ErrNotFound))
+	})
+}
+
+// withGuardedTx runs mutate inside a transaction that (1) takes a per-tenant advisory
+// lock so concurrent guarded mutations for the same tenant serialize across every
+// caller and process, and (2) after mutate succeeds, asserts that at least one ACTIVE
+// member still holds requireRole — rolling back with model.ErrLastRoleHolder if not.
+// Because the invariant is checked on the post-mutation state while holding the tenant
+// lock, the last active holder of the role can never be removed or demoted out from
+// under a concurrent check. An empty requireRole skips the invariant (no guard). A
+// mutate error (e.g. model.ErrNotFound) is returned as-is and rolls the tx back.
+func (r *Repository) withGuardedTx(ctx context.Context, tenantID, requireRole string, mutate func(tx *sql.Tx) error) error {
+	tx, err := r.rw.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin guarded membership tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Serialize guarded mutations for this tenant across all callers/instances. The
+	// lock key is derived from the tenant id; a hash collision between two tenants only
+	// makes them briefly share the lock (a negligible contention cost, never a
+	// correctness issue). It is transaction-scoped: auto-released on commit or rollback.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, tenantID); err != nil {
+		return fmt.Errorf("failed to acquire tenant guard lock: %w", err)
+	}
+
+	if err := mutate(tx); err != nil {
+		return err
+	}
+
+	if requireRole != "" {
+		remains, err := r.hasActiveRoleHolder(ctx, tx, tenantID, requireRole)
+		if err != nil {
+			return err
+		}
+		if !remains {
+			return fmt.Errorf("would leave tenant %q with no active %q: %w", tenantID, requireRole, model.ErrLastRoleHolder)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit guarded membership tx: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// hasActiveRoleHolder reports whether the tenant has at least one ACTIVE member whose
+// roles include role. It runs on the supplied querier — a *sql.Tx during a guarded
+// mutation, so it observes that transaction's own uncommitted change — and tests role
+// membership against the JSONB roles array with the @> containment operator.
+func (r *Repository) hasActiveRoleHolder(ctx context.Context, q rowQuerier, tenantID, role string) (bool, error) {
+	query := `
+		SELECT EXISTS (
+			SELECT 1 FROM {{schema}}.memberships
+			WHERE tenant_id = $1
+			  AND status = 'active'
+			  AND roles @> jsonb_build_array($2::text)
+		)
+	`
+	var exists bool
+	if err := q.QueryRowContext(ctx, r.q(query), tenantID, role).Scan(&exists); err != nil {
+		return false, fmt.Errorf("failed to check active role holders: %w", err)
+	}
+	return exists, nil
+}
+
 // getMembership is the (user_id, tenant_id) lookup against the supplied handle (rw
 // or ro), shared by GetMembership (replica) and GetMembershipFromPrimary (primary).
 func (r *Repository) getMembership(ctx context.Context, db rowQuerier, userID, tenantID string) (*model.Membership, error) {

@@ -70,7 +70,16 @@ type AuthService interface {
 type MembershipService interface {
 	Add(ctx context.Context, req model.AddMembershipRequest) error
 	Remove(ctx context.Context, userID, tenantID string) error
+	// RemoveGuarded is Remove but refuses (model.ErrLastRoleHolder) to remove the
+	// tenant's last active member holding requireRole. The check-and-revoke is atomic
+	// and serialized per tenant, so a workspace can never be raced below one active
+	// holder of the role (e.g. its last Admin). Passing "" disables the guard.
+	RemoveGuarded(ctx context.Context, userID, tenantID, requireRole string) error
 	UpdateRoles(ctx context.Context, userID, tenantID string, roles []string) error
+	// UpdateRolesGuarded is UpdateRoles with the same last-holder guard as
+	// RemoveGuarded: it refuses (model.ErrLastRoleHolder) to demote the tenant's last
+	// active holder of requireRole. Passing "" disables the guard.
+	UpdateRolesGuarded(ctx context.Context, userID, tenantID string, roles []string, requireRole string) error
 	Get(ctx context.Context, userID, tenantID string) (*model.Membership, error)
 	ListByUser(ctx context.Context, userID string) ([]*model.Membership, error)
 	ListByTenant(ctx context.Context, tenantID string) ([]*model.Membership, error)

@@ -73,6 +73,14 @@ if err := membershipService.UpdateRoles(ctx, userID, "acme.com", []string{"Opera
 	return err
 }
 // if err := membershipService.Remove(ctx, userID, "acme.com"); err != nil { return err }
+
+// Guarded variants refuse (ErrLastRoleHolder, map to 409) to remove or demote the
+// tenant's last active holder of a role — e.g. its last "Admin". Atomic and serialized
+// per tenant, so concurrent removals can't orphan a workspace of its Admin.
+// if err := membershipService.RemoveGuarded(ctx, userID, "acme.com", "Admin"); err != nil {
+// 	if errors.Is(err, authkit.ErrLastRoleHolder) { /* 409: keep at least one Admin */ }
+// 	return err
+// }
 ```
 
 ## Account Status And Audit Trail
