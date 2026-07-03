@@ -8,6 +8,27 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-07-02
+
+### Added
+
+- **Guarded membership mutations** — `MembershipService.RemoveGuarded` and
+  `UpdateRolesGuarded`. Each is the plain `Remove` / `UpdateRoles` plus a last-holder
+  safety guard: the mutation is refused (new `ErrLastRoleHolder` sentinel; map to HTTP
+  409) when it would leave the tenant with **no active member holding a caller-named
+  role** — e.g. removing or demoting a workspace's last Admin. Roles stay opaque: the
+  caller passes the `requireRole` string to preserve (an empty string disables the
+  guard, matching `Remove` / `UpdateRoles`).
+
+### Security
+
+- The guarded methods run the check-and-mutate in a single transaction serialized per
+  tenant by a **transaction-scoped advisory lock** (`pg_advisory_xact_lock`), and assert
+  the invariant on the post-mutation state. Concurrent removals/demotions — even from
+  different processes or replicas — can therefore never race a tenant below one active
+  holder of the required role; a naive application-level check (list-then-mutate) cannot
+  make that guarantee across instances.
+
 ## [0.20.0] - 2026-07-01
 
 The **decoupled-identity** model — a large, breaking rework of authkit's identity model,
@@ -60,5 +81,6 @@ schema was edited in place — there is **no data migration**.
 - `ErrNoActiveMembership` is an authorization outcome and never revokes the identity
   session (the user keeps access to their other workspaces).
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.1
 [0.20.0]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.0
