@@ -1,18 +1,19 @@
 # authkit-go
 
-A Go library for multi-tenant identity and authentication management with support for API key authentication, invitation-based user onboarding, and OTP verification.
+A Go library for identity and authentication management built on a **decoupled-identity** model: a user is a single **global identity**, and access to a tenant (workspace) is a separate **membership** row. It supports API key authentication, invitation-based onboarding, and OTP verification.
 
 [![Go Version](https://img.shields.io/badge/go-1.25-blue.svg)](https://golang.org/dl/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
 ## Features
 
-- **Multi-Tenant Architecture**: Tenant-scoped user management with role-based access control (Admin, Member, Viewer)
+- **Decoupled Identities & Memberships**: A user is a globally-unique (case-insensitive) identity with **no** tenant and **no** roles; per-tenant access is a `MembershipService` membership row carrying opaque, app-interpreted role strings. authkit owns the membership **graph**; your application owns the role **policy**.
+- **Workspace-Scoped Tokens**: One login opens an **identity session** (the refresh token) shared across the user's workspaces; from it you mint **workspace-scoped** access tokens. `LoginByEmail` authenticates without a known workspace and `MintWorkspaceToken` selects/switches workspace — no re-login.
 - **API Key Management**: Secure API key generation and validation with HMAC-SHA256 hashing
-- **Invitation System**: Invitation-based user onboarding with secure access codes
+- **Invitation System**: Invitation-based onboarding with secure access codes (reuses an existing global identity for the invited email, or creates one)
 - **OTP Verification**: One-Time Password generation and email verification
-- **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 identifiers
-- **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`RefreshToken`/OTP generation
+- **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 string identifiers
+- **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`LoginByEmail`/`RefreshToken`/OTP generation
 - **Flexible Logging & Metrics**: Dependency-injected, context-aware `Logger` and an optional `Metrics` counter sink
 - **Health Checks**: `AuthKit.Ping` and fail-fast `Config.VerifyConnectivity`
 - **Read-Write Separation**: Optimized database connection management
@@ -163,6 +164,42 @@ identity, err := authkit.New(authkit.Config{
 > are never logged. Logs are treated as a hostile surface (see
 > [SECURITY.md](SECURITY.md)); keep this in mind for your own log lines.
 
+## Identities and Workspaces
+
+authkit uses a **decoupled-identity** model. The two concepts are deliberately separate:
+
+- A **user is a global identity** — a globally-unique, case-insensitive email plus a
+  password. It carries **no** tenant and **no** roles. There is exactly one identity per
+  email across the whole system (uniqueness is enforced on `lower(email)`). Identities
+  are managed by `UserService`.
+- A **membership** is a `(user, tenant)` row that grants the identity access to one
+  workspace, with a set of **opaque role strings**. authkit stores the role strings but
+  never interprets them — **authkit owns the membership graph; your application owns the
+  role policy.** Memberships are managed by `MembershipService`.
+
+A single login authenticates the **identity** and opens one refresh-token **identity
+session** that is shared across all of the user's workspaces. From that session you mint
+**workspace-scoped access tokens** — each access token is scoped to one active membership
+(its `tenant_id` and `roles`). Switching workspace mints a new access token from the same
+session, with **no re-login** (`MintWorkspaceToken`).
+
+**Two token versions.** Each access-token JWT carries both `token_version`
+(`users.token_version`, identity-level) and `membership_token_version`
+(`memberships.token_version`, per-membership). A credential event — password change,
+account disable, logout-all — bumps the identity `token_version` and invalidates **every**
+workspace's access tokens; a role change or membership revoke bumps only that membership's
+`token_version` and invalidates **only that workspace's** tokens. `ValidateJWT` rejects on
+**either** version mismatch, a **missing or suspended** membership, or a **disabled/locked**
+account.
+
+```
+            ┌── membership (tenant A, roles, mtv) ── workspace-scoped access token (A)
+identity ───┤
+ (session)  └── membership (tenant B, roles, mtv) ── workspace-scoped access token (B)
+```
+
+See [Memberships](#memberships) for the `MembershipService` API.
+
 ## API Key Management
 
 ### Create an API Key
@@ -173,7 +210,7 @@ apiKeyService := identity.APIKeyService()
 expiresIn := 90 * 24 * time.Hour // Optional: expires in 90 days (nil = never)
 response, err := apiKeyService.Create(ctx, model.CreateAPIKeyRequest{
     TenantID:  "acme.com",
-    CreatedBy: adminUserID, // uuid.UUID of the admin (FK to users.id)
+    CreatedBy: adminUserID, // string user id (uuid7) of the admin (FK to users.id)
     Name:      "Production SDK Key",
     ExpiresIn: &expiresIn, // Optional
 })
@@ -307,8 +344,11 @@ err := passwordService.ValidatePasswordStrength(password, customReqs)
 ```go
 jwtService := identity.JWTService()
 
-// Generate JWT for authenticated user
-accessToken, err := jwtService.GenerateAccessToken(user)
+// Generate a WORKSPACE-SCOPED JWT for an authenticated identity. It needs both the
+// global identity (user) and the active membership it is scoped to (tenant + roles).
+// Both must be complete, freshly-loaded records — prefer the AuthService flows, which
+// load them for you.
+accessToken, err := jwtService.GenerateAccessToken(user, membership)
 if err != nil {
     log.Fatal(err)
 }
@@ -317,11 +357,12 @@ if err != nil {
 ```
 
 **JWT contains custom claims:**
-- `user_id` - User UUID (string)
+- `user_id` - Global user UUID (string)
 - `email` - User email address
-- `tenant_id` - Tenant identifier
-- `roles` - Array of user roles
-- `token_version` - For invalidating all tokens
+- `tenant_id` - Active workspace (tenant) the token is scoped to (from the membership)
+- `roles` - Roles in the active workspace (opaque, app-interpreted; from the membership)
+- `token_version` - Identity token version (`users.token_version`) — bumped by credential events to invalidate every workspace's tokens
+- `membership_token_version` - Per-membership token version (`memberships.token_version`) — bumped by a role change/revoke to invalidate only this workspace's tokens
 - Standard claims (sub, iat, exp)
 
 ### Validate Access Token
@@ -337,12 +378,19 @@ if err != nil {
 }
 
 // Use claims for authorization
-userID := claims.UserID          // User UUID
+userID := claims.UserID          // Global user UUID
 email := claims.Email            // User email
-tenantID := claims.TenantID      // Tenant ID
-roles := claims.Roles            // []string
-tokenVersion := claims.TokenVersion // For invalidation
+tenantID := claims.TenantID      // Active workspace the token is scoped to
+roles := claims.Roles            // []string (opaque, app-interpreted)
+tokenVersion := claims.TokenVersion                     // Identity token version
+membershipTokenVersion := claims.MembershipTokenVersion // Per-membership token version
 ```
+
+> `JWTService.ValidateAccessToken` only checks the token's signature and expiry; it does
+> **not** consult the database, so it cannot detect a bumped `token_version`/
+> `membership_token_version`, a suspended membership, or a disabled account. For an
+> authorization decision use `AuthService.ValidateJWT` (below), which re-checks all of
+> these against the store.
 
 ### Generate Refresh Token
 
@@ -362,6 +410,11 @@ if err != nil {
 
 ### Complete Login Flow Example
 
+The pieces below are the low-level building blocks. In practice use
+`AuthService.Login` / `LoginByEmail` (see [Authentication Service](#authentication-service)),
+which compose password verification, the active-membership check, and token-pair
+generation for you.
+
 ```go
 // 1. Verify password
 passwordService := identity.PasswordService()
@@ -370,9 +423,10 @@ if err != nil {
     return fmt.Errorf("invalid credentials")
 }
 
-// 2. Generate JWT access token
+// 2. Generate a WORKSPACE-SCOPED JWT access token. The token is scoped to one active
+//    membership, so pass both the global identity (user) and that membership.
 jwtService := identity.JWTService()
-accessToken, err := jwtService.GenerateAccessToken(user)
+accessToken, err := jwtService.GenerateAccessToken(user, membership)
 
 // 3. Generate refresh token
 refreshToken, err := jwtService.GenerateRefreshToken()
@@ -398,8 +452,10 @@ The TokenService combines JWT and refresh token management with automatic token 
 ```go
 tokenService := identity.TokenService()
 
-// Generate both access token (JWT) and refresh token
-tokenPair, err := tokenService.GenerateTokenPair(ctx, user, &model.SessionInfo{
+// Generate both a WORKSPACE-SCOPED access token (JWT) and the identity-session
+// refresh token. The access token is scoped to the active membership, so pass both
+// the global identity (user) and that membership.
+tokenPair, err := tokenService.GenerateTokenPair(ctx, user, membership, &model.SessionInfo{
     IPAddress:  "192.168.1.1",
     UserAgent:  "Mozilla/5.0...",
     DeviceName: "Chrome Browser",
@@ -409,15 +465,17 @@ if err != nil {
 }
 
 // Return both tokens to client
-// Access token: JWT for API authentication
-// Refresh token: Random token stored as HMAC-SHA256 hash (for token rotation)
+// Access token: JWT for API authentication (scoped to the membership's tenant + roles)
+// Refresh token: Random token stored as HMAC-SHA256 hash (the identity session, used for rotation)
 ```
 
 ### Refresh Token Pair (Token Rotation)
 
 ```go
-// Client sends current refresh token to get new tokens
-newTokenPair, err := tokenService.RefreshTokenPair(ctx, oldRefreshToken, sessionInfo)
+// Client sends current refresh token (the identity session) plus the workspace the
+// new access token should be scoped to. tenantID must be one the identity has an
+// active membership in, or rotation fails with ErrNoActiveMembership.
+newTokenPair, err := tokenService.RefreshTokenPair(ctx, oldRefreshToken, tenantID, sessionInfo)
 if err != nil {
     log.Fatal(err)
 }
@@ -440,11 +498,12 @@ if err != nil {
 // Revoke specific refresh token (single session logout)
 err := tokenService.RevokeRefreshToken(ctx, refreshToken)
 
-// Revoke all sessions for a user (logout from all devices): use AuthService.LogoutAll,
-// which is tenant-scoped and ALSO invalidates outstanding access tokens by bumping
-// token_version. TokenService intentionally exposes no RevokeAllUserTokens — it would
-// scope by user_id only, with no tenant-ownership check (see the Logout section).
-err := authService.LogoutAll(ctx, userID, tenantID)
+// Revoke all sessions for an identity (logout from all devices, across all of its
+// workspaces): use AuthService.LogoutAll, which is identity-level and ALSO invalidates
+// every workspace's outstanding access tokens by bumping the identity token_version.
+// TokenService intentionally exposes no RevokeAllUserTokens (it would revoke by user_id
+// with no authorization check — see the Logout section); the caller authorizes userID.
+err := authService.LogoutAll(ctx, userID)
 
 // Cleanup expired tokens (periodic maintenance job)
 count, err := tokenService.CleanupExpired(ctx)
@@ -453,9 +512,14 @@ fmt.Printf("Deleted %d expired tokens\n", count)
 
 ## Authentication Service
 
-The AuthService provides complete authentication flows integrating password verification, JWT generation, and token management.
+The AuthService provides complete authentication flows integrating password verification, the active-membership check, JWT generation, and token management.
 
-### Login
+### Login (workspace already known)
+
+`Login` authenticates the identity **and** requires an active membership in
+`req.TenantID`. On success it returns a workspace-scoped access token plus the
+identity-session refresh token. If the credentials are valid but the identity has no
+active membership in that tenant, it returns `ErrNoActiveMembership` (map to 403).
 
 ```go
 authService := identity.AuthService()
@@ -463,7 +527,7 @@ authService := identity.AuthService()
 response, err := authService.Login(ctx, model.LoginRequest{
     Email:    "user@acme.com",
     Password: "SecurePassword123!",
-    TenantID: "acme.com",
+    TenantID: "acme.com", // workspace to authenticate into; an active membership is required
     SessionInfo: &model.SessionInfo{
         IPAddress:  "192.168.1.1",
         UserAgent:  "Mozilla/5.0...",
@@ -471,36 +535,103 @@ response, err := authService.Login(ctx, model.LoginRequest{
     },
 })
 if err != nil {
-    // Handle errors: invalid credentials, account disabled, account locked
+    // errors.Is(err, authkit.ErrInvalidCredentials) => bad email/password/disabled/locked
+    // errors.Is(err, authkit.ErrNoActiveMembership) => valid creds, but not a member of acme.com
     log.Fatal(err)
 }
 
 // Return tokens and user info to client
-fmt.Printf("Access Token: %s\n", response.AccessToken)
-fmt.Printf("Refresh Token: %s\n", response.RefreshToken)
+fmt.Printf("Access Token: %s\n", response.AccessToken) // scoped to response.TenantID
+fmt.Printf("Refresh Token: %s\n", response.RefreshToken) // the identity session
 fmt.Printf("Expires In: %d seconds\n", response.ExpiresIn)
+fmt.Printf("Active Workspace: %s\n", response.TenantID)
 fmt.Printf("User: %+v\n", response.User)
+fmt.Printf("Memberships: %+v\n", response.Memberships) // every workspace the identity belongs to
 ```
 
 **Login Features:**
 - Password verification with bcrypt
+- Active-membership check in the requested tenant (else `ErrNoActiveMembership`)
 - Account status checks (enabled, not locked)
 - Auto-unlock if `locked_until` has passed
 - Failed login tracking (locks after 5 attempts for 30 minutes)
 - Last login timestamp updates
 - Automatic token pair generation with session tracking
 
+### Login by email (workspace not yet known)
+
+`LoginByEmail` authenticates the identity **without** a known workspace and opens the
+identity session. If `TenantID` is given (or the identity has exactly one active
+membership) it also mints a workspace-scoped access token; otherwise it returns the
+identity's `Memberships` for the caller to choose from (with `AccessToken`/`ExpiresIn`
+empty) and you complete selection with `MintWorkspaceToken`.
+
+```go
+resp, err := authService.LoginByEmail(ctx, model.LoginByEmailRequest{
+    Email:    "user@acme.com",
+    Password: "SecurePassword123!",
+    // TenantID is optional — omit it to discover the user's workspaces first.
+    SessionInfo: &model.SessionInfo{IPAddress: "192.168.1.1"},
+})
+if err != nil {
+    // errors.Is(err, authkit.ErrInvalidCredentials) // bad credentials
+    // errors.Is(err, authkit.ErrNoActiveMembership)  // TenantID given but not a member there
+    log.Fatal(err)
+}
+
+if resp.AccessToken == "" {
+    // Multiple memberships and no workspace chosen: present resp.Memberships to the user,
+    // then mint a token for the picked workspace from the SAME session (no re-login).
+    for _, m := range resp.Memberships {
+        fmt.Printf("workspace %s, roles %v\n", m.TenantID, m.Roles)
+    }
+    chosen := resp.Memberships[0].TenantID
+    ws, err := authService.MintWorkspaceToken(ctx, resp.RefreshToken, chosen)
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Access Token: %s (workspace %s)\n", ws.AccessToken, ws.TenantID)
+} else {
+    // Exactly one membership (or TenantID was supplied): a token was minted immediately.
+    fmt.Printf("Access Token: %s (workspace %s)\n", resp.AccessToken, resp.TenantID)
+}
+```
+
+### Switch workspace (`MintWorkspaceToken`)
+
+`MintWorkspaceToken` mints a fresh workspace-scoped access token from an **existing**
+identity session — the select-/switch-workspace call. The refresh token is **not**
+rotated (the identity session is unchanged), so only the new access token and its scope
+are returned. The identity must have an active membership in `tenantID`, else
+`ErrNoActiveMembership`.
+
+```go
+// The user clicks "switch to acme.io" — reuse the same refresh token, no re-login.
+ws, err := authService.MintWorkspaceToken(ctx, refreshToken, "acme.io")
+if err != nil {
+    // errors.Is(err, authkit.ErrNoActiveMembership) => not a member of acme.io
+    // errors.Is(err, authkit.ErrInvalidRefreshToken) => unknown/expired session
+    log.Fatal(err)
+}
+
+fmt.Printf("Access Token: %s\n", ws.AccessToken) // now scoped to acme.io
+fmt.Printf("Workspace: %s\n", ws.TenantID)
+fmt.Printf("Expires In: %d seconds\n", ws.ExpiresIn)
+```
+
 ### Logout
 
 ```go
-// Single session logout (revoke specific refresh token)
+// Single session logout (revoke the specific refresh token / identity session)
 err := authService.Logout(ctx, refreshToken)
 // Note: JWT remains valid until expiry (stateless design)
 
-// Logout from all devices (revoke all tokens + invalidate all JWTs)
-// Scoped by tenantID: a userID from another tenant is rejected (ErrNotFound).
-err := authService.LogoutAll(ctx, userID, tenantID)
-// This increments token_version, immediately invalidating all existing JWTs
+// Logout from all devices and ALL workspaces. This is identity-level (no tenant arg):
+// it revokes every refresh token for the identity and increments the identity
+// token_version, immediately invalidating EVERY workspace's outstanding access tokens.
+// The caller is responsible for authorizing that it may act on userID; an unknown id is
+// rejected (ErrNotFound).
+err := authService.LogoutAll(ctx, userID)
 ```
 
 ### Token Refresh
@@ -508,16 +639,19 @@ err := authService.LogoutAll(ctx, userID, tenantID)
 ```go
 response, err := authService.RefreshToken(ctx, model.RefreshRequest{
     RefreshToken: oldRefreshToken,
+    TenantID:     "acme.com", // required: the workspace to scope the new access token to
     SessionInfo:  sessionInfo,
 })
 if err != nil {
-    // Refresh token invalid or expired - require re-login
+    // errors.Is(err, authkit.ErrInvalidRefreshToken) => invalid/expired session: re-login
+    // errors.Is(err, authkit.ErrNoActiveMembership)  => no longer a member of TenantID
     log.Fatal(err)
 }
 
 // Return new tokens (old refresh token is automatically revoked)
-fmt.Printf("New Access Token: %s\n", response.AccessToken)
+fmt.Printf("New Access Token: %s\n", response.AccessToken) // scoped to response.TenantID
 fmt.Printf("New Refresh Token: %s\n", response.RefreshToken)
+fmt.Printf("Workspace: %s\n", response.TenantID)
 ```
 
 ### JWT Validation
@@ -525,20 +659,22 @@ fmt.Printf("New Refresh Token: %s\n", response.RefreshToken)
 ```go
 claims, err := authService.ValidateJWT(ctx, tokenString)
 if err != nil {
-    // Token invalid, expired, revoked, or account disabled/locked
+    // Token invalid/expired/revoked, membership suspended/removed, or account disabled/locked
     return fmt.Errorf("unauthorized: %w", err)
 }
 
 // Use claims for authorization
-userID := claims.UserID      // User UUID
+userID := claims.UserID      // Global user UUID
 email := claims.Email        // User email
-tenantID := claims.TenantID  // Tenant ID
-roles := claims.Roles        // User roles ([]string)
+tenantID := claims.TenantID  // Active workspace the token is scoped to
+roles := claims.Roles        // Roles in the active workspace ([]string, opaque/app-interpreted)
 ```
 
 **Validation Features:**
 - JWT signature and expiration verification
-- Token version check (detect revoked tokens)
+- Identity token version check (`users.token_version`) — detects credential-revoked tokens
+- Membership token version check (`memberships.token_version`) — detects role-change/revoke
+- Active-membership check: a missing or suspended membership in the token's tenant is rejected as `ErrTokenRevoked`
 - Account enabled check
 - Account locked check (with auto-unlock)
 - Returns enriched claims
@@ -546,9 +682,10 @@ roles := claims.Roles        // User roles ([]string)
 ### Change Password
 
 ```go
+// A credential is global, so ChangePassword is identity-level — keyed by UserID only,
+// no tenant.
 err := authService.ChangePassword(ctx, model.ChangePasswordRequest{
     UserID:      userID,
-    TenantID:    tenantID, // required: scopes the change to the user's tenant
     OldPassword: "OldPassword123!",
     NewPassword: "NewSecurePassword456!",
 })
@@ -558,45 +695,122 @@ if err != nil {
 }
 
 // Password changed successfully
-// All sessions invalidated (user must re-login on all devices)
+// All sessions invalidated across every workspace (user must re-login on all devices)
 ```
 
 **Password Change Features:**
 - Old password verification
 - New password strength validation
-- Automatic logout from all devices (token version increment)
+- Automatic logout from all devices across all workspaces (identity token version increment)
 - All refresh tokens revoked
 
 ## User Service
 
-The `UserService` manages users, queries, and account-status operations. Every method
-is tenant-scoped — a cross-tenant `userID` matches no row and returns `ErrNotFound`.
-Convention: create/update take a keyed request struct (ids inside); simple
-get/delete/status/role operations take positional ids.
+The `UserService` manages **global identities**, queries, and account-status operations.
+A user carries **no** tenant and **no** roles — those live on memberships (see
+[Memberships](#memberships)). Every operation is keyed by the global user id or the
+globally-unique email; there is no tenant argument. Convention: create/update take a
+keyed request struct (ids inside); simple get/delete/status operations take a positional
+`userID` (or email for lookups).
 
 ```go
 userService := identity.UserService()
 
-// Create / update / query
-id, err := userService.Create(ctx, model.CreateUserRequest{ /* Email, TenantID, PasswordHash, ... */ })
-err = userService.Update(ctx, model.UpdateUserRequest{UserID: id, TenantID: tenantID, DisplayName: &name})
-user, err := userService.GetByID(ctx, id, tenantID)
-users, err := userService.List(ctx, tenantID, limit, offset) // limit/offset are clamped
+// Create a GLOBAL identity (no tenant, no roles). Email must be globally unique
+// (case-insensitive). Grant tenant access separately via MembershipService.Add.
+id, err := userService.Create(ctx, model.CreateUserRequest{
+    Email:        "user@acme.com",
+    PasswordHash: passwordHash, // hash with PasswordService.HashPassword first
+    DisplayName:  "Ada Lovelace",
+})
 
-// Account status (security controls) — each is tenant-scoped and revokes sessions as needed
-err = userService.Disable(ctx, id, tenantID)         // also bumps token_version + revokes refresh tokens
-err = userService.Lock(ctx, id, tenantID, &until)
-err = userService.UpdateRoles(ctx, id, tenantID, []string{"Member"})
+// Update / query
+name := "Ada L."
+err = userService.Update(ctx, model.UpdateUserRequest{UserID: id, DisplayName: &name})
+user, err := userService.GetByID(ctx, id)
+user, err = userService.GetByEmail(ctx, "user@acme.com")
+users, err := userService.List(ctx, limit, offset) // global admin listing; limit/offset clamped
 
-// Account status-change audit trail (v0.13.0)
-history, err := userService.StatusHistory(ctx, id, tenantID) // []*model.UserStatusChange, newest first
+// Account status (security controls) — identity-level; they revoke sessions as needed
+err = userService.Disable(ctx, id)        // bumps identity token_version + revokes refresh tokens
+err = userService.Lock(ctx, id, &until)
+
+// Account status-change audit trail
+history, err := userService.StatusHistory(ctx, id) // []*model.UserStatusChange, newest first
 // Prune the audit table periodically (it has no expiry); olderThan must be positive:
 removed, err := userService.CleanupStatusChanges(ctx, 90*24*time.Hour)
 ```
 
+For a tenant's member list, use `MembershipService.ListByTenant` rather than
+`UserService.List` (which is a global, cross-tenant admin listing). Roles are no longer
+on the user: change them with `MembershipService.UpdateRoles`. `UserService` no longer
+has `UpdateRoles` or `Count`.
+
 `StatusHistory` returns the enable/disable/lock/unlock transitions (including automatic
 failed-login lockouts) recorded in `user_status_changes`. `CleanupStatusChanges` bounds
 that table's growth — run it on a schedule alongside the other `CleanupExpired` jobs.
+
+## Memberships
+
+A **membership** is the `(user, tenant)` graph row that grants a global identity access
+to one workspace, with a set of **opaque role strings**. authkit stores the strings but
+never interprets them — your application owns the role policy. `MembershipService` (via
+`identity.MembershipService()`) manages the graph.
+
+Key semantics:
+- **`Add` is an idempotent upsert.** Granting an existing membership re-applies the roles
+  and reactivates a suspended one (re-grant). The first grant starts at membership
+  `token_version` 0; a roles change bumps it.
+- **`Remove` is a soft-revoke.** It suspends the membership (status → `suspended`) and
+  bumps its `token_version`, immediately invalidating that workspace's access tokens —
+  the row is retained, not deleted. `Add` can later reactivate it.
+- **`UpdateRoles`** replaces the membership's roles and bumps its `token_version`,
+  invalidating only that workspace's tokens (the identity session is untouched).
+- **`RemoveGuarded` / `UpdateRolesGuarded`** are `Remove` / `UpdateRoles` plus a
+  last-holder guard: they refuse (`ErrLastRoleHolder`, map to **409**) to remove or
+  demote the tenant's **last active member holding a caller-named role** — e.g. a
+  workspace's last `Admin`. The check-and-mutate is atomic and serialized per tenant (a
+  transaction-scoped advisory lock), so concurrent removals cannot race a workspace below
+  one active holder of the role, even across replicas. The `requireRole` is opaque; pass
+  `""` to disable the guard (equivalent to `Remove` / `UpdateRoles`).
+- **`CountByTenant`** is status-agnostic (a suspended row still counts).
+
+```go
+membershipService := identity.MembershipService()
+
+// Grant a user access to a workspace with opaque, app-interpreted roles.
+err := membershipService.Add(ctx, model.AddMembershipRequest{
+    UserID:   userID,
+    TenantID: "acme.com",
+    Roles:    []string{"Member"}, // any strings your app understands
+})
+
+// Inspect / change a single membership.
+m, err := membershipService.Get(ctx, userID, "acme.com") // *model.Membership; m.IsActive(), m.Roles
+err = membershipService.UpdateRoles(ctx, userID, "acme.com", []string{"Admin"})
+
+// List the user's workspaces, or a tenant's members.
+workspaces, err := membershipService.ListByUser(ctx, userID)     // []*model.Membership
+members, err := membershipService.ListByTenant(ctx, "acme.com")  // []*model.Membership
+count, err := membershipService.CountByTenant(ctx, "acme.com")   // int (status-agnostic)
+
+// Soft-revoke access (suspends + bumps the membership token_version; row retained).
+err = membershipService.Remove(ctx, userID, "acme.com")
+
+// Guarded variants refuse to drop the workspace's last active holder of a role.
+err = membershipService.RemoveGuarded(ctx, userID, "acme.com", "Admin")
+err = membershipService.UpdateRolesGuarded(ctx, userID, "acme.com", []string{"Member"}, "Admin")
+if errors.Is(err, authkit.ErrLastRoleHolder) {
+    // 409: userID is the tenant's last active Admin — refused, nothing changed.
+}
+```
+
+A `model.Membership` carries `UserID`, `TenantID`, `Roles` (opaque strings), `Status`
+(`model.MembershipActive` | `model.MembershipSuspended`) with an `IsActive()` helper, and
+a per-membership token version. `Get`/`Remove` on a non-existent membership return
+`ErrNotFound`; `Add` for an unknown user or tenant returns `ErrNotFound` (the FK is
+enforced). The guarded mutations additionally return `ErrLastRoleHolder` (map to **409**)
+when the change would remove the tenant's last active holder of the required role.
 
 ## Tenant Service
 
@@ -809,7 +1023,7 @@ expiresIn := 7 * 24 * time.Hour // 7 days
 
 invitation, err := invitationService.Create(ctx, model.CreateInvitationRequest{
     TenantID:  "acme.com",
-    CreatedBy: adminUserID,        // uuid.UUID of the admin (FK to users.id)
+    CreatedBy: adminUserID,        // string user id (uuid7) of the admin (FK to users.id)
     Email:     "user@acme.com",    // Target email address
     Roles:     []string{"Member"}, // Validated by your app layer
     MaxUses:   &maxUses,           // Optional (nil = default 1)
@@ -851,12 +1065,16 @@ fmt.Printf("Expires: %s\n", invitation.ExpiresAt)
 
 ### Accept Invitation (recommended for signup)
 
-Use `Accept` to onboard an invited user. It validates the invitation,
-consumes one use, and creates the user **in a single transaction**, so a
-single-use invitation can never onboard more than one account (no
-validate→create→increment race or over-redemption). The new user's tenant and
-roles come from the invitation, and the supplied email must match the
+Use `Accept` to onboard an invited user. It validates the invitation, consumes one use,
+and grants the invited **membership** (tenant + roles, from the invitation) **in a single
+transaction**, so a single-use invitation can never onboard more than one account (no
+validate→create→increment race or over-redemption). The supplied email must match the
 invitation's target.
+
+Because identities are global, the invited email may **already** have an account. In that
+case `Accept` **reuses** the existing identity (it does **not** create a second
+account/password) and simply grants the new membership; otherwise it creates the identity.
+The boolean second return value tells you which happened.
 
 ```go
 passwordHash, err := identity.PasswordService().HashPassword(password)
@@ -864,17 +1082,23 @@ if err != nil {
     return err
 }
 
-userID, err := invitationService.Accept(ctx, model.AcceptInvitationRequest{
+userID, created, err := invitationService.Accept(ctx, model.AcceptInvitationRequest{
     Code:         invitationCode,
     Email:        email,
     DisplayName:  displayName,
-    PasswordHash: passwordHash,
+    PasswordHash: passwordHash, // ignored when the identity already exists
 })
 if err != nil {
     // errors.Is(err, authkit.ErrInvitationInvalid) => unknown, expired, fully used, or email mismatch
     return fmt.Errorf("invitation signup failed: %w", err)
 }
-// userID is the new user — issue tokens, send a welcome email, etc.
+if !created {
+    // An existing global identity was reused (the invited email already had an account):
+    // the supplied PasswordHash was NOT applied. The user keeps their existing password
+    // and now also has access to the invitation's tenant.
+}
+// userID is the (new or existing) identity, now an active member of the invitation's
+// tenant — issue tokens (Login into that tenant), send a welcome email, etc.
 ```
 
 Prefer this over composing `Validate` + `Get` + your own user
@@ -998,7 +1222,7 @@ if err != nil {
 - The increment statement itself is atomic (database constraint enforced)
 - Automatic invalidation when max uses reached
 - For onboarding, prefer `Accept`, which performs validate + increment +
-  user creation in one transaction
+  identity reuse-or-create + membership grant in one transaction
 
 ### Cleanup Expired Invitations
 
@@ -1018,7 +1242,7 @@ fmt.Printf("Deleted %d expired invitations\n", count)
 
 ```go
 // Step 1: Admin creates invitation
-func AdminCreateInvitation(ctx context.Context, tenantID string, adminUserID uuid.UUID, inviteeEmail string) (string, error) {
+func AdminCreateInvitation(ctx context.Context, tenantID string, adminUserID string, inviteeEmail string) (string, error) {
     invitationService := identity.InvitationService()
 
     // Optional: enforce the tenant's allowed_domains for invited users. The
@@ -1056,11 +1280,13 @@ func UserSignupWithInvitation(ctx context.Context, email, displayName, password,
         return fmt.Errorf("password hashing failed: %w", err)
     }
 
-    // Accept validates the invitation, consumes one use, and creates the
-    // user in a SINGLE transaction. Tenant and roles are taken from the invitation,
-    // and the email must match the invitation's target — so a single-use invitation
-    // can never onboard more than one account and roles can't be tampered with.
-    userID, err := invitationService.Accept(ctx, model.AcceptInvitationRequest{
+    // Accept validates the invitation, consumes one use, and grants the invited
+    // membership in a SINGLE transaction. Tenant and roles are taken from the invitation,
+    // and the email must match the invitation's target — so a single-use invitation can
+    // never onboard more than one account and roles can't be tampered with. If the email
+    // already has a global identity it is REUSED (created=false; the PasswordHash is not
+    // applied) rather than duplicated.
+    userID, created, err := invitationService.Accept(ctx, model.AcceptInvitationRequest{
         Code:         invitationCode,
         Email:        email,
         DisplayName:  displayName,
@@ -1071,7 +1297,7 @@ func UserSignupWithInvitation(ctx context.Context, email, displayName, password,
         return fmt.Errorf("invitation signup failed: %w", err)
     }
 
-    _ = userID // issue tokens, send a welcome email, etc.
+    _, _ = userID, created // issue tokens, send a welcome (or "added to workspace") email, etc.
     return nil
 }
 
@@ -1107,7 +1333,7 @@ func AdminRevokeInvitation(ctx context.Context, invitationCode string) error {
 - **Multi-role support** (array of roles, validated by application layer)
 - **Configurable expiration** (default 7 days)
 - **Multi-use support** (default single-use, configurable)
-- **Atomic redemption** (`Accept` validates, consumes, and creates the user in one transaction)
+- **Atomic redemption** (`Accept` validates, consumes, reuses-or-creates the identity, and grants the membership in one transaction)
 - **Soft delete option** (revoke vs delete for audit trail)
 - **Automatic cleanup** (periodic maintenance job)
 - **Comprehensive logging** (all operations logged with masked codes — only when a `Logger` is injected; logging is a no-op otherwise)
@@ -1117,8 +1343,8 @@ func AdminRevokeInvitation(ctx context.Context, invitationCode string) error {
 - Role validation is handled by the application layer (library is app-agnostic)
 - Expiration enforcement prevents stale invitations
 - Usage limits prevent invitation sharing
-- `Accept` redeems and creates the user in one transaction, preventing
-  over-redemption of single-use invitations
+- `Accept` redeems, reuses-or-creates the identity, and grants the membership in one
+  transaction, preventing over-redemption of single-use invitations
 - Soft delete preserves audit trail for compliance
 
 ## OTP Service (One-Time Password Verification)
@@ -1131,9 +1357,9 @@ The OTPService provides secure OTP generation, validation, and lifecycle managem
 otpService := identity.OTPService()
 
 // Generate 6-digit OTP with 1-hour expiration.
-// Codes are scoped to (tenantID, email, purpose).
+// Codes are keyed by (email, purpose) globally — email is a global identity, so an OTP
+// is identity-level, not tenant-scoped.
 response, err := otpService.Generate(ctx, model.OTPGenerateRequest{
-    TenantID:           "acme.com",
     Email:              "user@acme.com",
     Purpose:            "signup",
     ExpirationDuration: time.Hour,
@@ -1153,19 +1379,18 @@ emailService.SendOTP(ctx, email, response.Code, response.ExpiresAt)
 **Generation Features:**
 - Cryptographically secure 6-digit codes (using `crypto/rand`)
 - Configurable expiration duration (e.g., 1 hour for signup, 15 minutes for 2FA)
-- Automatic upsert (replaces the existing OTP for the same tenant + email + purpose and resets the attempt counter)
+- Automatic upsert (replaces the existing OTP for the same email + purpose and resets the attempt counter)
 - Rate limiting (default: 1 minute between generation attempts)
 - Purpose tracking (`signup`, `reset-password`, `2fa`)
 
 ### Validate OTP
 
 ```go
-// User provides OTP code from email (scoped to tenantID, email, purpose)
+// User provides OTP code from email (keyed by email + purpose)
 err := otpService.Validate(ctx, model.OTPValidateRequest{
-    TenantID: "acme.com",
-    Email:    "user@acme.com",
-    Code:     "123456",
-    Purpose:  "signup",
+    Email:   "user@acme.com",
+    Code:    "123456",
+    Purpose: "signup",
 })
 if err != nil {
     // Invalid, expired, not found, or locked out after too many attempts
@@ -1177,7 +1402,7 @@ if err != nil {
 ```
 
 **Validation Features:**
-- Tenant-scoped: a code issued in one tenant cannot be verified in another
+- Keyed by (email, purpose): a code is matched by the email and purpose it was issued for
 - Verifies code matches (constant-time comparison)
 - Verifies purpose matches (`signup`, `reset-password`, `2fa`, etc.)
 - Checks expiration timestamp
@@ -1206,12 +1431,11 @@ please wait 1m30s before requesting a new OTP: authkit: OTP rate limit exceeded
 
 ```go
 // Step 1: User initiates signup
-func InitiateSignup(ctx context.Context, tenantID, email, name string) error {
+func InitiateSignup(ctx context.Context, email, name string) error {
     otpService := identity.OTPService()
 
-    // Generate OTP with 1-hour expiration (scoped to tenantID + email + purpose)
+    // Generate OTP with 1-hour expiration (keyed by email + purpose)
     response, err := otpService.Generate(ctx, model.OTPGenerateRequest{
-        TenantID:           tenantID,
         Email:              email,
         Purpose:            "signup",
         ExpirationDuration: time.Hour,
@@ -1230,38 +1454,49 @@ func InitiateSignup(ctx context.Context, tenantID, email, name string) error {
 }
 
 // Step 2: User provides OTP and completes signup
-func CompleteSignup(ctx context.Context, tenantID, email, otpCode, password string) error {
+func CompleteSignup(ctx context.Context, tenantID, email, displayName, otpCode, password string) error {
     otpService := identity.OTPService()
 
     // Validate OTP (single-use, auto-deleted on success)
     err := otpService.Validate(ctx, model.OTPValidateRequest{
-        TenantID: tenantID,
-        Email:    email,
-        Code:     otpCode,
-        Purpose:  "signup",
+        Email:   email,
+        Code:    otpCode,
+        Purpose: "signup",
     })
     if err != nil {
         return fmt.Errorf("invalid or expired OTP: %w", err)
     }
 
-    // OTP validated successfully - create user account
+    // OTP validated successfully — create the GLOBAL identity, then grant it the tenant
+    // membership (identity and access are separate concerns now).
     passwordService := identity.PasswordService()
     passwordHash, err := passwordService.HashPassword(password)
     if err != nil {
         return fmt.Errorf("password hashing failed: %w", err)
     }
 
-    // Create user in database
-    user := createUser(email, passwordHash)
-    return userRepo.CreateUser(ctx, user)
+    userID, err := identity.UserService().Create(ctx, model.CreateUserRequest{
+        Email:        email,
+        PasswordHash: passwordHash,
+        DisplayName:  displayName,
+    })
+    if err != nil {
+        return fmt.Errorf("create identity: %w", err)
+    }
+
+    return identity.MembershipService().Add(ctx, model.AddMembershipRequest{
+        UserID:   userID,
+        TenantID: tenantID,
+        Roles:    []string{"Member"},
+    })
 }
 ```
 
 ### Delete OTP
 
 ```go
-// Explicitly revoke OTP (e.g., user cancels operation)
-err := otpService.Delete(ctx, "acme.com", "user@acme.com", "signup")
+// Explicitly revoke OTP (e.g., user cancels operation). Keyed by (email, purpose).
+err := otpService.Delete(ctx, "user@acme.com", "signup")
 if err != nil {
     log.Fatal(err)
 }
@@ -1281,8 +1516,8 @@ fmt.Printf("Deleted %d expired OTPs\n", count)
 ```
 
 **OTP Characteristics:**
-- **One OTP per (tenant, email, purpose) at any time** (upsert behavior)
-- **Tenant-scoped** (a code issued in one tenant cannot be read or validated in another)
+- **One OTP per (email, purpose) at any time** (upsert behavior)
+- **Identity-level** (codes are keyed by the global email + purpose, not by tenant)
 - **Purpose enforced** (a code generated for one flow cannot validate another)
 - **Cryptographically secure generation** (`crypto/rand`, not `math/rand`)
 - **6-digit numeric code** (easy to type, SMS-friendly)
@@ -1424,12 +1659,13 @@ plain durations:
 The library currently requires PostgreSQL with the `authkit` schema containing the following tables:
 
 - **`authkit.tenants`**: Organization definitions with allowed email domains
-- **`authkit.users`**: User profiles with tenant association and roles
-- **`authkit.invitations`**: Access codes for member/viewer signup
-- **`authkit.api_keys`**: Tenant-scoped API keys (HMAC-SHA256 hashed)
-- **`authkit.refresh_tokens`**: Refresh token session records (HMAC-SHA256 hashed)
-- **`authkit.verification_codes`**: OTP codes, stored as a keyed HMAC-SHA256 (`code_hash`), never plaintext
-- **`authkit.provider_keys`**: Encrypted provider secrets
+- **`authkit.users`**: Global identity profiles. **No `tenant_id` and no `roles` columns**; email is globally unique via a UNIQUE index on `lower(email)`. Carries the identity `token_version`.
+- **`authkit.memberships`**: The user↔tenant graph. PK `(user_id, tenant_id)`, a `roles` JSONB column (opaque strings), a per-membership `token_version`, a `status` (`active`/`suspended`), and FKs to `users`/`tenants` that CASCADE on delete.
+- **`authkit.invitations`**: Access codes that grant a membership on signup
+- **`authkit.api_keys`**: Tenant-scoped API keys (HMAC-SHA256 hashed); `created_by` is a global user id
+- **`authkit.refresh_tokens`**: Identity-session refresh token records (HMAC-SHA256 hashed)
+- **`authkit.verification_codes`**: OTP codes keyed by `(email, purpose)` (no `tenant_id`), stored as a keyed HMAC-SHA256 (`code_hash`), never plaintext
+- **`authkit.provider_keys`**: Encrypted provider secrets (tenant-scoped)
 - **`authkit.user_status_changes`**: Account status-change audit trail (enable/disable/lock/unlock), written in the same transaction as the change; read via `UserService.StatusHistory`, pruned via `UserService.CleanupStatusChanges`
 
 Migration scripts are included in [`migrations/`](migrations/). Migration `000001` is
@@ -1482,17 +1718,25 @@ APIKeyConfig: authkit.APIKeyConfig{
 
 ### UUID v7
 
-The library uses UUID v7 for all identifiers:
+The library uses UUID v7 for all identifiers, minted in Go and represented as
+36-char strings:
 
 - Time-ordered for better database indexing
 - Chronologically sortable
 - Cryptographically secure
 
+The public Go surface uses `string` (not `uuid.UUID`) for every id — user ids, key
+ids, token/family ids — so callers don't need a uuid package to interoperate. The DB
+columns are `varchar(36)` (no SQL-side UUID type or generator); ids are still minted
+with `uuid.NewV7()` and stored/returned in their canonical 36-char string form:
+
 ```go
 import "github.com/google/uuid"
 
-// Used internally for all IDs
-keyID, err := uuid.NewV7()
+// Minted internally for all IDs, then used as the 36-char string form.
+id, err := uuid.NewV7()
+if err != nil { /* handle */ }
+keyID := id.String() // e.g. "0190bdf2-...": a varchar(36) value in the DB
 ```
 
 ## Architecture
@@ -1528,6 +1772,8 @@ authService := identity.AuthService()
 otpService := identity.OTPService()
 tenantService := identity.TenantService()
 invitationService := identity.InvitationService()
+userService := identity.UserService()
+membershipService := identity.MembershipService()
 ```
 
 ### Read-Write Connection Separation
@@ -1552,8 +1798,13 @@ switch {
 case err == nil:
     // authorized — use claims
 case errors.Is(err, authkit.ErrInvalidToken), errors.Is(err, authkit.ErrTokenRevoked):
+    // ErrTokenRevoked now also covers a bumped membership token_version or a
+    // suspended/removed membership in the token's tenant.
     http.Error(w, "unauthorized", http.StatusUnauthorized) // 401
-case errors.Is(err, authkit.ErrAccountDisabled), errors.Is(err, authkit.ErrAccountLocked):
+case errors.Is(err, authkit.ErrAccountDisabled), errors.Is(err, authkit.ErrAccountLocked),
+    errors.Is(err, authkit.ErrNoActiveMembership):
+    // ErrNoActiveMembership: valid credentials, but not (or no longer) a member of the
+    // requested workspace — returned by Login/LoginByEmail/MintWorkspaceToken/RefreshToken.
     http.Error(w, "forbidden", http.StatusForbidden) // 403
 default:
     // ErrInternal or any unexpected fault: log server-side, do NOT leak err to the client
@@ -1563,7 +1814,8 @@ default:
 ```
 
 Exported sentinels include `ErrInvalidCredentials`, `ErrAccountDisabled`,
-`ErrAccountLocked`, `ErrInvalidToken`, `ErrTokenRevoked`, `ErrInvalidRefreshToken`,
+`ErrAccountLocked`, `ErrNoActiveMembership`, `ErrLastRoleHolder`, `ErrInvalidToken`,
+`ErrTokenRevoked`, `ErrInvalidRefreshToken`,
 `ErrRefreshTokenReuse`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrOTPRateLimited`,
 `ErrOTPSecretMissing`, `ErrInvalidAPIKey`, `ErrIncorrectPassword`,
 `ErrInvitationInvalid`, `ErrUserExists`, `ErrPasswordTooWeak`,
@@ -1577,10 +1829,21 @@ returned by `Login`/`RefreshToken`/`OTPService.Generate` when a configured
 no `OTPConfig.HMACSecret` was configured. `ErrPasswordTooWeak` covers strength failures (too short, too long,
 or a missing character class) from `ChangePassword`/`ValidatePasswordStrength`/
 `HashPassword`; `ErrSecretEncryptionKeyMissing` is returned by `SecretService`
-operations when no valid encryption key was configured. `Login` deliberately
+operations when no valid encryption key was configured. `ErrNoActiveMembership` maps to a
+403 and is the workspace-scoping outcome of the decoupled model — the credentials are
+valid but the identity has no active membership in the requested tenant (no row, or it is
+suspended); `Login`/`LoginByEmail`/`MintWorkspaceToken`/`RefreshToken` return it.
+`ErrLastRoleHolder` maps to a **409** and is returned by
+`MembershipService.RemoveGuarded`/`UpdateRolesGuarded` when the change would leave the
+tenant with no active member holding the required role (e.g. the workspace's last Admin);
+nothing is written when it is returned.
+`ValidateJWT` additionally returns `ErrTokenRevoked` when the membership `token_version`
+no longer matches or the active membership has been suspended/removed (the workspace's
+access tokens are revoked without touching the identity session). `Login` deliberately
 collapses not-found / wrong-password / disabled / locked into a single
-`ErrInvalidCredentials` to avoid account enumeration; the specific reason is
-logged server-side only.
+`ErrInvalidCredentials` to avoid account enumeration (it does NOT collapse
+`ErrNoActiveMembership`, which is an authorization, not an authentication, outcome); the
+specific reason is logged server-side only.
 
 **Do not render `err.Error()` to end users** — wrapped errors may carry internal
 context. Map to a status with `errors.Is`, and log the raw error server-side.
@@ -1633,14 +1896,15 @@ head-of-line blocking and pool exhaustion by **both**:
 The library does **not** rate-limit on its own — the per-account failed-login lockout
 does not stop password spraying, distributed guessing, refresh abuse, or OTP-email
 fan-out (see [SECURITY.md](SECURITY.md)). Plug in your own throttle via
-`Config.RateLimiter`; it is consulted by `Login`, `RefreshToken`, and
+`Config.RateLimiter`; it is consulted by `Login`, `LoginByEmail`, `RefreshToken`, and
 `OTPService.Generate` before they do work, and a rejection surfaces as
 `authkit.ErrRateLimited` (map it to HTTP 429):
 
 ```go
 // A token-bucket / Redis / in-memory limiter, adapted to the ratelimit.RateLimiter
-// interface. key is one of "login:<tenant>:<ip|email:...>", "refresh:<ip>",
-// "otp:<tenant>:<email>:<purpose>" — bucket on it directly.
+// interface. key is one of "login:<tenant>:<ip|email:...>" (Login),
+// "login:<ip|email:...>" (LoginByEmail — no tenant in the key), "refresh:<ip>",
+// "otp:<email>:<purpose>" (no tenant) — bucket on it directly.
 type myLimiter struct{ /* ... */ }
 
 func (l *myLimiter) Allow(ctx context.Context, key string) (bool, error) {
@@ -1774,7 +2038,8 @@ This project is licensed under the Apache License, Version 2.0 - see the [LICENS
 - [x] Password Hashing Service (bcrypt)
 - [x] JWT Service (token generation & validation)
 - [x] Token Service (combined JWT + refresh token management)
-- [x] Auth Service (login, logout, token refresh, JWT validation)
+- [x] Auth Service (login, login-by-email, workspace-token mint/switch, logout, token refresh, JWT validation)
+- [x] Decoupled identities + memberships (global users, `MembershipService`, workspace-scoped tokens, dual token_version)
 - [x] OTP Service (one-time password generation & validation with rate limiting)
 - [x] Tenant Service (tenant management, settings, domain validation)
 - [x] Invitation Service (invitation management, validation, revocation)

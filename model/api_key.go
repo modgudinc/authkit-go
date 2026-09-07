@@ -3,11 +3,7 @@
 
 package model
 
-import (
-	"time"
-
-	"github.com/google/uuid"
-)
+import "time"
 
 // APIKey represents a tenant-scoped API key for SDK authentication
 type APIKey struct {
@@ -15,7 +11,7 @@ type APIKey struct {
 	KeyHash    string     `json:"-" db:"key_hash"` // Never expose hash in JSON
 	TenantID   string     `json:"tenant_id" db:"tenant_id"`
 	Name       string     `json:"name" db:"name"`
-	CreatedBy  uuid.UUID  `json:"created_by" db:"created_by"` // User UUID (FK to users.id)
+	CreatedBy  string     `json:"created_by" db:"created_by"` // User UUID (FK to users.id)
 	LastUsedAt *time.Time `json:"last_used_at,omitempty" db:"last_used_at"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty" db:"expires_at"`
 	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
@@ -24,7 +20,7 @@ type APIKey struct {
 // CreateAPIKeyRequest represents the request to create an API key
 type CreateAPIKeyRequest struct {
 	TenantID  string         // Tenant identifier
-	CreatedBy uuid.UUID      // User UUID of the admin creating the key (FK to users.id)
+	CreatedBy string         // User UUID of the admin creating the key (FK to users.id)
 	Name      string         // User-friendly name for the key
 	ExpiresIn *time.Duration // Optional expiration; nil means the key never expires
 }

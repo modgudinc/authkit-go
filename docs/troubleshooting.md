@@ -48,7 +48,12 @@ Override it with `IDENTITY_TEST_DATABASE_URL` when needed.
 
 Check:
 
-- The user exists in the requested `tenant_id`.
+- A global user exists for the email (email is globally unique, case-insensitive).
+- The user has an **active membership** in the requested `tenant_id`. `Login`
+  authenticates the global identity and then requires an active membership in the
+  workspace; with valid credentials but no membership it returns
+  `authkit.ErrNoActiveMembership` (map to 403), not `ErrInvalidCredentials`. Grant one
+  with `MembershipService.Add`.
 - The password stored in `users.password_hash` is a bcrypt hash, not plaintext.
 - The user is enabled.
 - The user is not locked.
@@ -56,7 +61,20 @@ Check:
 
 ## JWT Validation Fails After Logout-All Or Password Change
 
-This is expected. `LogoutAll` increments `users.token_version`; old access tokens fail validation once the current user version differs from the token claim.
+This is expected. `LogoutAll` and `ChangePassword` increment the identity
+`users.token_version`; old access tokens fail validation once the current user version
+differs from the token claim (every workspace's tokens are invalidated).
+
+## JWT Validation Fails After A Role Change Or Membership Revoke
+
+Also expected, and scoped to that one workspace. Access tokens are workspace-scoped and
+carry a `membership_token_version`. `MembershipService.UpdateRoles` and
+`MembershipService.Remove` bump `memberships.token_version` (Remove also suspends the
+membership), so `ValidateJWT` rejects that workspace's outstanding tokens with
+`ErrTokenRevoked` — the client refreshes (`RefreshToken` with that `tenant_id`, or
+`MintWorkspaceToken`) to obtain a token with the new roles, or gets
+`ErrNoActiveMembership` if the membership was revoked. Tokens for the identity's other
+workspaces are unaffected.
 
 ## Refresh Token Fails After One Use
 
@@ -86,8 +104,9 @@ consult it and return `authkit.ErrRateLimited` (map to HTTP 429) when it rejects
   only for a backend fault. On an error the library **fails open** (the operation
   proceeds) and increments `authkit_rate_limiter_error_total` — a sustained nonzero
   rate there means your limiter backend is degraded.
-- The key passed to `Allow` is `login:<tenant>:<ip|email:...>`, `refresh:<ip>`, or
-  `otp:<tenant>:<email>:<purpose>` — bucket on it directly.
+- The key passed to `Allow` is `login:<tenant>:<ip|email:...>` (`Login`),
+  `login:<ip|email:...>` (`LoginByEmail`), `refresh:<ip>`, or `otp:<email>:<purpose>`
+  (OTP is keyed by email + purpose, not tenant) — bucket on it directly.
 - `ValidateJWT` is **not** rate-limited (it's a local signature/DB check), so a 429
   only originates from the login/refresh/OTP-generation paths.
 
@@ -129,7 +148,7 @@ Branch on the exported sentinels with `errors.Is(err, authkit.Err…)` — never
 | Sentinel(s) | HTTP |
 |---|---|
 | `ErrInvalidCredentials`, `ErrInvalidToken`, `ErrTokenRevoked`, `ErrInvalidRefreshToken`, `ErrRefreshTokenReuse`, `ErrInvalidAPIKey`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrIncorrectPassword` | 401 |
-| `ErrAccountDisabled`, `ErrAccountLocked` | 403 |
+| `ErrAccountDisabled`, `ErrAccountLocked`, `ErrNoActiveMembership` | 403 |
 | `ErrNotFound` | 404 |
 | `ErrUserExists` | 409 |
 | `ErrRateLimited`, `ErrOTPRateLimited` | 429 |

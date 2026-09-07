@@ -1,6 +1,8 @@
 # Architecture
 
-`authkit-go` is a Go library for tenant-scoped identity primitives. It is not a full application server: callers own HTTP routing, request validation, email delivery, authorization policy, and user-facing flows.
+`authkit-go` is a Go library for identity primitives built on a **decoupled** model: a user is a global identity, tenant access is a `user ↔ tenant` membership, and access tokens are workspace-scoped. It is not a full application server: callers own HTTP routing, request validation, email delivery, authorization policy, and user-facing flows.
+
+`authkit-go` owns the membership **graph** (global users, tenants, memberships with opaque role strings, credentials, sessions, invitations); the embedding application owns the **policy** (what the role strings mean). This mirrors WorkOS / Auth0 Organizations / Stytch B2B.
 
 ## Layers
 
@@ -9,7 +11,7 @@
 - `metrics/`: Public, optional `Metrics` interface plus a no-op default and the canonical `Counter*` names. Injected via `Config.Metrics`.
 - `ratelimit/`: Public, optional `RateLimiter` interface (aliased as `authkit.RateLimiter`). Injected via `Config.RateLimiter`; consulted before `Login`, `RefreshToken`, and `OTPService.Generate`, with a rejection surfacing as `authkit.ErrRateLimited` (HTTP 429). Key formats are documented in the package.
 - `internal/repository/`: PostgreSQL data access (not importable by consumers). Queries are schema-qualified with `authkit.` and rewritten when `DatabaseConnection.IdentitySchema` is configured.
-- `internal/service/`: Business logic for tokens, passwords, API keys, invitations, tenants, OTPs, and encrypted secrets (not importable by consumers; the public contracts are the service interfaces in package `authkit`).
+- `internal/service/`: Business logic for global users, memberships, tokens, passwords, API keys, invitations, tenants, OTPs, and encrypted secrets (not importable by consumers; the public contracts are the service interfaces in package `authkit`).
 - `migrations/`: PostgreSQL schema used by the default `authkit` schema.
 - `integration/`: Docker-backed tests that apply migrations and exercise repository/service behavior against real PostgreSQL.
 
@@ -18,18 +20,21 @@
 Core tables:
 
 - `tenants`: Tenant records and allowed email domains.
-- `users`: Tenant-scoped users. Email uniqueness is scoped by `(tenant_id, email)`.
-- `refresh_tokens`: Stored refresh token hashes and session metadata.
-- `api_keys`: Tenant-scoped API key hashes and metadata.
+- `users`: Global user identities — **no** `tenant_id`, **no** `roles`. Email is globally unique, case-insensitively (`UNIQUE (lower(email))`). `token_version` is the identity-level token version (credential events invalidate every workspace's access tokens).
+- `memberships`: The `user ↔ tenant` graph — which identity belongs to which tenant, with `roles` (opaque JSONB strings the embedding app interprets), a per-membership `token_version` (a role change or revoke invalidates only that workspace's access tokens), and a `status` (`active` / `suspended`). Primary key `(user_id, tenant_id)`; both foreign keys cascade on delete.
+- `refresh_tokens`: Stored refresh token hashes and session metadata. The refresh token is the **identity session** (user-scoped, no tenant); one login = one family.
+- `api_keys`: Tenant-scoped API key hashes and metadata (`created_by` is a global user id).
 - `invitations`: Invitation codes, target email, roles, expiry, and usage limits.
-- `verification_codes`: OTPs stored as a keyed HMAC-SHA256 (`code_hash`), never in plaintext, plus purpose, failed-attempt count, expiry, and creation time; scoped by `(tenant_id, email, purpose)`.
-- `provider_keys`: Tenant-scoped encrypted secrets.
+- `verification_codes`: OTPs stored as a keyed HMAC-SHA256 (`code_hash`), never in plaintext, plus purpose, failed-attempt count, expiry, and creation time; keyed by `(email, purpose)` globally (email is a global identity, so an OTP is identity-level, not tenant-scoped).
+- `provider_keys`: Tenant-scoped encrypted secrets (`created_by` is a global user id).
 - `user_status_changes`: Audit trail of account enable/disable and lock/unlock
   transitions. Written by the library in Go, in the same transaction as the
   status change (there is no DB trigger).
 
-All identifiers are UUIDv7 minted in Go (`uuid.NewV7()`); the schema has no
-SQL-side UUID generation.
+All identifiers are UUIDv7 minted in Go (`uuid.NewV7()`) and represented as 36-char
+strings — `varchar(36)` columns in the schema and `string` on the Go API surface;
+there is no SQL-side UUID type or generator. (`tenant_id` is the exception: a
+caller-supplied free-form identifier, `varchar(255)`.)
 
 ## Connection Model
 
@@ -37,7 +42,7 @@ SQL-side UUID generation.
 
 - Writes always use `IdentityRWDB`.
 - General reads use `IdentityRODB`.
-- Security-sensitive validation paths that must see revocations immediately use `IdentityRWDB`, including API key validation and refresh-token validation/rotation.
+- Security-sensitive validation paths that must see revocations immediately use `IdentityRWDB`, including API key validation, refresh-token validation/rotation, and `ValidateJWT`'s identity **and** membership reads (so a just-bumped identity or membership `token_version`, a disable/lock, or a membership revoke is observed without replica lag).
 
 This allows applications to use read replicas while avoiding replica-lag acceptance for revoked credentials.
 

@@ -47,7 +47,7 @@ const uniqueViolation = "23505"
 type InsertInvitationParams struct {
 	Code      string
 	TenantID  string
-	CreatedBy uuid.UUID
+	CreatedBy string
 	Roles     []string
 	Email     string
 	ExpiresAt time.Time
@@ -173,23 +173,29 @@ func (r *Repository) IncrementUseCount(ctx context.Context, code string) error {
 }
 
 // ============================================================================
-// AcceptInvitation - Atomically redeems an invitation and creates the user.
+// AcceptInvitation - Atomically redeems an invitation, resolving the invitee's
+// GLOBAL identity and granting the invited membership.
 //
 // In a single transaction it locks the invitation row, validates it (not expired,
 // uses remaining, and the supplied email matches the invitation's target email),
-// increments current_uses under the max_uses guard, and inserts a user whose
-// tenant and roles come from the invitation itself. Performing all of this in one
-// transaction closes the validate-then-use TOCTOU window that allows a single-use
-// invitation to onboard more than one account, and binds the new user to the
-// invitation's intended email and roles (no role/privilege hijack).
+// increments current_uses under the max_uses guard, then:
+//   - reuses the existing global user when one already exists for the email (the
+//     invitee keeps their single identity/password — no second account/password), or
+//   - creates a new global user from the supplied displayName/passwordHash; and
+//   - upserts a membership to the invitation's tenant with the invitation's roles.
 //
-// Returns the new user's ID. The created user's email, tenant, and roles are
-// taken from the invitation; only displayName and passwordHash come from the caller.
+// Performing all of this in one transaction closes the validate-then-use TOCTOU
+// window that would let a single-use invitation onboard more than once, and binds
+// the grant to the invitation's intended email and roles (no role/privilege hijack).
+//
+// Returns the resolved user's ID and whether a NEW identity was created (false when
+// an existing one was reused). displayName/passwordHash are used only when creating
+// a new identity; for a reused identity they are ignored.
 // ============================================================================
-func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayName, passwordHash string) (uuid.UUID, error) {
+func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayName, passwordHash string) (userID string, created bool, err error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to begin invitation acceptance: %w", err)
+		return "", false, fmt.Errorf("failed to begin invitation acceptance: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -211,28 +217,28 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 	`
 	if err := tx.QueryRowContext(ctx, r.q(lookup), code).Scan(&tenantID, &rolesJSON, &invitedEmail, &expiresAt, &maxUses, &currentUses); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return uuid.Nil, fmt.Errorf("invitation not found: %w", model.ErrInvitationInvalid)
+			return "", false, fmt.Errorf("invitation not found: %w", model.ErrInvitationInvalid)
 		}
-		return uuid.Nil, fmt.Errorf("failed to load invitation: %w", err)
+		return "", false, fmt.Errorf("failed to load invitation: %w", err)
 	}
 
 	// Validate expiry and remaining uses.
 	if time.Now().After(expiresAt) {
-		return uuid.Nil, fmt.Errorf("invitation has expired: %w", model.ErrInvitationInvalid)
+		return "", false, fmt.Errorf("invitation has expired: %w", model.ErrInvitationInvalid)
 	}
 	if currentUses >= maxUses {
-		return uuid.Nil, fmt.Errorf("invitation has been fully used: %w", model.ErrInvitationInvalid)
+		return "", false, fmt.Errorf("invitation has been fully used: %w", model.ErrInvitationInvalid)
 	}
 
 	// Bind the redemption to the invitation's target email.
 	normEmail := strings.ToLower(strings.TrimSpace(email))
 	if !strings.EqualFold(strings.TrimSpace(invitedEmail), normEmail) {
-		return uuid.Nil, fmt.Errorf("email does not match invitation: %w", model.ErrInvitationInvalid)
+		return "", false, fmt.Errorf("email does not match invitation: %w", model.ErrInvitationInvalid)
 	}
 
 	var roles []string
 	if err := json.Unmarshal(rolesJSON, &roles); err != nil {
-		return uuid.Nil, fmt.Errorf("failed to unmarshal invitation roles: %w", err)
+		return "", false, fmt.Errorf("failed to unmarshal invitation roles: %w", err)
 	}
 
 	// Consume one use under the max_uses guard (defends against a concurrent race
@@ -243,50 +249,64 @@ func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayN
 		WHERE code = $1 AND current_uses < max_uses
 	`), code)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to consume invitation: %w", err)
+		return "", false, fmt.Errorf("failed to consume invitation: %w", err)
 	}
 	if err := requireRowsAffected(res, fmt.Errorf("invitation has been fully used: %w", model.ErrInvitationInvalid)); err != nil {
-		return uuid.Nil, err
+		return "", false, err
 	}
 
-	// Create the user with tenant and roles taken from the invitation.
-	userID, err := uuid.NewV7()
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("could not generate an id for user: %w", err)
-	}
-	rolesOut, err := json.Marshal(roles)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to marshal roles: %w", err)
-	}
-	now := time.Now()
-	insertUser := `
-		INSERT INTO {{schema}}.users (
-			id, email, password_hash, tenant_id, display_name, roles, token_version,
-			is_enabled, is_locked, failed_login_count, created_at, updated_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-	`
-	if _, err := tx.ExecContext(ctx, r.q(insertUser),
-		userID, normEmail, passwordHash, tenantID, displayName, rolesOut,
-		0, true, false, 0, now, now,
-	); err != nil {
-		// A (tenant_id, email) uniqueness conflict means an account already
-		// exists for this email; surface a clean sentinel instead of leaking the
-		// raw driver/constraint string. The deferred rollback leaves the
-		// invitation unconsumed.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
-			return uuid.Nil, fmt.Errorf("user already exists for this tenant: %w", model.ErrUserExists)
+	// Resolve the invitee's GLOBAL identity: reuse an existing user for this email,
+	// else create one. The lookup runs in the same transaction, so a concurrent
+	// signup is either already visible here or conflicts on the insert below.
+	err = tx.QueryRowContext(ctx, r.q(`SELECT id FROM {{schema}}.users WHERE lower(email) = lower($1)`), normEmail).Scan(&userID)
+	switch {
+	case err == nil:
+		// Existing identity — reuse it; displayName/passwordHash are ignored.
+		created = false
+	case errors.Is(err, sql.ErrNoRows):
+		gen, gerr := uuid.NewV7()
+		if gerr != nil {
+			return "", false, fmt.Errorf("could not generate an id for user: %w", gerr)
 		}
-		return uuid.Nil, fmt.Errorf("failed to create user from invitation: %w", err)
+		userID = gen.String()
+		now := time.Now()
+		insertUser := `
+			INSERT INTO {{schema}}.users (
+				id, email, password_hash, display_name, token_version,
+				is_enabled, is_locked, failed_login_count, created_at, updated_at
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		`
+		if _, ierr := tx.ExecContext(ctx, r.q(insertUser),
+			userID, normEmail, passwordHash, displayName,
+			0, true, false, 0, now, now,
+		); ierr != nil {
+			// A lower(email) uniqueness conflict means another transaction created the
+			// identity between our SELECT and INSERT; surface a clean sentinel. The
+			// deferred rollback leaves the invitation unconsumed.
+			var pgErr *pgconn.PgError
+			if errors.As(ierr, &pgErr) && pgErr.Code == uniqueViolation {
+				return "", false, fmt.Errorf("user already exists for this email: %w", model.ErrUserExists)
+			}
+			return "", false, fmt.Errorf("failed to create user from invitation: %w", ierr)
+		}
+		created = true
+	default:
+		return "", false, fmt.Errorf("failed to resolve invitee identity: %w", err)
+	}
+
+	// Grant the invited membership (roles from the invitation) to the resolved
+	// identity. Idempotent: re-accepting refreshes the roles for that tenant.
+	if err := r.upsertMembership(ctx, tx, userID, tenantID, roles); err != nil {
+		return "", false, fmt.Errorf("failed to grant invited membership: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return uuid.Nil, fmt.Errorf("failed to commit invitation acceptance: %w", err)
+		return "", false, fmt.Errorf("failed to commit invitation acceptance: %w", err)
 	}
 	committed = true
 
-	return userID, nil
+	return userID, created, nil
 }
 
 // ============================================================================

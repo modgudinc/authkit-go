@@ -28,6 +28,8 @@ var publicSentinels = []error{
 	model.ErrAccountLocked,
 	model.ErrInvalidToken,
 	model.ErrTokenRevoked,
+	model.ErrNoActiveMembership,
+	model.ErrLastRoleHolder,
 	model.ErrInvalidRefreshToken,
 	model.ErrRefreshTokenReuse,
 	model.ErrInvalidOTP,
