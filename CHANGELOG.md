@@ -8,6 +8,8 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-09-07
+
 ### Added
 
 - Optional installation-bound sessions with Disabled (default), Optional and
@@ -26,7 +28,14 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 - Opt-in account-wide revocation coordinates user/session/token writes; normal
   session revocation leaves other installations valid.
 
-### Compatibility
+### Changed
+
+- Update `golang.org/x/crypto` to v0.55.0, with indirect updates to
+  `golang.org/x/sync` v0.22.0 and `golang.org/x/text` v0.41.0.
+- Update pinned CI actions: checkout v7.0.0, setup-go v6.5.0,
+  CodeQL SARIF upload v4.36.3 and golangci-lint-action v9.3.0.
+
+### Compatibility (source-breaking for positional struct literals)
 
 - Existing named service interfaces and auth request/response shapes are unchanged.
   `Config` and `JWTClaims` gain fields; positional literals for these structs need
@@ -105,6 +114,7 @@ schema was edited in place — there is **no data migration**.
 - `ErrNoActiveMembership` is an authorization outcome and never revokes the identity
   session (the user keeps access to their other workspaces).
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.20.2...HEAD
+[0.20.2]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.2
 [0.20.1]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.1
 [0.20.0]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.0
