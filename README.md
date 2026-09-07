@@ -30,6 +30,7 @@ go get github.com/modgudinc/authkit-go
 - [Service examples](docs/examples.md)
 - [Common patterns](docs/patterns.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Optional installation-bound sessions](docs/installation-sessions.md)
 
 ## Quick Start
 
@@ -165,6 +166,12 @@ identity, err := authkit.New(authkit.Config{
 > [SECURITY.md](SECURITY.md)); keep this in mind for your own log lines.
 
 ## Identities and Workspaces
+
+Applications that need per-installation login and revocation can opt into
+`Config.SessionConfig` and use `InstallationAuthService` / `SessionService`.
+The default remains disabled and works against the original schema. See
+[installation sessions](docs/installation-sessions.md) for the additive migration,
+mode selection, enrollment contract and rollout instructions.
 
 authkit uses a **decoupled-identity** model. The two concepts are deliberately separate:
 

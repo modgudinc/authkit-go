@@ -8,6 +8,30 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+### Added
+
+- Optional installation-bound sessions with Disabled (default), Optional and
+  Required modes; separate installation login/validation and session-management
+  interfaces, stable signed `sid`, scoped revocation and bounded session lifetime.
+- Additive migration 000002. Default mode remains usable with the original schema.
+- Session integration coverage for token rotation, workspace switching, logout,
+  cross-user/application isolation, expiry, custom schemas, transaction rollback,
+  concurrent revocation/reuse and legacy compatibility.
+
+### Security
+
+- Bound access/refresh credentials cannot downgrade to legacy validation when
+  session data is absent or session support is disabled. Primary-database checks
+  enforce revocation. Bound sessions retain their login's identity token version.
+- Opt-in account-wide revocation coordinates user/session/token writes; normal
+  session revocation leaves other installations valid.
+
+### Compatibility
+
+- Existing named service interfaces and auth request/response shapes are unchanged.
+  `Config` and `JWTClaims` gain fields; positional literals for these structs need
+  keyed fields. See the installation-session guide for migration/rollback ordering.
+
 ## [0.20.1] - 2026-07-02
 
 ### Added

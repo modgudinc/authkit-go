@@ -18,16 +18,27 @@ import (
 // lives on memberships (see MembershipService). Account status (enable/disable,
 // lock/unlock) and credentials are identity-level.
 type UserService struct {
-	repo   *repository.Repository
-	logger logger.Logger
+	sessionsEnabled bool
+	repo            *repository.Repository
+	logger          logger.Logger
 }
 
 // NewUserService creates a new UserService instance
-func NewUserService(repo *repository.Repository, logger logger.Logger) *UserService {
-	return &UserService{
+func NewUserService(repo *repository.Repository, logger logger.Logger, opts ...UserOption) *UserService {
+	s := &UserService{
 		repo:   repo,
 		logger: ensureLogger(logger),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+type UserOption func(*UserService)
+
+func WithUserSessions(enabled bool) UserOption {
+	return func(s *UserService) { s.sessionsEnabled = enabled }
 }
 
 const (
@@ -216,6 +227,9 @@ func (s *UserService) IncrementTokenVersion(ctx context.Context, userID string) 
 // revokeRefreshTokens deletes all refresh tokens for a user. Used by the
 // account-status mutators that must terminate existing sessions.
 func (s *UserService) revokeRefreshTokens(ctx context.Context, userID string, reason string) error {
+	if s.sessionsEnabled {
+		return s.repo.RevokeUserSessionsAndTokens(ctx, userID)
+	}
 	if err := s.repo.DeleteByUserID(ctx, userID); err != nil {
 		s.logger.Error(ctx, "Failed to revoke refresh tokens",
 			"user_id", userID,

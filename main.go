@@ -25,12 +25,15 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/internal/service"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/metrics"
+	"github.com/modgudinc/authkit-go/model"
 	"github.com/modgudinc/authkit-go/ratelimit"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -63,8 +66,9 @@ const (
 // individual services through its accessor methods (AuthService, UserService,
 // TokenService, etc.).
 type AuthKit struct {
-	rwConnection *sql.DB
-	roConnection *sql.DB
+	sessionConfig model.SessionConfig
+	rwConnection  *sql.DB
+	roConnection  *sql.DB
 
 	accessTokenSecret      string
 	refreshTokenHMACSecret string // Secret for HMAC-SHA256 hashing of refresh tokens in storage
@@ -92,6 +96,25 @@ type AuthKit struct {
 // HMAC secret (when provided) is shorter than MinSecretLength. The OTP HMAC secret
 // is only required at use time (OTPService.Generate/Validate), not at construction.
 func New(config Config) (*AuthKit, error) {
+	sessionConfig := config.SessionConfig
+	if sessionConfig.Mode > SessionRequired {
+		return nil, errors.New("invalid session mode")
+	}
+	if sessionConfig.AbsoluteLifetime < 0 {
+		return nil, errors.New("session absolute lifetime must be positive")
+	}
+	if sessionConfig.Mode != SessionDisabled {
+		if sessionConfig.Namespace == "" || strings.TrimSpace(sessionConfig.Namespace) != sessionConfig.Namespace || strings.ContainsRune(sessionConfig.Namespace, 0) ||
+			!utf8.ValidString(sessionConfig.Namespace) || utf8.RuneCountInString(sessionConfig.Namespace) > 255 {
+			return nil, errors.New("session namespace must be non-empty and at most 255 characters without surrounding whitespace")
+		}
+		if sessionConfig.AbsoluteLifetime == 0 {
+			sessionConfig.AbsoluteLifetime = 30 * 24 * time.Hour
+		}
+		if sessionConfig.AbsoluteLifetime < time.Second {
+			return nil, errors.New("session absolute lifetime must be at least one second")
+		}
+	}
 	if config.DBConnection.IdentityRWDB == nil {
 		return nil, errors.New("RW db connection for identity schema is required")
 	}
@@ -209,8 +232,9 @@ func New(config Config) (*AuthKit, error) {
 	}
 
 	kit := &AuthKit{
-		rwConnection: config.DBConnection.IdentityRWDB,
-		roConnection: config.DBConnection.IdentityRODB,
+		sessionConfig: sessionConfig,
+		rwConnection:  config.DBConnection.IdentityRWDB,
+		roConnection:  config.DBConnection.IdentityRODB,
 
 		accessTokenSecret:      config.JWTConfig.AccessSecret,
 		refreshTokenHMACSecret: config.JWTConfig.RefreshTokenHMACSecret,
@@ -294,6 +318,23 @@ func (k *AuthKit) TokenService() TokenService {
 // AuthService returns the authentication service
 // for complete authentication flows (login, logout, token refresh, JWT validation).
 func (k *AuthKit) AuthService() AuthService {
+	return k.newAuthService()
+}
+
+// InstallationAuthService adds enrollment-bound login and verified bindings.
+// Existing AuthService interfaces remain unchanged.
+func (k *AuthKit) InstallationAuthService() InstallationAuthService {
+	return k.newAuthService()
+}
+
+// SessionService manages sessions scoped to the configured application namespace.
+// Callers must authorize session-management actions for the supplied user.
+func (k *AuthKit) SessionService() SessionService {
+	repo := k.repository()
+	return service.NewSessionService(&repo, k.sessionConfig, k.logger)
+}
+
+func (k *AuthKit) newAuthService() *service.AuthService {
 	repo := k.repository()
 	return service.NewAuthService(&repo, k.newPasswordService(), k.newTokenService(), k.newJWTService(), k.logger, k.metrics, k.rateLimiter)
 }
@@ -313,12 +354,13 @@ func (k *AuthKit) newJWTService() *service.JWTService {
 		k.logger,
 		service.WithIssuer(k.jwtIssuer),
 		service.WithAudience(k.jwtAudience),
+		service.WithSessionMode(k.sessionConfig.Mode),
 	)
 }
 
 func (k *AuthKit) newTokenService() *service.TokenService {
 	repo := k.repository()
-	return service.NewTokenService(&repo, k.newJWTService(), k.refreshTokenExpiry, k.refreshTokenHMACSecret, k.logger, k.metrics)
+	return service.NewTokenService(&repo, k.newJWTService(), k.refreshTokenExpiry, k.refreshTokenHMACSecret, k.logger, k.metrics, service.WithTokenSessions(k.sessionConfig))
 }
 
 // OTPService returns the OTP service
@@ -357,7 +399,7 @@ func (k *AuthKit) SecretService() SecretService {
 // for global-identity management, queries, and account status operations.
 func (k *AuthKit) UserService() UserService {
 	repo := k.repository()
-	return service.NewUserService(&repo, k.logger)
+	return service.NewUserService(&repo, k.logger, service.WithUserSessions(k.sessionConfig.Mode != SessionDisabled))
 }
 
 // MembershipService returns the membership service

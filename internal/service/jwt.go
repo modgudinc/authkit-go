@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -24,6 +25,7 @@ const clockSkewLeeway = 30 * time.Second
 
 // JWTService handles JWT token generation and validation
 type JWTService struct {
+	sessionMode   model.SessionMode
 	accessSecret  string
 	accessExpiry  time.Duration
 	refreshExpiry time.Duration
@@ -37,6 +39,30 @@ type JWTService struct {
 
 // JWTOption configures optional JWTService behavior.
 type JWTOption func(*JWTService)
+
+// Keep strict sid decoding internal. Adding UnmarshalJSON to the public
+// JWTClaims would change how consumers' structs embedding it decode fields.
+type parsedAccessClaims struct{ model.JWTClaims }
+
+func (c *parsedAccessClaims) UnmarshalJSON(data []byte) error {
+	if err := json.Unmarshal(data, &c.JWTClaims); err != nil {
+		return err
+	}
+	var marker struct {
+		SessionID json.RawMessage `json:"sid"`
+	}
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return err
+	}
+	if len(marker.SessionID) > 0 && c.SessionID == "" {
+		return fmt.Errorf("sid must be a non-empty string")
+	}
+	return nil
+}
+
+func WithSessionMode(mode model.SessionMode) JWTOption {
+	return func(s *JWTService) { s.sessionMode = mode }
+}
 
 // WithIssuer sets the JWT "iss" claim on generated tokens and requires it to
 // match during validation. Empty string (the default) disables issuer handling.
@@ -114,6 +140,13 @@ func NewJWTService(
 //	}
 //	// Return token to client
 func (s *JWTService) GenerateAccessToken(user *model.User, membership *model.Membership) (string, error) {
+	if s.sessionMode == model.SessionRequired {
+		return "", model.ErrSessionRequired
+	}
+	return s.generateAccessToken(user, membership, "", time.Now().Add(s.accessExpiry))
+}
+
+func (s *JWTService) generateAccessToken(user *model.User, membership *model.Membership, sessionID string, expiresAt time.Time) (string, error) {
 	s.logger.Info(context.Background(), "Generating access token",
 		"user_id", user.ID,
 		"email", maskEmail(user.Email),
@@ -121,9 +154,9 @@ func (s *JWTService) GenerateAccessToken(user *model.User, membership *model.Mem
 	)
 
 	now := time.Now()
-	expiresAt := now.Add(s.accessExpiry)
 
 	claims := model.JWTClaims{
+		SessionID:              sessionID,
 		UserID:                 user.ID,
 		Email:                  user.Email,
 		TenantID:               membership.TenantID,
@@ -195,7 +228,7 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 		parserOpts = append(parserOpts, jwt.WithAudience(s.audience))
 	}
 
-	token, err := jwt.ParseWithClaims(tokenString, &model.JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &parsedAccessClaims{}, func(token *jwt.Token) (interface{}, error) {
 		// Verify signing method is HMAC
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
@@ -212,10 +245,20 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 		return nil, fmt.Errorf("invalid token: %w", model.ErrInvalidToken)
 	}
 
-	claims, ok := token.Claims.(*model.JWTClaims)
+	claims, ok := token.Claims.(*parsedAccessClaims)
 	if !ok || !token.Valid {
 		s.logger.Warn(context.Background(), "Invalid JWT claims or token")
 		return nil, fmt.Errorf("invalid token claims: %w", model.ErrInvalidToken)
+	}
+	if claims.SessionID != "" {
+		if _, err := uuid.Parse(claims.SessionID); err != nil {
+			return nil, model.ErrInvalidToken
+		}
+		if s.sessionMode == model.SessionDisabled {
+			return nil, model.ErrSessionDisabled
+		}
+	} else if s.sessionMode == model.SessionRequired {
+		return nil, model.ErrSessionRequired
 	}
 
 	s.logger.Info(context.Background(), "JWT token validated successfully",
@@ -223,7 +266,7 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 		"tenant_id", claims.TenantID,
 	)
 
-	return claims, nil
+	return &claims.JWTClaims, nil
 }
 
 // GenerateRefreshToken generates a cryptographically secure refresh token

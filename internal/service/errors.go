@@ -22,6 +22,9 @@ const pgStringDataRightTruncation = "22001"
 // publicSentinels are the errors callers are expected to branch on with
 // errors.Is. sanitizeError lets these pass through unchanged.
 var publicSentinels = []error{
+	model.ErrSessionDisabled,
+	model.ErrSessionRequired,
+	model.ErrSessionRevoked,
 	model.ErrNotFound,
 	model.ErrInvalidCredentials,
 	model.ErrAccountDisabled,

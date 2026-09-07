@@ -5,6 +5,12 @@ package authkit
 
 import "github.com/modgudinc/authkit-go/model"
 
+var (
+	ErrSessionDisabled = model.ErrSessionDisabled
+	ErrSessionRequired = model.ErrSessionRequired
+	ErrSessionRevoked  = model.ErrSessionRevoked
+)
+
 // Sentinel errors re-exported from the model package for convenience, so callers
 // can write errors.Is(err, authkit.ErrInvalidCredentials). These are the same
 // values the services return (model.Err*), so matching against either works.

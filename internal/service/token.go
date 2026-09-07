@@ -79,6 +79,7 @@ func runBoundedLastUsedUpdate(parent context.Context, log logger.Logger, what st
 // TokenService handles both JWT and refresh token management
 // Combines JWT generation/validation with refresh token storage and rotation
 type TokenService struct {
+	sessionConfig          model.SessionConfig
 	jwtService             *JWTService
 	repo                   *repository.Repository
 	refreshExpiry          time.Duration
@@ -103,8 +104,9 @@ func NewTokenService(
 	refreshTokenHMACSecret string,
 	logger logger.Logger,
 	metrics metrics.Metrics,
+	opts ...TokenOption,
 ) *TokenService {
-	return &TokenService{
+	s := &TokenService{
 		jwtService:             jwtService,
 		repo:                   repo,
 		refreshExpiry:          refreshExpiry,
@@ -112,6 +114,16 @@ func NewTokenService(
 		logger:                 ensureLogger(logger),
 		metrics:                metrics,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+type TokenOption func(*TokenService)
+
+func WithTokenSessions(config model.SessionConfig) TokenOption {
+	return func(s *TokenService) { s.sessionConfig = config }
 }
 
 // GenerateTokenPair generates a workspace-scoped access token (JWT) plus a new
@@ -143,6 +155,9 @@ func (s *TokenService) GenerateTokenPair(
 	membership *model.Membership,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
+	if err := s.checkInstallation(nil); err != nil {
+		return nil, err
+	}
 	s.logger.Info(ctx, "Generating token pair",
 		"user_id", user.ID,
 		"email", maskEmail(user.Email),
@@ -180,6 +195,9 @@ func (s *TokenService) GenerateTokenPair(
 // this is the cheap call used to issue or switch the active workspace from an
 // existing session.
 func (s *TokenService) MintAccessToken(ctx context.Context, user *model.User, membership *model.Membership) (string, int64, error) {
+	if err := s.checkInstallation(nil); err != nil {
+		return "", 0, err
+	}
 	accessToken, err := s.jwtService.GenerateAccessToken(user, membership)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to generate access token", "error", err.Error())
@@ -194,6 +212,9 @@ func (s *TokenService) MintAccessToken(ctx context.Context, user *model.User, me
 // user-scoped, not tied to any tenant — workspace access tokens are minted from it
 // per membership.
 func (s *TokenService) CreateIdentitySession(ctx context.Context, userID string, sessionInfo *model.SessionInfo) (string, error) {
+	if err := s.checkInstallation(nil); err != nil {
+		return "", err
+	}
 	refreshToken, err := s.jwtService.GenerateRefreshToken()
 	if err != nil {
 		s.logger.Error(ctx, "Failed to generate refresh token", "error", err.Error())
@@ -267,6 +288,10 @@ func sessionPointers(sessionInfo *model.SessionInfo) (ipAddress, userAgent, devi
 //	    return fmt.Errorf("invalid refresh token: %w", err)
 //	}
 func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString string) (*model.User, error) {
+	session, err := s.sessionForRefresh(ctx, tokenString)
+	if err != nil {
+		return nil, err
+	}
 	s.logger.Info(ctx, "Validating refresh token")
 
 	// 1. Hash provided token
@@ -298,6 +323,9 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 			"is_locked", user.IsLocked,
 		)
 		return nil, fmt.Errorf("account is not active: %w", model.ErrInvalidRefreshToken)
+	}
+	if session != nil && session.TokenVersion != user.TokenVersion {
+		return nil, model.ErrSessionRevoked
 	}
 
 	// 5. Update last_used_at as a bounded, best-effort background write (see
@@ -349,6 +377,13 @@ func (s *TokenService) RefreshTokenPair(
 	tenantID string,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
+	bound, err := s.boundRefresh(refreshToken)
+	if err != nil {
+		return nil, err
+	}
+	if bound {
+		return s.refreshBoundPair(ctx, refreshToken, tenantID, sessionInfo)
+	}
 	s.logger.Info(ctx, "Refreshing token pair", "tenant_id", tenantID)
 
 	// 0. Verify the identity has an ACTIVE membership in tenantID BEFORE rotating the
@@ -400,7 +435,11 @@ func (s *TokenService) RefreshTokenPair(
 	ipAddress, userAgent, deviceName := sessionPointers(sessionInfo)
 
 	// 2. Atomically consume the old refresh token and store the replacement.
-	user, tokenID, err := s.repo.RotateRefreshToken(ctx, oldTokenHash, repository.CreateRefreshTokenRequest{
+	rotate := s.repo.RotateRefreshToken
+	if s.sessionConfig.Mode != model.SessionDisabled {
+		rotate = s.repo.RotateRefreshTokenWithUserLock
+	}
+	user, tokenID, err := rotate(ctx, oldTokenHash, repository.CreateRefreshTokenRequest{
 		TokenHash:  newTokenHash,
 		IPAddress:  ipAddress,
 		UserAgent:  userAgent,
@@ -529,6 +568,20 @@ func (s *TokenService) RefreshTokenPair(
 //	    return fmt.Errorf("failed to revoke token: %w", err)
 //	}
 func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString string) error {
+	bound, err := s.boundRefresh(tokenString)
+	if err != nil {
+		return err
+	}
+	if bound {
+		session, err := s.repo.SessionForRefresh(ctx, s.sessionConfig.Namespace, s.hashToken(tokenString))
+		if errors.Is(err, model.ErrInvalidRefreshToken) {
+			return nil
+		}
+		if err != nil {
+			return sanitizeError(ctx, s.logger, "find logout session", err)
+		}
+		return sanitizeError(ctx, s.logger, "revoke logout session", s.repo.RevokeSessions(ctx, s.sessionConfig.Namespace, session.UserID, session.ID, "", "logout"))
+	}
 	s.logger.Info(ctx, "Revoking refresh token")
 
 	tokenHash := s.hashToken(tokenString)
@@ -572,6 +625,9 @@ func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString strin
 //	    return fmt.Errorf("failed to revoke all tokens: %w", err)
 //	}
 func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID string) error {
+	if s.sessionConfig.Mode != model.SessionDisabled {
+		return sanitizeError(ctx, s.logger, "revoke all sessions", s.repo.RevokeUserSessionsAndTokens(ctx, userID))
+	}
 	s.logger.Info(ctx, "Revoking all refresh tokens for user", "user_id", userID)
 
 	if err := s.repo.DeleteByUserID(ctx, userID); err != nil {

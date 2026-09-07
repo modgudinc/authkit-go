@@ -5,6 +5,12 @@ package model
 
 import "errors"
 
+var (
+	ErrSessionDisabled = errors.New("installation sessions are disabled")
+	ErrSessionRequired = errors.New("installation-bound session required")
+	ErrSessionRevoked  = errors.New("installation session revoked or expired")
+)
+
 // Sentinel errors returned by the library so callers can branch on outcome with
 // errors.Is instead of matching on error strings. They are defined in the model
 // (leaf) package so every layer can return them without an import cycle; the root

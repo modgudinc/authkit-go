@@ -9,12 +9,14 @@ import (
 
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/metrics"
+	"github.com/modgudinc/authkit-go/model"
 )
 
 // Config is the configuration passed to New to construct an AuthKit. The
 // DBConnection and the JWT/API-key secrets are required; the remaining fields
 // have sensible defaults. See each sub-struct for details.
 type Config struct {
+	SessionConfig  SessionConfig // Optional; disabled by default, requires migration 000002 when enabled.
 	DBConnection   DatabaseConnection
 	JWTConfig      JWTConfig
 	APIKeyConfig   APIKeyConfig
@@ -51,6 +53,17 @@ type Config struct {
 	// to no limiting. See the RateLimiter interface for the key convention.
 	RateLimiter RateLimiter
 }
+
+type (
+	SessionMode   = model.SessionMode
+	SessionConfig = model.SessionConfig
+)
+
+const (
+	SessionDisabled = model.SessionDisabled
+	SessionOptional = model.SessionOptional
+	SessionRequired = model.SessionRequired
+)
 
 // DatabaseConnection holds the PostgreSQL handles and schema for the identity
 // store. The read-write and read-only handles may be the same *sql.DB.

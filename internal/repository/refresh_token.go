@@ -107,6 +107,16 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, req CreateRefreshTo
 // RotateRefreshToken - Atomically consumes one refresh token and stores a new one
 // ============================================================================
 func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, string, error) {
+	return r.rotateRefreshToken(ctx, oldTokenHash, req, false)
+}
+
+// RotateRefreshTokenWithUserLock coordinates legacy rotation with opt-in
+// account/session mutations. The default legacy query path stays unchanged.
+func (r *Repository) RotateRefreshTokenWithUserLock(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, string, error) {
+	return r.rotateRefreshToken(ctx, oldTokenHash, req, true)
+}
+
+func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest, lockUser bool) (*model.User, string, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to begin refresh token rotation: %w", err)
@@ -118,6 +128,20 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string
 			_ = tx.Rollback()
 		}
 	}()
+
+	if lockUser {
+		var owner string
+		err := tx.QueryRowContext(ctx, r.q("SELECT user_id FROM {{schema}}.refresh_tokens WHERE token_hash=$1"), oldTokenHash).Scan(&owner)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, "", model.ErrInvalidRefreshToken
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := r.lockSessionUser(ctx, tx, owner); err != nil {
+			return nil, "", err
+		}
+	}
 
 	// Look up the presented token (locked) regardless of its revoked/expired
 	// state so we can distinguish "never existed" from "already consumed" (reuse).
