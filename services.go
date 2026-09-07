@@ -16,6 +16,25 @@ import (
 // alias for ratelimit.RateLimiter so callers can refer to authkit.RateLimiter.
 type RateLimiter = ratelimit.RateLimiter
 
+// InstallationAuthService is additive: existing AuthService implementations and
+// mocks need not implement these methods. Enrollment is verified by the caller.
+type InstallationAuthService interface {
+	LoginWithInstallation(context.Context, model.InstallationLoginRequest) (*model.InstallationLoginResponse, error)
+	LoginByEmailWithInstallation(context.Context, model.InstallationLoginByEmailRequest) (*model.InstallationLoginResponse, error)
+	ValidateInstallationJWT(context.Context, string) (*model.InstallationClaims, error)
+}
+
+// SessionService is scoped to Config.SessionConfig.Namespace. The embedding
+// application must authorize the actor before passing a target userID.
+// List/Get return records, including expired/revoked ones, not authentication.
+type SessionService interface {
+	Get(ctx context.Context, userID, sessionID string) (*model.Session, error)
+	List(ctx context.Context, userID string, limit, offset int) ([]model.Session, error)
+	Revoke(ctx context.Context, userID, sessionID string) error
+	RevokeInstallation(ctx context.Context, userID, installationID string) error
+	CleanupExpired(ctx context.Context) (int64, error)
+}
+
 // The interfaces below are the public contracts for the services returned by
 // AuthKit's accessors. They exist so consumers can name the returned values —
 // store one on a struct field, pass it to a function, or mock it in a test —
@@ -235,15 +254,17 @@ type UserService interface {
 // interface. If a method signature drifts, the build fails here rather than at a
 // consumer's call site.
 var (
-	_ APIKeyService     = (*service.APIKeyService)(nil)
-	_ AuthService       = (*service.AuthService)(nil)
-	_ InvitationService = (*service.InvitationService)(nil)
-	_ JWTService        = (*service.JWTService)(nil)
-	_ MembershipService = (*service.MembershipService)(nil)
-	_ OTPService        = (*service.OTPService)(nil)
-	_ PasswordService   = (*service.PasswordService)(nil)
-	_ SecretService     = (*service.SecretService)(nil)
-	_ TenantService     = (*service.TenantService)(nil)
-	_ TokenService      = (*service.TokenService)(nil)
-	_ UserService       = (*service.UserService)(nil)
+	_ InstallationAuthService = (*service.AuthService)(nil)
+	_ SessionService          = (*service.SessionService)(nil)
+	_ APIKeyService           = (*service.APIKeyService)(nil)
+	_ AuthService             = (*service.AuthService)(nil)
+	_ InvitationService       = (*service.InvitationService)(nil)
+	_ JWTService              = (*service.JWTService)(nil)
+	_ MembershipService       = (*service.MembershipService)(nil)
+	_ OTPService              = (*service.OTPService)(nil)
+	_ PasswordService         = (*service.PasswordService)(nil)
+	_ SecretService           = (*service.SecretService)(nil)
+	_ TenantService           = (*service.TenantService)(nil)
+	_ TokenService            = (*service.TokenService)(nil)
+	_ UserService             = (*service.UserService)(nil)
 )

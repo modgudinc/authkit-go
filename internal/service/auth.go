@@ -192,6 +192,13 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 // Returns model.ErrInvalidCredentials on auth failure and model.ErrNoActiveMembership
 // when the credentials are valid but the user has no active membership in req.TenantID.
 func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error) {
+	return s.login(ctx, req, nil)
+}
+
+func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding *model.InstallationBinding) (*model.LoginResponse, error) {
+	if err := s.tokenService.checkInstallation(binding); err != nil {
+		return nil, err
+	}
 	email := normalizeEmail(req.Email)
 
 	// Front-door rate limiting (caller-owned via Config.RateLimiter): keyed by tenant +
@@ -223,7 +230,7 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	}
 
 	// Mint the workspace-scoped access token + open the identity session.
-	tokenPair, err := s.tokenService.GenerateTokenPair(ctx, user, membership, req.SessionInfo)
+	tokenPair, err := s.tokenService.generateInstallationPair(ctx, user, membership, req.SessionInfo, binding)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to generate token pair", "error", err.Error())
 		return nil, sanitizeError(ctx, s.logger, "generate tokens", err)
@@ -251,6 +258,13 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 // Returns model.ErrInvalidCredentials on auth failure, and model.ErrNoActiveMembership
 // when req.TenantID is given but is not one of the identity's active memberships.
 func (s *AuthService) LoginByEmail(ctx context.Context, req model.LoginByEmailRequest) (*model.LoginResponse, error) {
+	return s.loginByEmail(ctx, req, nil)
+}
+
+func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRequest, binding *model.InstallationBinding) (*model.LoginResponse, error) {
+	if err := s.tokenService.checkInstallation(binding); err != nil {
+		return nil, err
+	}
 	email := normalizeEmail(req.Email)
 
 	rlKey := "login:"
@@ -303,7 +317,13 @@ func (s *AuthService) LoginByEmail(ctx context.Context, req model.LoginByEmailRe
 	}
 
 	// Open the identity session (refresh token) regardless of workspace selection.
-	refreshToken, err := s.tokenService.CreateIdentitySession(ctx, user.ID, req.SessionInfo)
+	var refreshToken string
+	var session *model.Session
+	if binding == nil {
+		refreshToken, err = s.tokenService.CreateIdentitySession(ctx, user.ID, req.SessionInfo)
+	} else {
+		refreshToken, session, err = s.tokenService.createBoundSession(ctx, user, req.SessionInfo, binding)
+	}
 	if err != nil {
 		return nil, sanitizeError(ctx, s.logger, "open identity session", err)
 	}
@@ -314,7 +334,7 @@ func (s *AuthService) LoginByEmail(ctx context.Context, req model.LoginByEmailRe
 		Memberships:  membershipValues(memberships),
 	}
 	if selected != nil {
-		accessToken, expiresIn, err := s.tokenService.MintAccessToken(ctx, user, selected)
+		accessToken, expiresIn, err := s.tokenService.mintSessionAccess(user, selected, session)
 		if err != nil {
 			return nil, sanitizeError(ctx, s.logger, "mint access token", err)
 		}
@@ -346,7 +366,11 @@ func (s *AuthService) MintWorkspaceToken(ctx context.Context, refreshToken, tena
 		return nil, err
 	}
 
-	accessToken, expiresIn, err := s.tokenService.MintAccessToken(ctx, user, membership)
+	session, err := s.tokenService.sessionForRefresh(ctx, refreshToken)
+	if err != nil {
+		return nil, err
+	}
+	accessToken, expiresIn, err := s.tokenService.mintSessionAccess(user, membership, session)
 	if err != nil {
 		return nil, err
 	}
@@ -514,7 +538,7 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 	claims, err := s.jwtService.ValidateAccessToken(token)
 	if err != nil {
 		s.logger.Warn(ctx, "JWT validation failed", "error", err.Error())
-		return nil, fmt.Errorf("invalid token: %w", model.ErrInvalidToken)
+		return nil, err
 	}
 
 	// --- Identity checks ---
@@ -565,6 +589,11 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 		return nil, model.ErrTokenRevoked
 	}
 
+	if s.tokenService != nil {
+		if _, err := s.tokenService.sessionForClaims(ctx, claims); err != nil {
+			return nil, err
+		}
+	}
 	s.logger.Debug(ctx, "JWT validated successfully", "user_id", claims.UserID, "tenant_id", claims.TenantID)
 	return claims, nil
 }

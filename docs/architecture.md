@@ -23,6 +23,11 @@ Core tables:
 - `users`: Global user identities — **no** `tenant_id`, **no** `roles`. Email is globally unique, case-insensitively (`UNIQUE (lower(email))`). `token_version` is the identity-level token version (credential events invalidate every workspace's access tokens).
 - `memberships`: The `user ↔ tenant` graph — which identity belongs to which tenant, with `roles` (opaque JSONB strings the embedding app interprets), a per-membership `token_version` (a role change or revoke invalidates only that workspace's access tokens), and a `status` (`active` / `suspended`). Primary key `(user_id, tenant_id)`; both foreign keys cascade on delete.
 - `refresh_tokens`: Stored refresh token hashes and session metadata. The refresh token is the **identity session** (user-scoped, no tenant); one login = one family.
+- `sessions` (optional migration 000002): Installation-bound login records scoped
+  by application namespace and user. Their IDs are refresh-family IDs and signed
+  `sid` claims. Records carry independent revocation and idle/absolute expiry;
+  consuming a refresh token does not revoke its session. See
+  [installation sessions](installation-sessions.md).
 - `api_keys`: Tenant-scoped API key hashes and metadata (`created_by` is a global user id).
 - `invitations`: Invitation codes, target email, roles, expiry, and usage limits.
 - `verification_codes`: OTPs stored as a keyed HMAC-SHA256 (`code_hash`), never in plaintext, plus purpose, failed-attempt count, expiry, and creation time; keyed by `(email, purpose)` globally (email is a global identity, so an OTP is identity-level, not tenant-scoped).

@@ -14,10 +14,12 @@ import "github.com/golang-jwt/jwt/v5"
 // be released as a breaking change. Standard fields are accessed via the embed,
 // e.g. claims.Subject, claims.ExpiresAt, claims.ID (jti).
 type JWTClaims struct {
-	UserID   string   `json:"user_id"`   // Global user identifier (UUID v7)
-	Email    string   `json:"email"`     // User email address
-	TenantID string   `json:"tenant_id"` // Active workspace (tenant) this token is scoped to
-	Roles    []string `json:"roles"`     // Roles in the active tenant (opaque; app-interpreted)
+	// SessionID binds an opt-in access token to one installation login.
+	SessionID string   `json:"sid,omitempty"`
+	UserID    string   `json:"user_id"`   // Global user identifier (UUID v7)
+	Email     string   `json:"email"`     // User email address
+	TenantID  string   `json:"tenant_id"` // Active workspace (tenant) this token is scoped to
+	Roles     []string `json:"roles"`     // Roles in the active tenant (opaque; app-interpreted)
 	// TokenVersion is the IDENTITY token version (users.token_version): a credential
 	// event (password change, account disable, logout-all) bumps it and invalidates
 	// every workspace's access tokens for this identity.
