@@ -3,17 +3,13 @@
 
 package model
 
-import (
-	"time"
-
-	"github.com/google/uuid"
-)
+import "time"
 
 // Invitation represents an access code for inviting users to a tenant
 type Invitation struct {
 	Code        string    `json:"code" db:"code"`
 	TenantID    string    `json:"tenant_id" db:"tenant_id"`
-	CreatedBy   uuid.UUID `json:"created_by" db:"created_by"` // User UUID (FK to users.id)
+	CreatedBy   string    `json:"created_by" db:"created_by"` // User UUID (FK to users.id)
 	Roles       []string  `json:"roles" db:"roles"`           // Array of roles to assign (stored as JSONB)
 	Email       string    `json:"email" db:"email"`           // Target email address for invitation
 	ExpiresAt   time.Time `json:"expires_at" db:"expires_at"`
@@ -39,7 +35,7 @@ type AcceptInvitationRequest struct {
 // and roles.
 type CreateInvitationRequest struct {
 	TenantID  string         // Tenant the invitation belongs to
-	CreatedBy uuid.UUID      // User UUID of the admin creating the invitation (FK to users.id)
+	CreatedBy string         // User UUID of the admin creating the invitation (FK to users.id)
 	Email     string         // Target email address for this invitation (required)
 	Roles     []string       // Roles to assign on signup (validated by the application layer)
 	MaxUses   *int           // Optional max uses; defaults to 1 when nil or <= 0

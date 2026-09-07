@@ -54,10 +54,11 @@ func (s *APIKeyService) Create(ctx context.Context, req model.CreateAPIKeyReques
 	)
 
 	// Generate key ID (UUID v7 - time-ordered)
-	keyID, err := uuid.NewV7()
+	gen, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key ID: %w", err)
 	}
+	keyID := gen.String()
 
 	// Generate cryptographically secure API key
 	// Format: "sk_live_" prefix + 32 random characters
@@ -83,7 +84,7 @@ func (s *APIKeyService) Create(ctx context.Context, req model.CreateAPIKeyReques
 
 	// Create API key in database
 	err = s.repo.CreateAPIKey(ctx, repository.InsertAPIKeyParams{
-		KeyID:     keyID.String(),
+		KeyID:     keyID,
 		KeyHash:   keyHash,
 		TenantID:  req.TenantID,
 		Name:      req.Name,
@@ -101,7 +102,7 @@ func (s *APIKeyService) Create(ctx context.Context, req model.CreateAPIKeyReques
 
 	// Format response
 	response := &model.CreateAPIKeyResponse{
-		KeyID:     keyID.String(),
+		KeyID:     keyID,
 		APIKey:    apiKey, // Plaintext key - ONLY returned once
 		Name:      req.Name,
 		TenantID:  req.TenantID,
@@ -110,7 +111,7 @@ func (s *APIKeyService) Create(ctx context.Context, req model.CreateAPIKeyReques
 	}
 
 	s.logger.Info(ctx, "API key created successfully",
-		"key_id", keyID.String(),
+		"key_id", keyID,
 		"tenant_id", req.TenantID,
 		"name", req.Name,
 	)

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -31,7 +30,7 @@ import (
 func (r *Repository) SaveSecret(
 	ctx context.Context,
 	tenantID, key, encryptedValue, maskedValue string,
-	createdBy uuid.UUID,
+	createdBy string,
 ) (*model.Secret, error) {
 	query := `
 		INSERT INTO {{schema}}.provider_keys

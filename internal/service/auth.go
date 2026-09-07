@@ -5,10 +5,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/logger"
 	"github.com/modgudinc/authkit-go/metrics"
@@ -16,25 +16,30 @@ import (
 	"github.com/modgudinc/authkit-go/ratelimit"
 )
 
-// authRepository is the subset of the repository used by AuthService. Depending
-// on an interface (rather than the concrete *repository.Repository) lets the
-// security-critical auth logic be unit-tested with an in-memory fake.
+// authRepository is the subset of the repository used by AuthService. Depending on
+// an interface (rather than the concrete *repository.Repository) lets the
+// security-critical auth logic be unit-tested with an in-memory fake. All identity
+// reads/writes are keyed by the global user id or globally-unique email; the
+// membership methods back the workspace-scoping checks of the decoupled model.
 type authRepository interface {
-	GetByEmail(ctx context.Context, email, tenantID string) (*model.User, error)
-	GetByEmailFromPrimary(ctx context.Context, email, tenantID string) (*model.User, error)
-	GetByID(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error)
-	GetByIDFromPrimary(ctx context.Context, userID uuid.UUID, tenantID string) (*model.User, error)
-	UnlockByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error
-	RegisterFailedLogin(ctx context.Context, userID uuid.UUID, maxAttempts int, lockDuration time.Duration) (int, bool, error)
-	UpdateLastLoginByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error
-	VerifyPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID string) (string, error)
-	SetPasswordByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error
-	SetPasswordAndBumpTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID, hashedPassword string) error
-	IncrementTokenVersionByTenant(ctx context.Context, userID uuid.UUID, tenantID string) error
+	GetByEmailFromPrimary(ctx context.Context, email string) (*model.User, error)
+	GetByIDFromPrimary(ctx context.Context, userID string) (*model.User, error)
+	Unlock(ctx context.Context, userID string) error
+	RegisterFailedLogin(ctx context.Context, userID string, maxAttempts int, lockDuration time.Duration) (int, bool, error)
+	UpdateLastLogin(ctx context.Context, userID string) error
+	SetPasswordAndBumpTokenVersion(ctx context.Context, userID, hashedPassword string) error
+	IncrementTokenVersion(ctx context.Context, userID string) error
+	GetMembershipFromPrimary(ctx context.Context, userID, tenantID string) (*model.Membership, error)
+	ListMembershipsByUser(ctx context.Context, userID string) ([]*model.Membership, error)
 }
 
-// AuthService handles user authentication operations
-// Integrates PasswordService, JWTService, and TokenService for complete auth flows
+// AuthService handles user authentication operations.
+//
+// Identity vs. workspace: authentication is against the GLOBAL identity (email +
+// password); authorization to a workspace is the membership. A login authenticates
+// the identity (one refresh-token session) and mints WORKSPACE-SCOPED access tokens
+// for the user's active memberships. Switching workspace mints a new access token
+// from the same session (no re-login).
 type AuthService struct {
 	repo            authRepository
 	passwordService *PasswordService
@@ -82,51 +87,115 @@ func NewAuthService(
 	}
 }
 
-// Login authenticates a user with email and password
+// authenticateIdentity verifies email+password against the GLOBAL identity and
+// returns the authenticated user. It applies the account-status gates (disabled /
+// locked, with auto-unlock when locked_until has elapsed) and the per-account
+// failed-login lockout exactly as before. Every failure is collapsed into
+// ErrInvalidCredentials (the specific reason is logged) and timing is equalized with
+// a dummy bcrypt compare on the not-found / disabled / locked paths, so an
+// unauthenticated caller cannot distinguish them (no account / state enumeration). On
+// success it resets the failed-login count (if any) and updates last_login
+// (best-effort). It does NOT check workspace membership — that is the caller's gate.
+func (s *AuthService) authenticateIdentity(ctx context.Context, email, password string) (*model.User, error) {
+	// Read from the PRIMARY: the is_enabled/is_locked gate must observe an admin
+	// disable/lock (or an auto-lock just written by RegisterFailedLogin) immediately,
+	// not after replica catch-up.
+	user, err := s.repo.GetByEmailFromPrimary(ctx, email)
+	if err != nil {
+		// Burn a bcrypt comparison so the unknown-email path takes about as long as the
+		// wrong-password path (prevents enumeration by timing), and return a generic
+		// error that does not reveal whether the account exists.
+		s.passwordService.DummyVerify(password)
+		s.logger.Warn(ctx, "Login failed: user not found", "email", maskEmail(email))
+		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "not_found")
+		return nil, model.ErrInvalidCredentials
+	}
+
+	// Account enabled gate. Generic error + dummy compare so disabled is
+	// indistinguishable from not-found/wrong-password.
+	if !user.IsEnabled {
+		s.passwordService.DummyVerify(password)
+		s.logger.Warn(ctx, "Login failed: account disabled", "user_id", user.ID, "email", maskEmail(email))
+		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_disabled")
+		return nil, model.ErrInvalidCredentials
+	}
+
+	// Account locked gate (auto-unlock if locked_until has passed).
+	if user.IsLocked {
+		if user.LockedUntil != nil && time.Now().After(*user.LockedUntil) {
+			if err := s.repo.Unlock(ctx, user.ID); err != nil {
+				s.logger.Error(ctx, "Failed to auto-unlock account", "error", err.Error())
+				incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "auto_unlock")
+				// Continue anyway - will try to authenticate.
+			} else {
+				s.logger.Info(ctx, "Account auto-unlocked", "user_id", user.ID)
+				// Re-read from the PRIMARY: the unlock we just committed must be visible.
+				user, err = s.repo.GetByIDFromPrimary(ctx, user.ID)
+				if err != nil {
+					return nil, sanitizeError(ctx, s.logger, "refresh user data", err)
+				}
+			}
+		} else {
+			s.passwordService.DummyVerify(password)
+			s.logger.Warn(ctx, "Login failed: account locked", "user_id", user.ID, "locked_until", user.LockedUntil)
+			incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_locked")
+			return nil, model.ErrInvalidCredentials
+		}
+	}
+
+	// Verify password.
+	if err := s.passwordService.VerifyPassword(password, user.PasswordHash); err != nil {
+		s.logger.Warn(ctx, "Password verification failed", "user_id", user.ID, "email", maskEmail(email))
+
+		// Record the failed attempt and lock at the threshold atomically in the DB.
+		count, locked, regErr := s.repo.RegisterFailedLogin(ctx, user.ID, MaxFailedLoginAttempts, LockDuration)
+		switch {
+		case regErr != nil:
+			s.logger.Error(ctx, "Failed to record failed login attempt", "error", regErr.Error())
+			incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "register_failed_login")
+		case locked:
+			s.logger.Warn(ctx, "Account locked after max failed attempts", "user_id", user.ID, "failed_attempts", count)
+			incMetric(s.metrics, metrics.CounterAccountLockout)
+		default:
+			s.logger.Info(ctx, "Failed login attempt recorded", "user_id", user.ID, "failed_attempts", count)
+		}
+
+		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "bad_password")
+		return nil, model.ErrInvalidCredentials
+	}
+
+	// Success: reset failed-login count (Unlock also clears the counter) and update
+	// last_login. Both are best-effort — a failure here does not fail the login.
+	if user.FailedLoginCount > 0 {
+		if err := s.repo.Unlock(ctx, user.ID); err != nil {
+			s.logger.Warn(ctx, "Failed to reset failed login count", "error", err.Error())
+			incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "reset_failed_count")
+		}
+	}
+	if err := s.repo.UpdateLastLogin(ctx, user.ID); err != nil {
+		s.logger.Warn(ctx, "Failed to update last login timestamp", "error", err.Error())
+		incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "update_last_login")
+	}
+
+	return user, nil
+}
+
+// Login authenticates a user into a known workspace (req.TenantID) with email and
+// password, and returns a workspace-scoped access token plus an identity-session
+// refresh token. Use LoginByEmail when the workspace is not known up front.
 //
 // Security note: the only built-in online-guessing defense is the per-account
-// failed-login lockout (MaxFailedLoginAttempts, then a timed lock). That bounds
-// guessing against a single account but does NOT stop password spraying across
-// many accounts or distributed guessing — the caller MUST apply IP/global rate
-// limiting in front of Login. See SECURITY.md ("Caller-Owned Controls").
+// failed-login lockout. That bounds guessing against a single account but does NOT
+// stop password spraying across many accounts or distributed guessing — the caller
+// MUST apply IP/global rate limiting in front of Login. See SECURITY.md.
 //
-// Parameters:
-//   - ctx: Context for database operations
-//   - req: Login request with email, password, tenant_id, and session info
-//
-// Returns:
-//   - LoginResponse with tokens and user info
-//   - Error if authentication fails
-//
-// Flow:
-//  1. Get user by email + tenant
-//  2. Check account is enabled (not disabled by admin)
-//  3. Check account is not locked (auto-unlock if locked_until has passed)
-//  4. Verify password with PasswordService
-//  5. On failure: increment failed_login_count, lock if >= 5 attempts
-//  6. On success: reset failed_login_count, update last_login
-//  7. Generate token pair with TokenService
-//  8. Return LoginResponse
-//
-// Example:
-//
-//	response, err := authService.Login(ctx, LoginRequest{
-//	    Email:    "user@acme.com",
-//	    Password: "SecurePassword123!",
-//	    TenantID: "acme.com",
-//	    SessionInfo: &model.SessionInfo{
-//	        IPAddress:  "192.168.1.1",
-//	        UserAgent:  "Mozilla/5.0...",
-//	        DeviceName: "Chrome Browser",
-//	    },
-//	})
+// Returns model.ErrInvalidCredentials on auth failure and model.ErrNoActiveMembership
+// when the credentials are valid but the user has no active membership in req.TenantID.
 func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error) {
-	// Normalize the email so lookups match how users are stored (see normalizeEmail).
 	email := normalizeEmail(req.Email)
 
-	// Front-door rate limiting (caller-owned via Config.RateLimiter): keyed by tenant
-	// + client IP when available, else tenant + email, so a configured limiter can
-	// throttle the spraying/distributed guessing the per-account lockout does not stop.
+	// Front-door rate limiting (caller-owned via Config.RateLimiter): keyed by tenant +
+	// client IP when available, else tenant + email.
 	rlKey := "login:" + req.TenantID + ":"
 	if req.SessionInfo != nil && req.SessionInfo.IPAddress != "" {
 		rlKey += req.SessionInfo.IPAddress
@@ -137,167 +206,209 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		return nil, err
 	}
 
-	// Per-attempt line is high-volume; log at Debug (success/lockout are logged below).
-	s.logger.Debug(ctx, "User login attempt",
-		"email", maskEmail(email),
-		"tenant_id", req.TenantID,
-	)
+	s.logger.Debug(ctx, "User login attempt", "email", maskEmail(email), "tenant_id", req.TenantID)
 
-	// 1. Get user by email + tenant. Read from the PRIMARY: the is_enabled/is_locked
-	// gate below must observe an admin disable/lock (or an auto-lock just written by
-	// RegisterFailedLogin) immediately, not after replica catch-up.
-	user, err := s.repo.GetByEmailFromPrimary(ctx, email, req.TenantID)
+	user, err := s.authenticateIdentity(ctx, email, req.Password)
 	if err != nil {
-		// Burn a bcrypt comparison so the unknown-email path takes about as long
-		// as the wrong-password path (prevents username enumeration by timing),
-		// and return a generic error that does not reveal whether the account exists.
-		s.passwordService.DummyVerify(req.Password)
-		// Do not log err.Error() here: it can echo lookup/query context and,
-		// together with the email, turns this line into an account-enumeration
-		// list. The generic ErrInvalidCredentials is what callers receive.
-		s.logger.Warn(ctx, "Login failed: user not found",
-			"email", maskEmail(email),
-			"tenant_id", req.TenantID,
-		)
-		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "not_found")
-		return nil, model.ErrInvalidCredentials
+		return nil, err
 	}
 
-	// 2. Check account is enabled. Returned as a generic error (the specific
-	// reason is logged) so the client cannot distinguish disabled from
-	// not-found/wrong-password; equalize timing with a dummy bcrypt compare.
-	if !user.IsEnabled {
-		s.passwordService.DummyVerify(req.Password)
-		s.logger.Warn(ctx, "Login failed: account disabled",
-			"user_id", user.ID.String(),
-			"email", maskEmail(email),
-		)
-		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_disabled")
-		return nil, model.ErrInvalidCredentials
-	}
-
-	// 3. Check account is not locked (or auto-unlock if locked_until has passed)
-	if user.IsLocked {
-		if user.LockedUntil != nil && time.Now().After(*user.LockedUntil) {
-			// Auto-unlock: locked_until has passed
-			if err := s.repo.UnlockByTenant(ctx, user.ID, req.TenantID); err != nil {
-				s.logger.Error(ctx, "Failed to auto-unlock account", "error", err.Error())
-				incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "auto_unlock")
-				// Continue anyway - will try to authenticate
-			} else {
-				s.logger.Info(ctx, "Account auto-unlocked", "user_id", user.ID.String())
-				// Refresh user data from the PRIMARY: the unlock we just committed
-				// (UnlockByTenant writes rw) must be visible here, so re-reading from a
-				// lagging replica could still show the account locked.
-				user, err = s.repo.GetByIDFromPrimary(ctx, user.ID, req.TenantID)
-				if err != nil {
-					return nil, sanitizeError(ctx, s.logger, "refresh user data", err)
-				}
-			}
-		} else {
-			// Still locked. Generic error + dummy compare so a locked account is
-			// indistinguishable (by message or timing) from not-found/wrong-password.
-			s.passwordService.DummyVerify(req.Password)
-			s.logger.Warn(ctx, "Login failed: account locked",
-				"user_id", user.ID.String(),
-				"locked_until", user.LockedUntil,
-			)
-			incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_locked")
-			return nil, model.ErrInvalidCredentials
-		}
-	}
-
-	// 4. Verify password
-	err = s.passwordService.VerifyPassword(req.Password, user.PasswordHash)
+	// Workspace gate: the identity must have an ACTIVE membership in req.TenantID.
+	membership, err := s.activeMembership(ctx, user.ID, req.TenantID)
 	if err != nil {
-		// Password verification failed
-		s.logger.Warn(ctx, "Password verification failed",
-			"user_id", user.ID.String(),
-			"email", maskEmail(email),
-		)
-
-		// Record the failed attempt and lock at the threshold atomically in the DB.
-		// The lock decision uses the authoritative post-increment count returned by
-		// the UPDATE, not the (possibly stale) count loaded at the start of this
-		// request, so concurrent failures can't trip the lock one attempt early/late.
-		count, locked, regErr := s.repo.RegisterFailedLogin(ctx, user.ID, MaxFailedLoginAttempts, LockDuration)
-		switch {
-		case regErr != nil:
-			s.logger.Error(ctx, "Failed to record failed login attempt", "error", regErr.Error())
-			incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "register_failed_login")
-			// Continue anyway - authentication still failed.
-		case locked:
-			s.logger.Warn(ctx, "Account locked after max failed attempts",
-				"user_id", user.ID.String(),
-				"failed_attempts", count,
-			)
-			incMetric(s.metrics, metrics.CounterAccountLockout)
-		default:
-			s.logger.Info(ctx, "Failed login attempt recorded",
-				"user_id", user.ID.String(),
-				"failed_attempts", count,
-			)
+		if errors.Is(err, model.ErrNoActiveMembership) {
+			incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "no_membership")
 		}
-
-		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "bad_password")
-		return nil, model.ErrInvalidCredentials
+		return nil, err
 	}
 
-	// 5. Password verification succeeded
-	// Reset failed login count if any
-	if user.FailedLoginCount > 0 {
-		if err := s.repo.UnlockByTenant(ctx, user.ID, req.TenantID); err != nil {
-			s.logger.Warn(ctx, "Failed to reset failed login count", "error", err.Error())
-			incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "reset_failed_count")
-			// Continue anyway - user authenticated successfully
-		}
-	}
-
-	// 6. Update last login timestamp
-	if err := s.repo.UpdateLastLoginByTenant(ctx, user.ID, req.TenantID); err != nil {
-		s.logger.Warn(ctx, "Failed to update last login timestamp", "error", err.Error())
-		incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "update_last_login")
-		// Continue anyway - non-critical operation
-	}
-
-	// 7. Generate token pair
-	tokenPair, err := s.tokenService.GenerateTokenPair(ctx, user, req.SessionInfo)
+	// Mint the workspace-scoped access token + open the identity session.
+	tokenPair, err := s.tokenService.GenerateTokenPair(ctx, user, membership, req.SessionInfo)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to generate token pair", "error", err.Error())
 		return nil, sanitizeError(ctx, s.logger, "generate tokens", err)
 	}
 
-	s.logger.Info(ctx, "User login successful",
-		"user_id", user.ID.String(),
-		"email", maskEmail(email),
-		"tenant_id", req.TenantID,
-	)
+	s.logger.Info(ctx, "User login successful", "user_id", user.ID, "email", maskEmail(email), "tenant_id", req.TenantID)
 	incMetric(s.metrics, metrics.CounterLoginSuccess)
 
-	// 8. Return LoginResponse
 	return &model.LoginResponse{
 		AccessToken:  tokenPair.AccessToken,
 		RefreshToken: tokenPair.RefreshToken,
 		ExpiresIn:    tokenPair.ExpiresIn,
 		User:         user,
+		Memberships:  s.membershipList(ctx, user.ID, membership),
+		TenantID:     req.TenantID,
 	}, nil
 }
 
-// Logout revokes a specific refresh token (single session logout)
+// LoginByEmail authenticates the GLOBAL identity by email+password without a known
+// workspace, opens the identity session (refresh token), and either mints a
+// workspace-scoped access token (when req.TenantID is given, or the identity has
+// exactly one active membership) or returns the membership list for the caller to
+// choose from (then call MintWorkspaceToken). Memberships is always populated.
 //
-// Parameters:
-//   - ctx: Context for database operations
-//   - refreshToken: Refresh token to revoke
-//
-// Note: JWT access tokens remain valid until expiry (stateless design)
-// For immediate revocation, use LogoutAll() which increments token_version
-//
-// Example:
-//
-//	err := authService.Logout(ctx, refreshToken)
-//	if err != nil {
-//	    return fmt.Errorf("logout failed: %w", err)
-//	}
+// Returns model.ErrInvalidCredentials on auth failure, and model.ErrNoActiveMembership
+// when req.TenantID is given but is not one of the identity's active memberships.
+func (s *AuthService) LoginByEmail(ctx context.Context, req model.LoginByEmailRequest) (*model.LoginResponse, error) {
+	email := normalizeEmail(req.Email)
+
+	rlKey := "login:"
+	if req.SessionInfo != nil && req.SessionInfo.IPAddress != "" {
+		rlKey += req.SessionInfo.IPAddress
+	} else {
+		rlKey += "email:" + email
+	}
+	if err := checkRateLimit(ctx, s.rateLimiter, s.metrics, s.logger, rlKey); err != nil {
+		return nil, err
+	}
+
+	s.logger.Debug(ctx, "User login-by-email attempt", "email", maskEmail(email))
+
+	user, err := s.authenticateIdentity(ctx, email, req.Password)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load the identity's workspaces. Determine the active selection BEFORE opening the
+	// session so an explicit-but-unauthorized workspace is rejected without minting a
+	// (then-orphaned) refresh token.
+	memberships, err := s.repo.ListMembershipsByUser(ctx, user.ID)
+	if err != nil {
+		return nil, sanitizeError(ctx, s.logger, "load memberships", err)
+	}
+
+	var selected *model.Membership
+	if req.TenantID != "" {
+		// Authorize the explicitly requested workspace against the PRIMARY (matching
+		// Login / MintWorkspaceToken) so a just-committed revoke/suspend is observed
+		// immediately and a token is never minted for a workspace the user just left.
+		// The replica-sourced list above is informational only. A missing/suspended
+		// membership surfaces as ErrNoActiveMembership.
+		selected, err = s.activeMembership(ctx, user.ID, req.TenantID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// No explicit workspace: auto-select iff the identity has exactly one active one.
+		var active []*model.Membership
+		for _, m := range memberships {
+			if m.IsActive() {
+				active = append(active, m)
+			}
+		}
+		if len(active) == 1 {
+			selected = active[0]
+		}
+	}
+
+	// Open the identity session (refresh token) regardless of workspace selection.
+	refreshToken, err := s.tokenService.CreateIdentitySession(ctx, user.ID, req.SessionInfo)
+	if err != nil {
+		return nil, sanitizeError(ctx, s.logger, "open identity session", err)
+	}
+
+	resp := &model.LoginResponse{
+		RefreshToken: refreshToken,
+		User:         user,
+		Memberships:  membershipValues(memberships),
+	}
+	if selected != nil {
+		accessToken, expiresIn, err := s.tokenService.MintAccessToken(ctx, user, selected)
+		if err != nil {
+			return nil, sanitizeError(ctx, s.logger, "mint access token", err)
+		}
+		resp.AccessToken = accessToken
+		resp.ExpiresIn = expiresIn
+		resp.TenantID = selected.TenantID
+	}
+
+	s.logger.Info(ctx, "User login-by-email successful", "user_id", user.ID, "workspace_selected", selected != nil)
+	incMetric(s.metrics, metrics.CounterLoginSuccess)
+	return resp, nil
+}
+
+// MintWorkspaceToken mints a fresh workspace-scoped access token for an existing
+// identity session (the refresh token), for the user's active membership in tenantID.
+// It is the select-workspace / switch-workspace call: the refresh token is NOT
+// rotated. Returns model.ErrNoActiveMembership when the identity has no active
+// membership in tenantID, and an invalid-refresh-token error when the session is bad
+// or the account is inactive.
+func (s *AuthService) MintWorkspaceToken(ctx context.Context, refreshToken, tenantID string) (*model.WorkspaceTokenResponse, error) {
+	// Validate the identity session (this also gates disabled/locked accounts).
+	user, err := s.tokenService.ValidateRefreshToken(ctx, refreshToken)
+	if err != nil {
+		return nil, err
+	}
+
+	membership, err := s.activeMembership(ctx, user.ID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	accessToken, expiresIn, err := s.tokenService.MintAccessToken(ctx, user, membership)
+	if err != nil {
+		return nil, err
+	}
+
+	s.logger.Info(ctx, "Workspace token minted", "user_id", user.ID, "tenant_id", tenantID)
+	return &model.WorkspaceTokenResponse{
+		AccessToken: accessToken,
+		ExpiresIn:   expiresIn,
+		TenantID:    tenantID,
+	}, nil
+}
+
+// activeMembership loads the (userID, tenantID) membership from the PRIMARY and
+// returns it only when it exists and is active; otherwise it returns
+// model.ErrNoActiveMembership (a missing or suspended membership) or a sanitized
+// internal error. It backs the workspace gate in Login / MintWorkspaceToken.
+func (s *AuthService) activeMembership(ctx context.Context, userID, tenantID string) (*model.Membership, error) {
+	membership, err := s.repo.GetMembershipFromPrimary(ctx, userID, tenantID)
+	if err != nil {
+		if errors.Is(err, model.ErrNotFound) {
+			s.logger.Warn(ctx, "No membership in tenant", "user_id", userID, "tenant_id", tenantID)
+			return nil, model.ErrNoActiveMembership
+		}
+		return nil, sanitizeError(ctx, s.logger, "load membership", err)
+	}
+	if !membership.IsActive() {
+		s.logger.Warn(ctx, "Membership not active", "user_id", userID, "tenant_id", tenantID)
+		return nil, model.ErrNoActiveMembership
+	}
+	return membership, nil
+}
+
+// membershipList returns the user's memberships for a LoginResponse, falling back to
+// just the known active membership if the (informational) list read fails — the login
+// itself has already succeeded, so a list-read fault must not fail it.
+func (s *AuthService) membershipList(ctx context.Context, userID string, fallback *model.Membership) []model.Membership {
+	ms, err := s.repo.ListMembershipsByUser(ctx, userID)
+	if err != nil {
+		s.logger.Warn(ctx, "Failed to list memberships for login response", "user_id", userID, "error", err.Error())
+		if fallback != nil {
+			return []model.Membership{*fallback}
+		}
+		return nil
+	}
+	return membershipValues(ms)
+}
+
+// membershipValues dereferences a []*model.Membership into a []model.Membership for
+// embedding in a response (never nil-element).
+func membershipValues(ms []*model.Membership) []model.Membership {
+	out := make([]model.Membership, 0, len(ms))
+	for _, m := range ms {
+		if m != nil {
+			out = append(out, *m)
+		}
+	}
+	return out
+}
+
+// Logout revokes a specific refresh token (single session logout). JWT access tokens
+// remain valid until expiry (stateless design); for immediate revocation use
+// LogoutAll, which bumps the identity token_version.
 func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 	s.logger.Info(ctx, "User logout")
 
@@ -307,99 +418,47 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 	}
 
 	s.logger.Info(ctx, "User logged out successfully")
-
 	return nil
 }
 
-// LogoutAll revokes all refresh tokens and invalidates all JWTs for a user
-//
-// Parameters:
-//   - ctx: Context for database operations
-//   - userID: User UUID
-//   - tenantID: Tenant the user must belong to (enforced — see below)
+// LogoutAll revokes all refresh tokens and invalidates all access tokens (every
+// workspace) for an identity.
 //
 // Flow:
-//  1. Increment token_version scoped to (userID, tenantID). This both invalidates
-//     all existing JWTs AND validates tenant ownership: a userID that does not
-//     belong to tenantID matches no row and returns ErrNotFound, so the operation
-//     fails closed before any refresh token is touched.
-//  2. Revoke all refresh tokens for the user.
+//  1. Increment the identity token_version. This invalidates every workspace's access
+//     tokens; an unknown user id matches no row (ErrNotFound) and the operation fails
+//     closed before any refresh token is touched.
+//  2. Revoke all of the identity's refresh tokens.
 //
-// Use cases:
-//   - "Logout from all devices" functionality
-//   - Security breach response
-//   - Password reset
-//
-// Tenant isolation: this method is scoped by tenantID, so a caller-supplied userID
-// from another tenant is rejected rather than silently logging out an unrelated
-// account. Pass the tenant the caller is authorized for.
-//
-// Example:
-//
-//	err := authService.LogoutAll(ctx, userID, tenantID)
-//	if err != nil {
-//	    return fmt.Errorf("logout all failed: %w", err)
-//	}
-func (s *AuthService) LogoutAll(ctx context.Context, userID uuid.UUID, tenantID string) error {
-	s.logger.Info(ctx, "Logout from all devices", "user_id", userID, "tenant_id", tenantID)
+// It is identity-level (decoupled model): there is no tenant scoping — a login is one
+// identity session shared across the user's workspaces. The caller is responsible for
+// authorizing that it may act on userID.
+func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
+	s.logger.Info(ctx, "Logout from all devices", "user_id", userID)
 
-	// 1. Increment token version (invalidates all JWTs) scoped to the tenant. This
-	// also gates the whole operation on tenant ownership: a cross-tenant userID
-	// matches no row (ErrNotFound) and we stop here without revoking any tokens.
-	if err := s.repo.IncrementTokenVersionByTenant(ctx, userID, tenantID); err != nil {
+	if err := s.repo.IncrementTokenVersion(ctx, userID); err != nil {
 		s.logger.Error(ctx, "Failed to increment token version", "error", err.Error())
 		return sanitizeError(ctx, s.logger, "increment token version", err)
 	}
 
-	// 2. Revoke all refresh tokens (refresh tokens are keyed by user_id and carry
-	// no tenant column; step 1 has already proven the user belongs to the tenant).
 	if err := s.tokenService.RevokeAllUserTokens(ctx, userID); err != nil {
 		s.logger.Error(ctx, "Failed to revoke all refresh tokens", "error", err.Error())
 		return sanitizeError(ctx, s.logger, "revoke refresh tokens", err)
 	}
 
-	s.logger.Info(ctx, "Logged out from all devices successfully", "user_id", userID, "tenant_id", tenantID)
-
+	s.logger.Info(ctx, "Logged out from all devices successfully", "user_id", userID)
 	return nil
 }
 
-// RefreshToken validates refresh token and returns new token pair (token rotation)
+// RefreshToken rotates the identity-session refresh token and mints a new
+// workspace-scoped access token for req.TenantID (token rotation + workspace scoping).
 //
-// Security note: like Login, RefreshToken has no built-in rate limiting. Refresh
-// tokens are 256-bit random and not feasibly guessable, but the caller should
-// still throttle this endpoint to bound abuse. See SECURITY.md ("Caller-Owned
-// Controls").
-//
-// Parameters:
-//   - ctx: Context for database operations
-//   - req: Refresh request with refresh token and session info
-//
-// Returns:
-//   - RefreshResponse with new access token and new refresh token
-//   - Error if refresh token is invalid or expired
-//
-// Flow:
-//  1. Validate refresh token via TokenService
-//  2. Rotate tokens (old token revoked, new tokens generated)
-//  3. Return new token pair
-//
-// Example:
-//
-//	response, err := authService.RefreshToken(ctx, RefreshRequest{
-//	    RefreshToken: oldRefreshToken,
-//	    SessionInfo:  sessionInfo,
-//	})
-//	if err != nil {
-//	    return fmt.Errorf("token refresh failed: %w", err)
-//	}
-//	// Return new tokens to client
+// Security note: like Login, RefreshToken has no built-in rate limiting; the caller
+// should throttle it. Returns model.ErrNoActiveMembership when the identity no longer
+// has an active membership in req.TenantID.
 func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest) (*model.RefreshResponse, error) {
-	s.logger.Debug(ctx, "Refreshing tokens")
+	s.logger.Debug(ctx, "Refreshing tokens", "tenant_id", req.TenantID)
 
-	// Front-door rate limiting (caller-owned via Config.RateLimiter): refresh has no
-	// tenant/account context before the token is validated, so key by client IP when
-	// available. A configured limiter throttles refresh abuse, which has no per-account
-	// lockout of its own.
 	rlKey := "refresh:"
 	if req.SessionInfo != nil {
 		rlKey += req.SessionInfo.IPAddress
@@ -408,159 +467,130 @@ func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest
 		return nil, err
 	}
 
-	// Rotate tokens via TokenService
-	tokenPair, err := s.tokenService.RefreshTokenPair(ctx, req.RefreshToken, req.SessionInfo)
+	tokenPair, err := s.tokenService.RefreshTokenPair(ctx, req.RefreshToken, req.TenantID, req.SessionInfo)
 	if err != nil {
-		s.logger.Error(ctx, "Failed to refresh token pair", "error", err.Error())
+		// ErrNoActiveMembership is a routine authorization outcome (the user left or was
+		// removed from the workspace), not a fault — log it at Warn so it does not
+		// pollute error dashboards or trip error-rate alerts. RefreshTokenPair has
+		// already logged the specific reason.
+		if errors.Is(err, model.ErrNoActiveMembership) {
+			s.logger.Warn(ctx, "Refresh denied: no active membership in tenant", "tenant_id", req.TenantID)
+		} else {
+			s.logger.Error(ctx, "Failed to refresh token pair", "error", err.Error())
+		}
 		return nil, sanitizeError(ctx, s.logger, "refresh tokens", err)
 	}
 
-	// Get user ID from new access token
+	// Extract the user/tenant from the freshly minted access token for the response.
 	claims, err := s.jwtService.ValidateAccessToken(tokenPair.AccessToken)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to validate new access token", "error", err.Error())
 		return nil, sanitizeError(ctx, s.logger, "validate new token", err)
 	}
 
-	s.logger.Info(ctx, "Tokens refreshed successfully", "user_id", claims.UserID)
+	s.logger.Info(ctx, "Tokens refreshed successfully", "user_id", claims.UserID, "tenant_id", claims.TenantID)
 
 	return &model.RefreshResponse{
 		AccessToken:  tokenPair.AccessToken,
 		RefreshToken: tokenPair.RefreshToken,
 		ExpiresIn:    tokenPair.ExpiresIn,
 		UserID:       claims.UserID,
+		TenantID:     claims.TenantID,
 	}, nil
 }
 
-// ValidateJWT validates a JWT access token and checks user account status
+// ValidateJWT validates a workspace-scoped access token and checks both the identity
+// and the membership it is scoped to.
 //
-// Parameters:
-//   - ctx: Context for database operations
-//   - token: JWT access token string
-//
-// Returns:
-//   - JWTClaims if token is valid and user account is active
-//   - Error if token is invalid, expired, or user account is disabled/locked
-//
-// Flow:
-//  1. Validate JWT signature and expiration via JWTService
-//  2. Get user from database
-//  3. Check token_version matches (detect invalidated tokens)
-//  4. Check account is enabled and not locked
-//  5. Return claims
-//
-// Example:
-//
-//	claims, err := authService.ValidateJWT(ctx, tokenString)
-//	if err != nil {
-//	    return fmt.Errorf("unauthorized: %w", err)
-//	}
-//	// Use claims.UserID, claims.TenantID, claims.Roles
+// Flow (all DB reads from the PRIMARY — this is the revocation/account-status gate, so
+// it must observe the latest writes rather than lagging a replica, which would fail
+// open):
+//  1. Validate JWT signature and expiration.
+//  2. Load the identity; reject on identity token_version mismatch (ErrTokenRevoked),
+//     disabled (ErrAccountDisabled), or locked (ErrAccountLocked, with auto-unlock).
+//  3. Load the active membership for the token's tenant; reject when it is
+//     missing/suspended or its token_version no longer matches (ErrTokenRevoked).
 func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWTClaims, error) {
-	// 1. Validate JWT signature and expiration
 	claims, err := s.jwtService.ValidateAccessToken(token)
 	if err != nil {
 		s.logger.Warn(ctx, "JWT validation failed", "error", err.Error())
 		return nil, fmt.Errorf("invalid token: %w", model.ErrInvalidToken)
 	}
 
-	// 2. Get user from database (claims.UserID is a uuid.UUID; a malformed token
-	// id would already have failed JWT claim parsing above). Read from the PRIMARY:
-	// this is the revocation/account-status gate, so token_version, is_enabled and
-	// is_locked must reflect LogoutAll / ChangePassword / disable / lock writes
-	// immediately rather than lagging a read replica (which would fail open).
-	user, err := s.repo.GetByIDFromPrimary(ctx, claims.UserID, claims.TenantID)
+	// --- Identity checks ---
+	user, err := s.repo.GetByIDFromPrimary(ctx, claims.UserID)
 	if err != nil {
 		s.logger.Warn(ctx, "User not found for JWT", "user_id", claims.UserID, "error", err.Error())
 		return nil, fmt.Errorf("user not found: %w", model.ErrInvalidToken)
 	}
-
-	// 3. Check token_version matches (detect revoked tokens)
 	if user.TokenVersion != claims.TokenVersion {
-		s.logger.Warn(ctx, "Token version mismatch",
-			"user_id", claims.UserID,
-			"token_version", claims.TokenVersion,
-			"current_version", user.TokenVersion,
-		)
+		s.logger.Warn(ctx, "Token version mismatch (identity)",
+			"user_id", claims.UserID, "token_version", claims.TokenVersion, "current_version", user.TokenVersion)
 		return nil, model.ErrTokenRevoked
 	}
-
-	// 4. Check account is enabled
 	if !user.IsEnabled {
 		s.logger.Warn(ctx, "Account disabled", "user_id", claims.UserID)
 		return nil, model.ErrAccountDisabled
 	}
-
-	// 5. Check account is not locked (or auto-unlock if locked_until has passed)
 	if user.IsLocked {
 		if user.LockedUntil != nil && time.Now().After(*user.LockedUntil) {
-			// Auto-unlock
-			if err := s.repo.UnlockByTenant(ctx, user.ID, claims.TenantID); err != nil {
+			if err := s.repo.Unlock(ctx, user.ID); err != nil {
 				s.logger.Warn(ctx, "Failed to auto-unlock account", "error", err.Error())
-				// Still return locked error
 				return nil, model.ErrAccountLocked
 			}
-			// Successfully unlocked, allow access
+			// Successfully unlocked, allow access.
 		} else {
 			s.logger.Warn(ctx, "Account locked", "user_id", claims.UserID)
 			return nil, model.ErrAccountLocked
 		}
 	}
 
-	// Per-request success line is high-volume (every authenticated request); Debug.
-	s.logger.Debug(ctx, "JWT validated successfully", "user_id", claims.UserID)
+	// --- Membership checks (the token is workspace-scoped) ---
+	membership, err := s.repo.GetMembershipFromPrimary(ctx, claims.UserID, claims.TenantID)
+	if err != nil {
+		if errors.Is(err, model.ErrNotFound) {
+			s.logger.Warn(ctx, "Membership not found for JWT", "user_id", claims.UserID, "tenant_id", claims.TenantID)
+			return nil, model.ErrTokenRevoked
+		}
+		return nil, sanitizeError(ctx, s.logger, "load membership", err)
+	}
+	if !membership.IsActive() {
+		s.logger.Warn(ctx, "Membership not active for JWT", "user_id", claims.UserID, "tenant_id", claims.TenantID)
+		return nil, model.ErrTokenRevoked
+	}
+	if membership.TokenVersion != claims.MembershipTokenVersion {
+		s.logger.Warn(ctx, "Token version mismatch (membership)",
+			"user_id", claims.UserID, "tenant_id", claims.TenantID,
+			"token_version", claims.MembershipTokenVersion, "current_version", membership.TokenVersion)
+		return nil, model.ErrTokenRevoked
+	}
 
+	s.logger.Debug(ctx, "JWT validated successfully", "user_id", claims.UserID, "tenant_id", claims.TenantID)
 	return claims, nil
 }
 
-// ChangePassword changes a user's password and invalidates all sessions
-//
-// Parameters:
-//   - ctx: Context for database operations
-//   - req: Change password request with user_id, old password, new password
-//
-// Returns:
-//   - Error if password change fails
+// ChangePassword changes a user's password and invalidates all sessions. It is
+// identity-level (keyed by req.UserID only) — a credential is global.
 //
 // Flow:
-//  1. Load the user (tenant-scoped, from the primary)
-//  2. Reject if the account is disabled or locked (incident-response freeze)
-//  3. Verify old password
-//  4. Validate new password strength
-//  5. Hash new password
-//  6. Atomically update the password AND bump token_version (invalidate all JWTs)
-//  7. Revoke all refresh tokens (logout from all devices)
-//
-// Example:
-//
-//	err := authService.ChangePassword(ctx, ChangePasswordRequest{
-//	    UserID:      userID,
-//	    TenantID:    tenantID,
-//	    OldPassword: "OldPassword123!",
-//	    NewPassword: "NewSecurePassword456!",
-//	})
-//	if err != nil {
-//	    return fmt.Errorf("password change failed: %w", err)
-//	}
+//  1. Load the identity (from the primary).
+//  2. Reject if the account is disabled or locked (incident-response freeze).
+//  3. Verify the old password.
+//  4. Validate new-password strength; hash it.
+//  5. Atomically update the password AND bump the identity token_version (invalidate
+//     every workspace's access tokens).
+//  6. Revoke all refresh tokens (logout everywhere).
 func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswordRequest) error {
 	s.logger.Info(ctx, "Changing password", "user_id", req.UserID)
 
-	// 1. Load the user, scoped to the tenant so a caller-supplied user id from
-	// another tenant cannot be targeted (returns ErrNotFound on mismatch). Read from
-	// the PRIMARY so a just-committed disable/lock is observed by the status gate
-	// below rather than lagging a read replica.
-	user, err := s.repo.GetByIDFromPrimary(ctx, req.UserID, req.TenantID)
+	user, err := s.repo.GetByIDFromPrimary(ctx, req.UserID)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to load user for password change", "error", err.Error())
 		return sanitizeError(ctx, s.logger, "retrieve user", err)
 	}
 
-	// 2. Gate on account status. A disabled or locked account must not be able to
-	// rotate its own password mid-freeze (e.g. during incident response), even with
-	// the correct old password — mirroring the Login and ValidateJWT gates. Login
-	// still rejects these accounts, so this is account-freeze completeness, not an
-	// auth bypass. A lock whose locked_until has elapsed is treated as expired (see
-	// isUserLocked), so a stale lock does not permanently block a legitimate change.
+	// Gate on account status: a disabled or locked account must not rotate its own
+	// password mid-freeze, even with the correct old password.
 	if !user.IsEnabled {
 		s.logger.Warn(ctx, "Password change rejected: account disabled", "user_id", req.UserID)
 		return model.ErrAccountDisabled
@@ -570,51 +600,37 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		return model.ErrAccountLocked
 	}
 
-	// 3. Verify old password against the loaded hash.
 	if err := s.passwordService.VerifyPassword(req.OldPassword, user.PasswordHash); err != nil {
 		s.logger.Warn(ctx, "Old password verification failed", "user_id", req.UserID)
 		return fmt.Errorf("incorrect old password: %w", model.ErrIncorrectPassword)
 	}
 
-	// 4. Validate new password strength (optional - can be disabled if not needed)
 	requirements := model.DefaultPasswordRequirements()
-	err = s.passwordService.ValidatePasswordStrength(req.NewPassword, requirements)
-	if err != nil {
+	if err := s.passwordService.ValidatePasswordStrength(req.NewPassword, requirements); err != nil {
 		s.logger.Warn(ctx, "New password validation failed", "error", err.Error())
 		return sanitizeError(ctx, s.logger, "validate password strength", err)
 	}
 
-	// 5. Hash new password
 	newHash, err := s.passwordService.HashPassword(req.NewPassword)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to hash new password", "error", err.Error())
 		return sanitizeError(ctx, s.logger, "hash password", err)
 	}
 
-	// 6. Atomically update the password AND bump token_version in a single
-	// tenant-scoped UPDATE. Doing both at once means the change can never be left
-	// half-applied — there is no window where the password is changed but old access
-	// tokens (<=15m) still validate, or vice versa.
-	if err := s.repo.SetPasswordAndBumpTokenVersionByTenant(ctx, req.UserID, req.TenantID, newHash); err != nil {
+	// Atomically update the password AND bump the identity token_version, so the change
+	// can never be left half-applied.
+	if err := s.repo.SetPasswordAndBumpTokenVersion(ctx, req.UserID, newHash); err != nil {
 		s.logger.Error(ctx, "Failed to update password", "error", err.Error())
 		return sanitizeError(ctx, s.logger, "update password", err)
 	}
 
-	// 7. Revoke all refresh tokens. The password change and JWT invalidation are
-	// already durably committed by step 6; this removes the refresh tokens so a
-	// leftover one cannot mint fresh access tokens against the new password. It is a
-	// follow-up step rather than part of the atomic write, but its failure is still
-	// surfaced (NOT reported as success), since an undeleted refresh token stays
-	// usable for up to RefreshExpiry. On failure the caller should retry revocation
-	// via LogoutAll — re-running ChangePassword will not work because the old
-	// password no longer verifies. Tenant ownership was already proven in step 1
-	// (VerifyPasswordByTenant), so revoking by user_id here is safe.
+	// Revoke all refresh tokens so a leftover one cannot mint fresh access tokens
+	// against the new password. Surfaced (not reported as success) on failure.
 	if err := s.tokenService.RevokeAllUserTokens(ctx, req.UserID); err != nil {
 		s.logger.Error(ctx, "Password updated but refresh-token revocation failed", "user_id", req.UserID, "error", err.Error())
 		return sanitizeError(ctx, s.logger, "revoke existing sessions", err)
 	}
 
 	s.logger.Info(ctx, "Password changed successfully", "user_id", req.UserID)
-
 	return nil
 }
