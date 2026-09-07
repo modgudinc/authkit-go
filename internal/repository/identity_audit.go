@@ -24,8 +24,8 @@ import (
 // is_enabled or is_locked transition, with the status_type, changed_by_type, and
 // metadata described below. changed_by is left NULL.
 //
-// The status-changing user mutators (Enable/Disable/Lock/Unlock/Delete ByTenant and
-// the automatic RegisterFailedLogin lockout) live in identity.go and drive this
+// The status-changing user mutators (Enable/Disable/Lock/Unlock/Delete and the
+// automatic RegisterFailedLogin lockout) live in identity.go and drive this
 // machinery via withUserStatusAudit / readUserStatusForUpdate / recordStatusChange.
 // ============================================================================
 
@@ -53,25 +53,13 @@ type userStatusSnapshot struct {
 }
 
 // readUserStatusForUpdate locks the user row and returns its current status
-// snapshot, or model.ErrNotFound if no matching (id[, tenant]) row exists.
-func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx *sql.Tx, userID uuid.UUID, tenantID *string) (userStatusSnapshot, error) {
+// snapshot, or model.ErrNotFound if no matching id row exists.
+func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx *sql.Tx, userID string) (userStatusSnapshot, error) {
 	var s userStatusSnapshot
-	var (
-		query string
-		args  []any
-	)
-	if tenantID != nil {
-		query = `
-			SELECT is_enabled, is_locked, locked_until, failed_login_count, last_failed_login, disabled_at
-			FROM {{schema}}.users WHERE id = $1 AND tenant_id = $2 FOR UPDATE`
-		args = []any{userID, *tenantID}
-	} else {
-		query = `
-			SELECT is_enabled, is_locked, locked_until, failed_login_count, last_failed_login, disabled_at
-			FROM {{schema}}.users WHERE id = $1 FOR UPDATE`
-		args = []any{userID}
-	}
-	err := tx.QueryRowContext(ctx, r.q(query), args...).Scan(
+	const query = `
+		SELECT is_enabled, is_locked, locked_until, failed_login_count, last_failed_login, disabled_at
+		FROM {{schema}}.users WHERE id = $1 FOR UPDATE`
+	err := tx.QueryRowContext(ctx, r.q(query), userID).Scan(
 		&s.IsEnabled, &s.IsLocked, &s.LockedUntil, &s.FailedLoginCount, &s.LastFailedLogin, &s.DisabledAt,
 	)
 	if err != nil {
@@ -87,7 +75,7 @@ func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx *sql.Tx, us
 // is_locked transition between old and current, attributing it to actor. actor is
 // the operation's provenance (admin for explicit admin mutations, system for the
 // automatic failed-login lockout), not something inferred from the row state.
-func (r *Repository) recordStatusChange(ctx context.Context, tx *sql.Tx, userID uuid.UUID, old, current userStatusSnapshot, actor statusChangeActor) error {
+func (r *Repository) recordStatusChange(ctx context.Context, tx *sql.Tx, userID string, old, current userStatusSnapshot, actor statusChangeActor) error {
 	if old.IsEnabled != current.IsEnabled {
 		statusType := "disable"
 		if current.IsEnabled {
@@ -119,11 +107,12 @@ func (r *Repository) recordStatusChange(ctx context.Context, tx *sql.Tx, userID 
 	return nil
 }
 
-func (r *Repository) insertUserStatusChange(ctx context.Context, tx *sql.Tx, userID uuid.UUID, statusType, changedByType string, metadata map[string]any) error {
-	id, err := uuid.NewV7()
+func (r *Repository) insertUserStatusChange(ctx context.Context, tx *sql.Tx, userID string, statusType, changedByType string, metadata map[string]any) error {
+	gen, err := uuid.NewV7()
 	if err != nil {
 		return fmt.Errorf("could not generate id for status change: %w", err)
 	}
+	id := gen.String()
 	metaJSON, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("failed to marshal status change metadata: %w", err)
@@ -138,18 +127,16 @@ func (r *Repository) insertUserStatusChange(ctx context.Context, tx *sql.Tx, use
 }
 
 // ListUserStatusChanges returns a user's account status-change audit trail, newest
-// first. It is tenant-scoped via a JOIN to users, so a caller-supplied id from
-// another tenant matches no rows (and a hard-deleted user has none). Reads from the
+// first, keyed by the global user id (a hard-deleted user has none). Reads from the
 // replica (ro): the audit trail is an admin/report read, not a security gate.
-func (r *Repository) ListUserStatusChanges(ctx context.Context, userID uuid.UUID, tenantID string) ([]*model.UserStatusChange, error) {
+func (r *Repository) ListUserStatusChanges(ctx context.Context, userID string) ([]*model.UserStatusChange, error) {
 	query := `
 		SELECT sc.id, sc.user_id, sc.status_type, sc.changed_by, sc.changed_by_type, sc.changed_at, sc.reason, sc.metadata
 		FROM {{schema}}.user_status_changes sc
-		JOIN {{schema}}.users u ON u.id = sc.user_id
-		WHERE sc.user_id = $1 AND u.tenant_id = $2
+		WHERE sc.user_id = $1
 		ORDER BY sc.changed_at DESC
 	`
-	rows, err := r.ro.QueryContext(ctx, r.q(query), userID, tenantID)
+	rows, err := r.ro.QueryContext(ctx, r.q(query), userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list user status changes: %w", err)
 	}
@@ -161,7 +148,7 @@ func (r *Repository) ListUserStatusChanges(ctx context.Context, userID uuid.UUID
 	for rows.Next() {
 		var (
 			c         model.UserStatusChange
-			changedBy uuid.NullUUID
+			changedBy sql.NullString
 			reason    *string
 			metaJSON  []byte
 		)
@@ -169,7 +156,7 @@ func (r *Repository) ListUserStatusChanges(ctx context.Context, userID uuid.UUID
 			return nil, fmt.Errorf("failed to scan user status change row: %w", err)
 		}
 		if changedBy.Valid {
-			id := changedBy.UUID
+			id := changedBy.String
 			c.ChangedBy = &id
 		}
 		c.Reason = reason
@@ -203,11 +190,11 @@ func (r *Repository) CleanupStatusChanges(ctx context.Context, cutoff time.Time)
 }
 
 // withUserStatusAudit runs a status-changing user UPDATE and its audit row(s) in
-// one transaction: it locks the target row (model.ErrNotFound if absent / wrong
-// tenant), calls apply (which performs the UPDATE and returns the resulting
-// snapshot), records any transition attributed to actor, and commits. All of its
-// callers are explicit admin mutations, so they pass actorAdmin.
-func (r *Repository) withUserStatusAudit(ctx context.Context, userID uuid.UUID, tenantID *string, actor statusChangeActor, apply func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error)) error {
+// one transaction: it locks the target row (model.ErrNotFound if absent), calls
+// apply (which performs the UPDATE and returns the resulting snapshot), records any
+// transition attributed to actor, and commits. All of its callers are explicit
+// admin mutations, so they pass actorAdmin.
+func (r *Repository) withUserStatusAudit(ctx context.Context, userID string, actor statusChangeActor, apply func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error)) error {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin user status update: %w", err)
@@ -219,7 +206,7 @@ func (r *Repository) withUserStatusAudit(ctx context.Context, userID uuid.UUID, 
 		}
 	}()
 
-	old, err := r.readUserStatusForUpdate(ctx, tx, userID, tenantID)
+	old, err := r.readUserStatusForUpdate(ctx, tx, userID)
 	if err != nil {
 		return err
 	}

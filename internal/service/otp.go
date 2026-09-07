@@ -39,10 +39,10 @@ type OTPService struct {
 }
 
 type otpRepository interface {
-	GetVerificationCode(ctx context.Context, tenantID, email, purpose string) (*repository.VerificationCode, error)
+	GetVerificationCode(ctx context.Context, email, purpose string) (*repository.VerificationCode, error)
 	UpsertVerificationCode(ctx context.Context, req repository.CreateVerificationCodeRequest, rateLimit time.Duration) (bool, error)
-	ConsumeVerificationCode(ctx context.Context, tenantID, email, code, purpose string, maxAttempts int) (repository.OTPConsumeResult, error)
-	DeleteVerificationCode(ctx context.Context, tenantID, email, purpose string) error
+	ConsumeVerificationCode(ctx context.Context, email, code, purpose string, maxAttempts int) (repository.OTPConsumeResult, error)
+	DeleteVerificationCode(ctx context.Context, email, purpose string) error
 	DeleteExpiredVerificationCodes(ctx context.Context) (int64, error)
 }
 
@@ -90,7 +90,7 @@ func (s *OTPService) hashOTP(code string) string {
 //   - Expiration timestamp
 //   - Error if rate limit violated or database error
 func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest) (*model.GenerateResponse, error) {
-	tenantID, purpose, expirationDuration := req.TenantID, req.Purpose, req.ExpirationDuration
+	purpose, expirationDuration := req.Purpose, req.ExpirationDuration
 	email := normalizeEmail(req.Email)
 
 	// OTP codes are stored as a keyed HMAC, so the secret is mandatory. Fail with a
@@ -103,7 +103,7 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 	// Optional caller-owned rate limiting (Config.RateLimiter), on top of the built-in
 	// per-(tenant,email,purpose) generation cooldown — lets callers bound OTP-email
 	// fan-out cost. Keyed by (tenant, email, purpose).
-	if err := checkRateLimit(ctx, s.rateLimiter, s.metrics, s.logger, "otp:"+tenantID+":"+email+":"+purpose); err != nil {
+	if err := checkRateLimit(ctx, s.rateLimiter, s.metrics, s.logger, "otp:"+email+":"+purpose); err != nil {
 		return nil, err
 	}
 
@@ -121,7 +121,7 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 	// created_at. A missing code (ErrNotFound) means none is active, which is
 	// fine; any other error is a hard failure — failing open here would silently
 	// disable the rate limit on a transient DB error.
-	existingOTP, err := s.repo.GetVerificationCode(ctx, tenantID, email, purpose)
+	existingOTP, err := s.repo.GetVerificationCode(ctx, email, purpose)
 	if err != nil && !errors.Is(err, model.ErrNotFound) {
 		s.logger.Error(ctx, "failed to read OTP for rate limiting",
 			"email", maskEmail(email),
@@ -165,7 +165,6 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 	// persisted; the plaintext is returned to the caller (below) for delivery and is
 	// never stored.
 	upsertReq := repository.CreateVerificationCodeRequest{
-		TenantID:  tenantID,
 		Email:     email,
 		CodeHash:  s.hashOTP(code),
 		Purpose:   purpose,
@@ -229,7 +228,7 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 //   - nil if OTP is valid (and deletes it)
 //   - error if OTP is invalid, expired, not found, or locked out after too many attempts
 func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest) error {
-	tenantID, code, purpose := req.TenantID, req.Code, req.Purpose
+	code, purpose := req.Code, req.Purpose
 	email := normalizeEmail(req.Email)
 
 	if s.hmacSecret == "" {
@@ -238,10 +237,9 @@ func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest)
 
 	// Hash the supplied code under the same secret used at generation; the stored
 	// value is the HMAC, so the repository compares hash-to-hash (constant-time).
-	result, err := s.repo.ConsumeVerificationCode(ctx, tenantID, email, s.hashOTP(code), purpose, MaxOTPValidationAttempts)
+	result, err := s.repo.ConsumeVerificationCode(ctx, email, s.hashOTP(code), purpose, MaxOTPValidationAttempts)
 	if err != nil {
 		s.logger.Error(ctx, "OTP validation failed",
-			"tenant_id", tenantID,
 			"email", maskEmail(email),
 			"purpose", purpose,
 			"error", err.Error(),
@@ -252,14 +250,12 @@ func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest)
 	switch result {
 	case repository.OTPConsumeValid:
 		s.logger.Info(ctx, "OTP validated successfully",
-			"tenant_id", tenantID,
 			"email", maskEmail(email),
 			"purpose", purpose,
 		)
 		return nil
 	case repository.OTPConsumeLockedOut:
 		s.logger.Warn(ctx, "OTP locked out after too many failed attempts",
-			"tenant_id", tenantID,
 			"email", maskEmail(email),
 			"purpose", purpose,
 		)
@@ -267,7 +263,6 @@ func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest)
 		return fmt.Errorf("too many invalid attempts; request a new OTP: %w", model.ErrOTPLockedOut)
 	default: // repository.OTPConsumeInvalid
 		s.logger.Warn(ctx, "OTP validation failed",
-			"tenant_id", tenantID,
 			"email", maskEmail(email),
 			"purpose", purpose,
 		)
@@ -279,10 +274,10 @@ func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest)
 // Delete explicitly revokes an OTP before it's used
 // Use cases: User cancels operation, admin revokes pending OTP
 //
-// Note: Deletes the OTP for the specific (tenant, email, purpose)
-func (s *OTPService) Delete(ctx context.Context, tenantID, email, purpose string) error {
+// Note: Deletes the OTP for the specific (email, purpose)
+func (s *OTPService) Delete(ctx context.Context, email, purpose string) error {
 	email = normalizeEmail(email)
-	err := s.repo.DeleteVerificationCode(ctx, tenantID, email, purpose)
+	err := s.repo.DeleteVerificationCode(ctx, email, purpose)
 	if err != nil {
 		s.logger.Error(ctx, "failed to delete OTP",
 			"email", maskEmail(email),

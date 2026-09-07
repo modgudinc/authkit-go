@@ -84,8 +84,11 @@ One common flow:
 3. Application validates the OTP it sent to the invited email.
 4. User submits OTP and password.
 5. Application validates the OTP, hashes the password, and calls
-   `InvitationService.Accept`, which validates the invitation, consumes
-   one use, and creates the user in a single transaction.
+   `InvitationService.Accept`, which validates the invitation, consumes one use,
+   resolves the invitee's **global identity** (reusing an existing one for the email,
+   or creating one), and grants the invited membership — all in a single transaction.
+   It returns `(userID, created, err)`; `created == false` means an existing identity
+   was reused (the invitee keeps their single account/password — no second login).
 
 Use `Accept` for redemption — it provides atomic, all-or-nothing
 semantics, so a single-use invitation can't be over-redeemed. Composing
@@ -122,6 +125,8 @@ resp, err := identity.AuthService().Login(r.Context(), req)
 switch {
 case errors.Is(err, authkit.ErrRateLimited):
 	http.Error(w, "too many requests", http.StatusTooManyRequests) // 429
+case errors.Is(err, authkit.ErrNoActiveMembership):
+	http.Error(w, "forbidden", http.StatusForbidden)               // 403 — valid creds, not a member of that workspace
 case errors.Is(err, authkit.ErrInvalidCredentials):
 	http.Error(w, "invalid credentials", http.StatusUnauthorized)  // 401
 case err != nil:
@@ -129,8 +134,9 @@ case err != nil:
 }
 ```
 
-The `key` passed to `Allow` is `login:<tenant>:<ip|email:...>`, `refresh:<ip>`, or
-`otp:<tenant>:<email>:<purpose>` — bucket on it directly.
+The `key` passed to `Allow` is `login:<tenant>:<ip|email:...>` (`Login`),
+`login:<ip|email:...>` (`LoginByEmail`, no tenant), `refresh:<ip>`, or
+`otp:<email>:<purpose>` (OTP is keyed by email + purpose, not tenant) — bucket on it directly.
 
 ## Health Checks
 

@@ -3,8 +3,6 @@
 
 package model
 
-import "github.com/google/uuid"
-
 // SessionInfo contains metadata about the client session
 type SessionInfo struct {
 	IPAddress  string `json:"ip_address"`
@@ -19,12 +17,12 @@ type SessionInfo struct {
 // the error continues to flow through the public sanitizeError boundary unchanged.
 // Extract the IDs with errors.As(err, &model.RefreshTokenReuseError{}).
 type RefreshTokenReuseError struct {
-	UserID   uuid.UUID
-	FamilyID uuid.UUID
+	UserID   string
+	FamilyID string
 }
 
 func (e *RefreshTokenReuseError) Error() string {
-	return "authkit: refresh token reuse detected (user " + e.UserID.String() + ", family " + e.FamilyID.String() + ")"
+	return "authkit: refresh token reuse detected (user " + e.UserID + ", family " + e.FamilyID + ")"
 }
 
 // Unwrap lets errors.Is(err, ErrRefreshTokenReuse) match this typed error.

@@ -354,10 +354,17 @@ func (k *AuthKit) SecretService() SecretService {
 }
 
 // UserService returns the user service
-// for user management, queries, and account status operations.
+// for global-identity management, queries, and account status operations.
 func (k *AuthKit) UserService() UserService {
 	repo := k.repository()
 	return service.NewUserService(&repo, k.logger)
+}
+
+// MembershipService returns the membership service
+// for managing the user<->tenant membership graph (grant/revoke, roles, member lists).
+func (k *AuthKit) MembershipService() MembershipService {
+	repo := k.repository()
+	return service.NewMembershipService(&repo, k.logger)
 }
 
 func (k *AuthKit) repository() repository.Repository {

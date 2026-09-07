@@ -77,57 +77,62 @@ func NewJWTService(
 	return s
 }
 
-// GenerateAccessToken generates a signed JWT access token for a user
+// GenerateAccessToken generates a signed, WORKSPACE-SCOPED JWT access token for a
+// user's membership.
 //
 // Parameters:
-//   - user: User model containing ID, email, tenant, roles, token version
+//   - user: the global identity (ID, Email, TokenVersion)
+//   - membership: the active membership the token is scoped to (TenantID, Roles,
+//     and the per-membership TokenVersion)
 //
-// The user MUST be a complete, freshly loaded record (ID, Email, TenantID, Roles,
-// and TokenVersion all populated from storage). These fields are copied verbatim
-// into the signed claims, so a hand-built or partially populated User — e.g. one
-// left with a zero TokenVersion — mints a token that AuthService.ValidateJWT will
-// immediately treat as revoked once it no longer matches the stored token_version.
-// The high-level AuthService flows load the user for you; this caveat applies when
-// calling the JWT/Token services directly.
+// Both MUST be complete, freshly loaded records. The identity fields (user_id,
+// email, token_version) come from user; the workspace fields (tenant_id, roles,
+// membership_token_version) come from membership. They are copied verbatim into the
+// signed claims, so a hand-built or partially populated record — e.g. one left with
+// a zero TokenVersion — mints a token that AuthService.ValidateJWT immediately
+// treats as revoked once it no longer matches the stored versions. The high-level
+// AuthService flows load both for you; this caveat applies when calling the
+// JWT/Token services directly.
 //
 // # Returns a signed JWT string or error
 //
 // The JWT contains custom claims:
 //   - user_id: User UUID (string representation)
 //   - email: User email address
-//   - tenant_id: Tenant identifier
-//   - roles: Array of user roles
-//   - token_version: For invalidating all tokens when incremented
+//   - tenant_id: Active workspace (from the membership)
+//   - roles: Roles in the active workspace (from the membership)
+//   - token_version: identity token_version (users.token_version)
+//   - membership_token_version: per-workspace token_version (memberships.token_version)
 //   - sub: Subject (user_id)
-//   - iat: Issued at timestamp
-//   - exp: Expiration timestamp
+//   - iat / exp: Issued-at / expiration timestamps
 //
 // Example:
 //
-//	token, err := jwtService.GenerateAccessToken(user)
+//	token, err := jwtService.GenerateAccessToken(user, membership)
 //	if err != nil {
 //	    return fmt.Errorf("failed to generate token: %w", err)
 //	}
 //	// Return token to client
-func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
+func (s *JWTService) GenerateAccessToken(user *model.User, membership *model.Membership) (string, error) {
 	s.logger.Info(context.Background(), "Generating access token",
-		"user_id", user.ID.String(),
+		"user_id", user.ID,
 		"email", maskEmail(user.Email),
-		"tenant_id", user.TenantID,
+		"tenant_id", membership.TenantID,
 	)
 
 	now := time.Now()
 	expiresAt := now.Add(s.accessExpiry)
 
 	claims := model.JWTClaims{
-		UserID:       user.ID,
-		Email:        user.Email,
-		TenantID:     user.TenantID,
-		Roles:        user.Roles,
-		TokenVersion: user.TokenVersion,
+		UserID:                 user.ID,
+		Email:                  user.Email,
+		TenantID:               membership.TenantID,
+		Roles:                  membership.Roles,
+		TokenVersion:           user.TokenVersion,
+		MembershipTokenVersion: membership.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        uuid.Must(uuid.NewV7()).String(), // jti: unique per token, for log correlation / future denylist
-			Subject:   user.ID.String(),
+			Subject:   user.ID,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 		},
@@ -147,7 +152,7 @@ func (s *JWTService) GenerateAccessToken(user *model.User) (string, error) {
 	}
 
 	s.logger.Info(context.Background(), "Access token generated successfully",
-		"user_id", user.ID.String(),
+		"user_id", user.ID,
 		"expires_at", expiresAt.Format(time.RFC3339),
 	)
 
