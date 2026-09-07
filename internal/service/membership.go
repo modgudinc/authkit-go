@@ -58,6 +58,28 @@ func (s *MembershipService) UpdateRoles(ctx context.Context, userID, tenantID st
 	return sanitizeError(ctx, s.logger, "update membership roles", s.repo.UpdateMembershipRoles(ctx, userID, tenantID, roles))
 }
 
+// RemoveGuarded is Remove with a safety guard: it refuses (model.ErrLastRoleHolder)
+// to remove the tenant's last ACTIVE member holding requireRole, so a workspace can
+// never be left without e.g. an Admin. The check-and-revoke is atomic and serialized
+// per tenant, so concurrent removals cannot race the tenant below one active holder of
+// the role. requireRole is an opaque role string named by the caller (authkit does not
+// interpret roles); passing "" disables the guard (equivalent to Remove). Returns
+// model.ErrNotFound when no such membership exists. Map ErrLastRoleHolder to HTTP 409.
+func (s *MembershipService) RemoveGuarded(ctx context.Context, userID, tenantID, requireRole string) error {
+	return sanitizeError(ctx, s.logger, "remove membership (guarded)", s.repo.RemoveMembershipGuarded(ctx, userID, tenantID, requireRole))
+}
+
+// UpdateRolesGuarded is UpdateRoles with the same last-holder guard as RemoveGuarded:
+// it refuses (model.ErrLastRoleHolder) to replace a membership's roles when doing so
+// would leave the tenant with no active member holding requireRole (e.g. demoting the
+// last Admin). Promoting the target INTO requireRole is always allowed. Atomic and
+// serialized per tenant. requireRole is an opaque role string; passing "" disables the
+// guard (equivalent to UpdateRoles). Returns model.ErrNotFound when no such membership
+// exists. Map ErrLastRoleHolder to HTTP 409.
+func (s *MembershipService) UpdateRolesGuarded(ctx context.Context, userID, tenantID string, roles []string, requireRole string) error {
+	return sanitizeError(ctx, s.logger, "update membership roles (guarded)", s.repo.UpdateMembershipRolesGuarded(ctx, userID, tenantID, roles, requireRole))
+}
+
 // Get returns a single (user, tenant) membership, or model.ErrNotFound if none
 // exists.
 func (s *MembershipService) Get(ctx context.Context, userID, tenantID string) (*model.Membership, error) {
