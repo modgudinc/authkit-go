@@ -766,6 +766,13 @@ Key semantics:
   the row is retained, not deleted. `Add` can later reactivate it.
 - **`UpdateRoles`** replaces the membership's roles and bumps its `token_version`,
   invalidating only that workspace's tokens (the identity session is untouched).
+- **`RemoveGuarded` / `UpdateRolesGuarded`** are `Remove` / `UpdateRoles` plus a
+  last-holder guard: they refuse (`ErrLastRoleHolder`, map to **409**) to remove or
+  demote the tenant's **last active member holding a caller-named role** — e.g. a
+  workspace's last `Admin`. The check-and-mutate is atomic and serialized per tenant (a
+  transaction-scoped advisory lock), so concurrent removals cannot race a workspace below
+  one active holder of the role, even across replicas. The `requireRole` is opaque; pass
+  `""` to disable the guard (equivalent to `Remove` / `UpdateRoles`).
 - **`CountByTenant`** is status-agnostic (a suspended row still counts).
 
 ```go
@@ -789,13 +796,21 @@ count, err := membershipService.CountByTenant(ctx, "acme.com")   // int (status-
 
 // Soft-revoke access (suspends + bumps the membership token_version; row retained).
 err = membershipService.Remove(ctx, userID, "acme.com")
+
+// Guarded variants refuse to drop the workspace's last active holder of a role.
+err = membershipService.RemoveGuarded(ctx, userID, "acme.com", "Admin")
+err = membershipService.UpdateRolesGuarded(ctx, userID, "acme.com", []string{"Member"}, "Admin")
+if errors.Is(err, authkit.ErrLastRoleHolder) {
+    // 409: userID is the tenant's last active Admin — refused, nothing changed.
+}
 ```
 
 A `model.Membership` carries `UserID`, `TenantID`, `Roles` (opaque strings), `Status`
 (`model.MembershipActive` | `model.MembershipSuspended`) with an `IsActive()` helper, and
 a per-membership token version. `Get`/`Remove` on a non-existent membership return
 `ErrNotFound`; `Add` for an unknown user or tenant returns `ErrNotFound` (the FK is
-enforced).
+enforced). The guarded mutations additionally return `ErrLastRoleHolder` (map to **409**)
+when the change would remove the tenant's last active holder of the required role.
 
 ## Tenant Service
 
@@ -1799,8 +1814,8 @@ default:
 ```
 
 Exported sentinels include `ErrInvalidCredentials`, `ErrAccountDisabled`,
-`ErrAccountLocked`, `ErrNoActiveMembership`, `ErrInvalidToken`, `ErrTokenRevoked`,
-`ErrInvalidRefreshToken`,
+`ErrAccountLocked`, `ErrNoActiveMembership`, `ErrLastRoleHolder`, `ErrInvalidToken`,
+`ErrTokenRevoked`, `ErrInvalidRefreshToken`,
 `ErrRefreshTokenReuse`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrOTPRateLimited`,
 `ErrOTPSecretMissing`, `ErrInvalidAPIKey`, `ErrIncorrectPassword`,
 `ErrInvitationInvalid`, `ErrUserExists`, `ErrPasswordTooWeak`,
@@ -1818,6 +1833,10 @@ operations when no valid encryption key was configured. `ErrNoActiveMembership` 
 403 and is the workspace-scoping outcome of the decoupled model — the credentials are
 valid but the identity has no active membership in the requested tenant (no row, or it is
 suspended); `Login`/`LoginByEmail`/`MintWorkspaceToken`/`RefreshToken` return it.
+`ErrLastRoleHolder` maps to a **409** and is returned by
+`MembershipService.RemoveGuarded`/`UpdateRolesGuarded` when the change would leave the
+tenant with no active member holding the required role (e.g. the workspace's last Admin);
+nothing is written when it is returned.
 `ValidateJWT` additionally returns `ErrTokenRevoked` when the membership `token_version`
 no longer matches or the active membership has been suspended/removed (the workspace's
 access tokens are revoked without touching the identity session). `Login` deliberately

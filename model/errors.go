@@ -45,6 +45,16 @@ var (
 	// to HTTP 403.
 	ErrNoActiveMembership = errors.New("authkit: no active membership in tenant")
 
+	// ErrLastRoleHolder is returned by MembershipService.RemoveGuarded /
+	// UpdateRolesGuarded when the requested change would leave the tenant with no
+	// active member holding the required role (e.g. removing or demoting a
+	// workspace's last Admin). The mutation is refused and rolled back — nothing is
+	// changed — so callers should surface it as a 409 Conflict. The guard is enforced
+	// atomically and serialized per tenant, so concurrent removals cannot race the
+	// tenant below one active holder of the role. requireRole is opaque: authkit does
+	// not interpret roles; the caller names the one that must survive.
+	ErrLastRoleHolder = errors.New("authkit: cannot remove the last active member holding the required role")
+
 	// ErrInvalidRefreshToken is returned when a refresh token is unknown, expired,
 	// or already consumed.
 	ErrInvalidRefreshToken = errors.New("authkit: invalid refresh token")
