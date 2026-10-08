@@ -42,8 +42,9 @@ type ResolveExternalIdentityRequest struct {
 	EmailVerified bool
 	// DisplayName is used only when a user is created.
 	DisplayName string
-	// CreateUser creates a user without a password when none matches. It needs a
-	// verified Email; otherwise Resolve returns ErrEmailNotVerified.
+	// CreateUser creates a user without a password, its email marked verified, when
+	// none matches. It needs a verified Email; otherwise Resolve returns
+	// ErrEmailNotVerified.
 	CreateUser bool
 }
 

@@ -60,12 +60,15 @@ func providerEmail(email string) (string, error) {
 //   - A returning sign-in is found by (Provider, Subject) alone, whatever email the
 //     provider now reports. The user's own email is never changed.
 //   - A first sign-in may be linked to the user that owns its email only when the
-//     provider verified that email (EmailVerified), the user has no password, and
-//     the user is not linked to another account at the same provider. Otherwise
-//     Resolve returns ErrIdentityLinkRequired and changes nothing: have the person
-//     sign in to that user, then call Link. An unverified email never finds a user.
-//   - With no user for the email, CreateUser creates one without a password (it
-//     needs a verified email, else ErrEmailNotVerified); without it, ErrNotFound.
+//     provider verified that email (EmailVerified), the user has proven they own it
+//     too (User.EmailVerifiedAt, see UserService.MarkEmailVerified), the user has no
+//     password, and the user is not linked to another account at the same provider.
+//     Otherwise Resolve returns ErrIdentityLinkRequired and changes nothing: have the
+//     person sign in to that user, then call Link. An unverified email never finds a
+//     user.
+//   - With no user for the email, CreateUser creates one without a password and
+//     with its email marked verified (it needs a verified email, else
+//     ErrEmailNotVerified); without it, ErrNotFound.
 //
 // Resolve does not open a session or check account status: pass the user to
 // VerifiedLoginService.OpenSession, which refuses disabled and locked accounts.

@@ -57,7 +57,7 @@ func TestMembershipServiceLifecycle(t *testing.T) {
 		_ = db.Close()
 	}()
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	ms := newIntegrationAuthKit(t, db).MembershipService()
@@ -163,7 +163,7 @@ func TestAddMembershipUnknownUserOrTenant(t *testing.T) {
 		_ = db.Close()
 	}()
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	const tenantID = "fk.test"
@@ -201,7 +201,7 @@ func TestMintWorkspaceToken(t *testing.T) {
 		_ = db.Close()
 	}()
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	pw := service.NewPasswordService(4, nil)

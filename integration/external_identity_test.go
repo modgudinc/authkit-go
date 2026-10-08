@@ -130,6 +130,16 @@ func TestResolveLinksPasswordlessUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Nobody has proven they own the address yet: whoever created the account may not.
+	_, err = k.ExternalIdentityService().Resolve(ctx, model.ResolveExternalIdentityRequest{Provider: "github", Subject: "42", Email: "magic@example.test", EmailVerified: true})
+	requireError(t, err, authkit.ErrIdentityLinkRequired)
+	if m.get(metrics.CounterIdentityLinkRefused+"|reason=email_unverified") != 1 {
+		t.Fatal("refusal not counted")
+	}
+	// The owner proves it (an emailed code, say); now the same sign-in links.
+	if err := k.UserService().MarkEmailVerified(ctx, id); err != nil {
+		t.Fatal(err)
+	}
 	res := resolve(t, k, model.ResolveExternalIdentityRequest{Provider: "github", Subject: "42", Email: "MAGIC@example.test", EmailVerified: true})
 	if res.Created || !res.Linked || res.User.ID != id {
 		t.Fatalf("expected the existing user to be linked: %+v", res)
@@ -156,6 +166,10 @@ func TestResolveRefusesUserWithPassword(t *testing.T) {
 	db, k, m, adminID := verifiedFixture(t, authkit.SessionRequired)
 	ctx := context.Background()
 	svc := k.ExternalIdentityService()
+	// Even with the owner's email verified, a password account is not linked by email.
+	if err := k.UserService().MarkEmailVerified(ctx, adminID); err != nil {
+		t.Fatal(err)
+	}
 	req := model.ResolveExternalIdentityRequest{Provider: "google", Subject: "g-admin", Email: "Admin@Sessions.test", EmailVerified: true, CreateUser: true}
 	_, err := svc.Resolve(ctx, req)
 	requireError(t, err, authkit.ErrIdentityLinkRequired)
@@ -348,7 +362,7 @@ func TestExternalIdentityMigration(t *testing.T) {
 	db := openTestDB(t)
 	t.Cleanup(func() { applyMigration(t, db, "000001_identity_schema.down.sql"); _ = db.Close() })
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 	k := verifiedKit(t, db, authkit.SessionDisabled, nil)
 	// Without the migration the calls fail cleanly, without leaking SQL.
 	_, err := k.ExternalIdentityService().Resolve(context.Background(), model.ResolveExternalIdentityRequest{Provider: "google", Subject: "g", Email: "a@example.test", EmailVerified: true, CreateUser: true})

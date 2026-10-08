@@ -65,8 +65,8 @@ const (
 	CounterVerifiedLogin = "authkit_verified_login_total"
 	// CounterIdentityLinkRefused counts ExternalIdentityService.Resolve calls that
 	// found a user by a verified email but refused to link the sign-in to them
-	// (ErrIdentityLinkRequired). Emitted with a "reason" label (has_password,
-	// provider_account_mismatch). A spike can mean someone is trying to take over
+	// (ErrIdentityLinkRequired). Emitted with a "reason" label (email_unverified,
+	// has_password, provider_account_mismatch). A spike can mean someone is trying to take over
 	// accounts through a provider.
 	CounterIdentityLinkRefused = "authkit_identity_link_refused_total"
 )

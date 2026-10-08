@@ -20,7 +20,7 @@
 Core tables:
 
 - `tenants`: Tenant records and allowed email domains.
-- `users`: Global user identities — **no** `tenant_id`, **no** `roles`. Email is globally unique, case-insensitively (`UNIQUE (lower(email))`). `token_version` is the identity-level token version (credential events invalidate every workspace's access tokens). An empty `password_hash` means the user has no password and signs in only through a verified sign-in.
+- `users`: Global user identities — **no** `tenant_id`, **no** `roles`. Email is globally unique, case-insensitively (`UNIQUE (lower(email))`). `token_version` is the identity-level token version (credential events invalidate every workspace's access tokens). An empty `password_hash` means the user has no password and signs in only through a verified sign-in. `email_verified_at` (migration 000005) records when the user proved they own the address.
 - `memberships`: The `user ↔ tenant` graph — which identity belongs to which tenant, with `roles` (opaque JSONB strings the embedding app interprets), a per-membership `token_version` (a role change or revoke invalidates only that workspace's access tokens), and a `status` (`active` / `suspended`). Primary key `(user_id, tenant_id)`; both foreign keys cascade on delete.
 - `refresh_tokens`: Stored refresh token hashes and session metadata. The refresh token is the **identity session** (user-scoped, no tenant); one login = one family.
 - `sessions` (optional migrations 000002 and 000003): Login records scoped by

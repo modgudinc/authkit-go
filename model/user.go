@@ -27,6 +27,12 @@ type User struct {
 	LastFailedLoginAt *time.Time `json:"last_failed_login_at,omitempty" db:"last_failed_login"`
 	LastLoginAt       *time.Time `json:"last_login_at,omitempty" db:"last_login"`
 
+	// EmailVerifiedAt is when the user proved they own Email: through a code or link
+	// the application sent to it (UserService.MarkEmailVerified), or a provider that
+	// verified it when ExternalIdentityService.Resolve created the user. Nil means
+	// not known to be verified. Requires migration 000005.
+	EmailVerifiedAt *time.Time `json:"email_verified_at,omitempty" db:"email_verified_at"`
+
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
@@ -36,6 +42,10 @@ type User struct {
 // application verifies them some other way); password login always fails for
 // them with ErrInvalidCredentials and never counts toward the failed-login lockout.
 func (u *User) HasPassword() bool { return u.PasswordHash != "" }
+
+// HasVerifiedEmail reports whether the user has proven they own their email
+// address (EmailVerifiedAt is set).
+func (u *User) HasVerifiedEmail() bool { return u.EmailVerifiedAt != nil }
 
 // CreateUserRequest creates a GLOBAL identity. No tenant or roles — grant tenant
 // access separately via MembershipService.Add. Email must be globally unique.
