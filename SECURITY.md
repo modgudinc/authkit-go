@@ -174,11 +174,12 @@ are out of scope for the library itself and must be provided by the caller:
   `Config.RateLimiter`.
 - **Provider email trust.** `ExternalIdentityService.Resolve` links a first sign-in
   to an existing account only by a provider-verified email, and only to a user
-  with no password and no other account at that provider. Set `EmailVerified`
-  only for providers whose verification you trust (see
-  [verified sign-in](docs/verified-sign-in.md)), and create passwordless users only
-  for addresses you have verified, because Resolve will link a verified sign-in for
-  that address to them.
+  whose own email is verified (`User.EmailVerifiedAt`), who has no password and who
+  has no other account at that provider. Set `EmailVerified` only for providers
+  whose verification you trust (see [verified sign-in](docs/verified-sign-in.md)).
+- **Email verification.** Call `UserService.MarkEmailVerified` only after the person
+  proved they control the address, with a code or link sent to it. Accepting an
+  invitation is not proof: its creator knows the code.
 - **Audit retention.** The `user_status_changes` audit table has no expiry; schedule
   `UserService.CleanupStatusChanges` per your retention policy to bound its growth.
 

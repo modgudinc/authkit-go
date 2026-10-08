@@ -22,10 +22,11 @@ Verify the provider's response with a client library such as
 | --- | --- | --- |
 | `000003_session_sign_in` | `OpenSession` with session support enabled (`SessionOptional` or `SessionRequired`) | Adds `sessions.sign_in_method` and allows sessions with no installation. Apply it before deploying this version: the session queries read the new column. Existing sessions read as `"password"`. |
 | `000004_external_identities` | `ExternalIdentityService`, in any mode | Adds `external_identities`. Not needed if you only use `OpenSession`. |
+| `000005_email_verification` | Every deployment | Adds `users.email_verified_at`. Apply it before deploying this version: every user query reads the new column. Existing users start unverified. |
 
-Both are additive and idempotent, and safe to apply while older code runs. Apps in
-`SessionDisabled` mode need neither for `OpenSession`, and only `000004` for linked
-identities. For a custom `IdentitySchema`, replace `authkit.` with your schema in
+All are additive and idempotent, and safe to apply while older code runs. Apps in
+`SessionDisabled` mode need only `000005` for `OpenSession`, and `000004` as well for
+linked identities. For a custom `IdentitySchema`, replace `authkit.` with your schema in
 the migration files, as for `000002`.
 
 Rolling `000003` back deletes sessions that have no installation (and their refresh
@@ -113,9 +114,75 @@ user. `User.HasPassword` reports it.
 - `ChangePassword` returns `ErrIncorrectPassword`: there is no old password to
   match. To set a first password, verify the person yourself and call
   `UserService.SetPassword`, which ends their other sessions.
-- Create passwordless users only for addresses you have verified (`Resolve` and
-  invitation acceptance do), because `Resolve` will link a verified provider sign-in
-  for that address to them. See [Linking rules](#linking-rules).
+- Without a password, the email address is how the person gets back in, so record
+  when they prove they own it ([Email verification](#email-verification)).
+
+## Email verification
+
+`User.EmailVerifiedAt` records when the user proved they own their email address;
+nil means authkit doesn't know. `User.HasVerifiedEmail` reports it.
+
+- Call `UserService.MarkEmailVerified(ctx, userID)` after the person proves it: they
+  entered a code from `OTPService` that you sent to the address, or opened a signed
+  link you sent there. Repeating it keeps the first time.
+- `Resolve` sets it on the users it creates, because the provider verified the
+  address.
+- Accepting an invitation does not set it. Whoever created the invitation knows its
+  code, so redeeming one proves nothing about the address.
+- `UserService.Create` does not set it.
+
+authkit does not require a verified email to sign in; that is your policy. It does
+require one before `Resolve` links a provider sign-in to an existing account by
+email (see [Linking rules](#linking-rules)).
+
+## Sign in with an emailed code
+
+`OTPService` and `OpenSession` together give passwordless sign-in by email, and the
+same step verifies the address:
+
+```go
+// 1. Send a code. Do this whether or not an account exists for the address, so the
+//    response does not reveal who has one. Config.RateLimiter and
+//    OTPConfig.RateLimitDuration bound how often codes are sent.
+otp, err := kit.OTPService().Generate(ctx, model.OTPGenerateRequest{
+    Email: email, Purpose: "sign_in", ExpirationDuration: 10 * time.Minute,
+})
+// Email otp.Code to the address.
+
+// 2. Check the code the person typed. It is used up, and a few wrong guesses
+//    invalidate it.
+if err := kit.OTPService().Validate(ctx, model.OTPValidateRequest{
+    Email: email, Code: typedCode, Purpose: "sign_in",
+}); err != nil {
+    return err
+}
+
+// 3. The person owns the address. Find or create their user, and record it.
+user, err := kit.UserService().GetByEmail(ctx, email)
+userID := ""
+switch {
+case err == nil:
+    userID = user.ID
+case errors.Is(err, authkit.ErrNotFound):
+    userID, err = kit.UserService().Create(ctx, model.CreateUserRequest{Email: email, DisplayName: name})
+    if err != nil {
+        return err
+    }
+default:
+    return err
+}
+if err := kit.UserService().MarkEmailVerified(ctx, userID); err != nil {
+    return err
+}
+
+// 4. Open the session.
+login, err := kit.VerifiedLoginService().OpenSession(ctx, model.OpenSessionRequest{
+    UserID: userID, SignInMethod: "email_code",
+})
+```
+
+Because step 3 records the verification, a later Google sign-in for the same
+address links to this account automatically, as long as it has no password.
 
 ## Linked sign-in identities
 
@@ -164,18 +231,24 @@ case errors.Is(err, authkit.ErrNotFound):
 2. A first sign-in is linked to the user who owns its email only when all of these
    hold; otherwise `Resolve` returns `ErrIdentityLinkRequired` and changes nothing:
    - `EmailVerified` is true;
+   - the user has proven they own the address too, so `User.EmailVerifiedAt` is
+     set (`email_unverified`);
    - the user has no password (`has_password`);
    - the user has no other account at the same provider
      (`provider_account_mismatch`).
-3. With no user for the email, `CreateUser` creates one without a password and
-   links it (a verified email is required, else `ErrEmailNotVerified`); without
-   `CreateUser`, `ErrNotFound`.
+3. With no user for the email, `CreateUser` creates one without a password, with
+   its email marked verified, and links it (a verified email is required, else
+   `ErrEmailNotVerified`); without `CreateUser`, `ErrNotFound`.
 
 An unverified email never finds a user, so it can neither link nor reveal an
 account. Emails match case-insensitively.
 
 Why each refusal:
 
+- **The user's email is not verified.** Whoever created the account may not own
+  the address: an admin who created it, or someone who redeemed an invitation they
+  wrote. If it were linked, the address's real owner would sign in to an account
+  its creator may still hold a session for (pre-account hijacking).
 - **The user has a password.** Anyone could have created that account with
   someone else's address and a password of their choosing, then waited for the
   owner to sign in with Google (pre-account hijacking). The owner proves they hold

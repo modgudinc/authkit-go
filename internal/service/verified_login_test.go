@@ -169,3 +169,11 @@ func TestProviderEmail(t *testing.T) {
 		t.Fatalf("an empty email is allowed: %q, %v", got, err)
 	}
 }
+
+func TestMarkEmailVerifiedRequiresUser(t *testing.T) {
+	// A nil repository proves the refusal happens before a query.
+	err := NewUserService(nil, nil).MarkEmailVerified(context.Background(), "")
+	if !errors.Is(err, model.ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+}

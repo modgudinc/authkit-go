@@ -65,6 +65,7 @@ func verifiedKit(t *testing.T, db *sql.DB, mode authkit.SessionMode, m metrics.M
 		},
 		APIKeyConfig:   authkit.APIKeyConfig{HMACSecret: "integration-api-hmac-secret-at-least-32-bytes"},
 		PasswordConfig: authkit.PasswordConfig{BcryptCost: 4},
+		OTPConfig:      authkit.OTPConfig{HMACSecret: "integration-otp-hmac-secret-at-least-32-bytes"},
 		SessionConfig:  authkit.SessionConfig{Mode: mode, Namespace: namespace, AbsoluteLifetime: 2 * time.Hour},
 		Metrics:        m,
 	})
@@ -83,7 +84,7 @@ func verifiedFixture(t *testing.T, mode authkit.SessionMode) (*sql.DB, *authkit.
 	db.SetMaxOpenConns(12)
 	t.Cleanup(func() { applyMigration(t, db, "000001_identity_schema.down.sql"); _ = db.Close() })
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 	if mode != authkit.SessionDisabled {
 		applyMigration(t, db, "000002_installation_sessions.up.sql")
 		applyMigration(t, db, "000003_session_sign_in.up.sql")
@@ -382,7 +383,7 @@ func TestSessionSignInMigration(t *testing.T) {
 	t.Cleanup(func() { applyMigration(t, db, "000001_identity_schema.down.sql"); _ = db.Close() })
 	ctx := context.Background()
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 	applyMigration(t, db, "000002_installation_sessions.up.sql")
 	repo := repository.New(db, db)
 	userID := createTenantAndUser(t, ctx, &repo, "sessions.test")

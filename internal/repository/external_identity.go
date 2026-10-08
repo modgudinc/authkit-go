@@ -32,6 +32,9 @@ const externalIdentityColumns = "provider, subject, user_id, email, email_verifi
 // Reasons ResolveExternalIdentity refuses to link a sign-in to the user that owns
 // its verified email.
 const (
+	// LinkRefusedEmailUnverified: authkit has no record that the user proved they own
+	// the address (users.email_verified_at), so whoever created the account may not.
+	LinkRefusedEmailUnverified = "email_unverified"
 	// LinkRefusedHasPassword: the user has a password. Whoever created the account
 	// may not own the email (pre-account hijacking), so the owner links it instead.
 	LinkRefusedHasPassword = "has_password"
@@ -92,10 +95,12 @@ func isUniqueViolation(err error) bool {
 //  1. (provider, subject) is already linked: that user. The link's email snapshot
 //     and last_sign_in_at are updated; the user's own email never changes.
 //  2. Otherwise only a verified email may find a user (case-insensitively). It is
-//     linked when the user has no password and no other account at this provider;
-//     otherwise a *LinkRefusedError (model.ErrIdentityLinkRequired) changes nothing.
-//  3. No user has the email: with CreateUser, a user without a password is created
-//     and linked; without it, model.ErrNotFound.
+//     linked when the user's own email is verified, the user has no password, and
+//     the user has no other account at this provider; otherwise a
+//     *LinkRefusedError (model.ErrIdentityLinkRequired) changes nothing.
+//  3. No user has the email: with CreateUser, a user without a password is created,
+//     with its email marked verified (the provider verified it), and linked;
+//     without it, model.ErrNotFound.
 //
 // Without a verified email, steps 2 and 3 return model.ErrNotFound, or
 // model.ErrEmailNotVerified when CreateUser was asked for, so an unverified address
@@ -152,6 +157,9 @@ func (r *Repository) resolveExternalIdentityOnce(ctx context.Context, p ResolveE
 		" FROM {{schema}}.users WHERE lower(email)=lower($1) FOR UPDATE"), p.Email))
 	switch {
 	case err == nil:
+		if !user.HasVerifiedEmail() {
+			return nil, &LinkRefusedError{Reason: LinkRefusedEmailUnverified}
+		}
 		if user.HasPassword() {
 			return nil, &LinkRefusedError{Reason: LinkRefusedHasPassword}
 		}
@@ -190,7 +198,8 @@ func (r *Repository) resolveExternalIdentityOnce(ctx context.Context, p ResolveE
 }
 
 // insertPasswordlessUser creates a user with no password (an empty password_hash)
-// inside tx and returns the stored row.
+// and a verified email inside tx, and returns the stored row. Only call it for an
+// address a provider verified.
 func (r *Repository) insertPasswordlessUser(ctx context.Context, tx *sql.Tx, email, displayName string, now time.Time) (*model.User, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -199,9 +208,9 @@ func (r *Repository) insertPasswordlessUser(ctx context.Context, tx *sql.Tx, ema
 	if _, err := tx.ExecContext(ctx, r.q(`
 		INSERT INTO {{schema}}.users (
 			id, email, password_hash, display_name, token_version,
-			is_enabled, is_locked, failed_login_count, created_at, updated_at
+			is_enabled, is_locked, failed_login_count, created_at, updated_at, email_verified_at
 		)
-		VALUES ($1, $2, '', $3, 0, true, false, 0, $4, $4)`), id.String(), email, displayName, now); err != nil {
+		VALUES ($1, $2, '', $3, 0, true, false, 0, $4, $4, $4)`), id.String(), email, displayName, now); err != nil {
 		return nil, err
 	}
 	return scanUser(tx.QueryRowContext(ctx, r.q("SELECT "+userColumns+" FROM {{schema}}.users WHERE id=$1"), id.String()))

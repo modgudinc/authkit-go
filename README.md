@@ -13,6 +13,7 @@ A Go library for identity and authentication management built on a **decoupled-i
 - **Invitation System**: Invitation-based onboarding with secure access codes (reuses an existing global identity for the invited email, or creates one)
 - **OTP Verification**: One-Time Password generation and email verification
 - **Verified Sign-In**: `VerifiedLoginService.OpenSession` opens a session for a user your app verified another way (OAuth/OIDC, email link, passkey, device code), recording the sign-in method; users may have no password
+- **Email Verification State**: `User.EmailVerifiedAt`, set by `UserService.MarkEmailVerified` after a code or link proves the address; with `OTPService` and `OpenSession` it gives passwordless sign-in by emailed code
 - **Linked Sign-In Identities**: `ExternalIdentityService` maps a provider account (provider + subject) to one user, linking by verified email only under safe rules; bring your own OAuth/OIDC client
 - **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 string identifiers
 - **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`LoginByEmail`/`RefreshToken`/OTP generation
@@ -1670,7 +1671,7 @@ plain durations:
 The library currently requires PostgreSQL with the `authkit` schema containing the following tables:
 
 - **`authkit.tenants`**: Organization definitions with allowed email domains
-- **`authkit.users`**: Global identity profiles. **No `tenant_id` and no `roles` columns**; email is globally unique via a UNIQUE index on `lower(email)`. Carries the identity `token_version`.
+- **`authkit.users`**: Global identity profiles. **No `tenant_id` and no `roles` columns**; email is globally unique via a UNIQUE index on `lower(email)`. Carries the identity `token_version`, and `email_verified_at` (migration `000005`, required).
 - **`authkit.memberships`**: The user↔tenant graph. PK `(user_id, tenant_id)`, a `roles` JSONB column (opaque strings), a per-membership `token_version`, a `status` (`active`/`suspended`), and FKs to `users`/`tenants` that CASCADE on delete.
 - **`authkit.invitations`**: Access codes that grant a membership on signup
 - **`authkit.api_keys`**: Tenant-scoped API keys (HMAC-SHA256 hashed); `created_by` is a global user id

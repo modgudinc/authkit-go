@@ -15,8 +15,9 @@ var (
 var (
 	// ErrIdentityLinkRequired is returned by ExternalIdentityService.Resolve when a
 	// user already exists for the provider's verified email but authkit cannot
-	// safely link the new sign-in identity to them on its own: the user has a
-	// password, or is already linked to a different account at the same provider.
+	// safely link the new sign-in identity to them on its own: the user's own email
+	// is not verified, the user has a password, or the user is already linked to a
+	// different account at the same provider.
 	// Have the person sign in to the existing user first, then call Link with that
 	// user's id. Nothing is changed. Map it to HTTP 409.
 	ErrIdentityLinkRequired = errors.New("authkit: sign-in identity must be linked by the account owner")

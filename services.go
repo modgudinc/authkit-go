@@ -260,6 +260,10 @@ type UserService interface {
 	Unlock(ctx context.Context, userID string) error
 	SetPassword(ctx context.Context, userID, hashedPassword string) error
 	VerifyPassword(ctx context.Context, userID string) (string, error)
+	// MarkEmailVerified records that the user proved they own their email address
+	// (a code or link sent to it). Needs migration 000005. See
+	// docs/verified-sign-in.md.
+	MarkEmailVerified(ctx context.Context, userID string) error
 	UpdateLastLogin(ctx context.Context, userID string) error
 	IncrementFailedLoginCount(ctx context.Context, userID string) error
 	IncrementTokenVersion(ctx context.Context, userID string) error

@@ -49,7 +49,7 @@ func sessionFixture(t *testing.T, mode authkit.SessionMode, migrate bool) (*sql.
 	db.SetMaxOpenConns(12)
 	t.Cleanup(func() { applyMigration(t, db, "000001_identity_schema.down.sql"); _ = db.Close() })
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 	if migrate {
 		applyMigration(t, db, "000002_installation_sessions.up.sql")
 		applyMigration(t, db, "000003_session_sign_in.up.sql")

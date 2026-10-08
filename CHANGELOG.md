@@ -22,8 +22,9 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `ExternalIdentityService` (`Resolve`, `Link`, `Unlink`, `Get`, `ListByUser`) links
   an outside provider account, keyed by provider and the provider's subject, to one
   user. `Resolve` finds a returning sign-in by subject, links a first sign-in by a
-  provider-verified email only to a user with no password and no other account at
-  that provider, and can create a passwordless user. The OAuth/OIDC client protocol
+  provider-verified email only to a user whose own email is verified, who has no
+  password and who has no other account at that provider, and can create a
+  passwordless user. The OAuth/OIDC client protocol
   stays with the application.
 - Sentinels `ErrIdentityLinkRequired`, `ErrIdentityAlreadyLinked` and
   `ErrEmailNotVerified`; counters `authkit_verified_login_total{method}` and
@@ -32,26 +33,38 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 - Migrations `000003_session_sign_in` (session sign-in method, sessions without an
   installation) and `000004_external_identities`. Guide:
   [docs/verified-sign-in.md](docs/verified-sign-in.md).
+- Email verification state: `User.EmailVerifiedAt`, `User.HasVerifiedEmail` and
+  `UserService.MarkEmailVerified` (migration `000005_email_verification`). Users
+  that `Resolve` creates start verified; invitation acceptance and
+  `UserService.Create` do not set it. The guide shows passwordless sign-in by
+  emailed code with `OTPService`, `MarkEmailVerified` and `OpenSession`.
 
 ### Security
 
 - Password login for a user without a password fails like a wrong password (dummy
   bcrypt comparison, `ErrInvalidCredentials`) and does not count toward the
   failed-login lockout. `ChangePassword` refuses such a user.
-- `Resolve` refuses to link by email to an account that has a password
-  (pre-account hijacking) or is linked to another account at the same provider
-  (recycled addresses), and an unverified email never finds an account.
+- `Resolve` refuses to link by email to an account whose own email is not
+  verified or that has a password (pre-account hijacking), or that is linked to
+  another account at the same provider (recycled addresses), and an unverified
+  email never finds an account. The `email_unverified` reason joins
+  `authkit_identity_link_refused_total`.
 - `ValidateInstallationJWT` refuses a session that has no installation.
 
 ### Upgrade
 
+- Every application must apply migration 000005 before deploying this release:
+  every user query reads `users.email_verified_at`. It only adds a nullable column,
+  so it is safe while the previous release runs. Existing users start unverified.
 - Applications with session support enabled (Optional or Required) must apply
   migration 000003 before deploying this release; session queries read its new
   column. It is safe to apply while the previous release runs. Disabled mode needs
-  neither new migration unless it uses `ExternalIdentityService` (000004).
+  neither 000003 nor 000004 unless it uses `ExternalIdentityService` (000004).
 - Existing interfaces, request and response types are unchanged; the new calls are
-  on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`).
-  `model.Session` gains `SignInMethod`.
+  on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`),
+  except `UserService.MarkEmailVerified`, which, like 0.20.1's `MembershipService`
+  additions, extends an interface authkit returns. `model.Session` gains
+  `SignInMethod` and `model.User` gains `EmailVerifiedAt`.
 
 ## [0.20.2] - 2026-09-07
 

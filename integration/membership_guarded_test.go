@@ -30,7 +30,7 @@ func setupGuardedMembership(t *testing.T) (context.Context, authkit.MembershipSe
 		_ = db.Close()
 	})
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	ms := newIntegrationAuthKit(t, db).MembershipService()
