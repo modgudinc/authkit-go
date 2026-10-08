@@ -14,6 +14,7 @@ A Go library for identity and authentication management built on a **decoupled-i
 - **OTP Verification**: One-Time Password generation and email verification
 - **Verified Sign-In**: `VerifiedLoginService.OpenSession` opens a session for a user your app verified another way (OAuth/OIDC, email link, passkey, device code), recording the sign-in method; users may have no password
 - **Email Verification State**: `User.EmailVerifiedAt`, set by `UserService.MarkEmailVerified` after a code or link proves the address; with `OTPService` and `OpenSession` it gives passwordless sign-in by emailed code
+- **Asymmetric Signing Keys**: Optional Ed25519, ECDSA P-256 or RSA access-token signing (any `crypto.Signer`, KMS keys included) with key ids, a published JSON Web Key Set, and rotation without logging anyone out
 - **Linked Sign-In Identities**: `ExternalIdentityService` maps a provider account (provider + subject) to one user, linking by verified email only under safe rules; bring your own OAuth/OIDC client
 - **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 string identifiers
 - **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`LoginByEmail`/`RefreshToken`/OTP generation
@@ -35,6 +36,7 @@ go get github.com/modgudinc/authkit-go
 - [Troubleshooting](docs/troubleshooting.md)
 - [Optional installation-bound sessions](docs/installation-sessions.md)
 - [Verified sign-in and linked identities (OAuth/OIDC, email links, device codes)](docs/verified-sign-in.md)
+- [Asymmetric signing keys, the key set, and key rotation](docs/signing-keys.md)
 
 ## Quick Start
 
@@ -1558,7 +1560,8 @@ identity, err := authkit.New(authkit.Config{
         IdentitySchema: "authkit",        // Optional: defaults to "authkit"
     },
     JWTConfig: authkit.JWTConfig{
-        AccessSecret:           os.Getenv("JWT_ACCESS_SECRET"),          // Required
+        AccessSecret:           os.Getenv("JWT_ACCESS_SECRET"),          // Required unless SigningKey is set
+        // SigningKey: &authkit.SigningKey{Key: key},                   // Optional: asymmetric key, see docs/signing-keys.md
         RefreshTokenHMACSecret: os.Getenv("REFRESH_TOKEN_HMAC_SECRET"),  // Required
         AccessExpiry:           15 * time.Minute,                        // Optional: defaults to 15 minutes
         RefreshExpiry:          7 * 24 * time.Hour,                      // Optional: defaults to 7 days
@@ -1618,7 +1621,8 @@ what the snippets use.
 |----------|---------|----------|-------|
 | `RW_DATABASE_URL` | `DBConnection.IdentityRWDB` | Yes | PostgreSQL DSN for the read-write (primary) pool. Append `?statement_timeout=3000&lock_timeout=3000` (see "Performance Considerations"). |
 | `RO_DATABASE_URL` | `DBConnection.IdentityRODB` | Yes | DSN for the read-only (replica) pool. May be the same DSN as RW for a single-database deployment. |
-| `JWT_ACCESS_SECRET` | `JWTConfig.AccessSecret` | Yes | Access-token signing secret. ≥ 32 bytes of CSPRNG output. |
+| `JWT_ACCESS_SECRET` | `JWTConfig.AccessSecret` | Unless a signing key is set | Access-token signing secret (HS256). ≥ 32 bytes of CSPRNG output. |
+| `JWT_SIGNING_KEY` | `JWTConfig.SigningKey` (via `authkit.ParsePrivateKeyPEM`) | No | PEM private key (Ed25519, P-256 or RSA ≥ 2048) that signs access tokens instead. See [docs/signing-keys.md](docs/signing-keys.md). |
 | `REFRESH_TOKEN_HMAC_SECRET` | `JWTConfig.RefreshTokenHMACSecret` | Yes | HMAC secret for refresh-token storage. ≥ 32 bytes. |
 | `API_KEY_HMAC_SECRET` | `APIKeyConfig.HMACSecret` | Yes | HMAC secret for API-key storage. ≥ 32 bytes. |
 | `OTP_HMAC_SECRET` | `OTPConfig.HMACSecret` | When `OTPService` is used | HMAC secret for OTP storage. ≥ 32 bytes. Omit only if you never call `OTPService`. |
@@ -1638,13 +1642,15 @@ code rather than via environment.
 
 - **`IdentityRWDB`**: Database connection for write operations (required)
 - **`IdentityRODB`**: Database connection for read operations (required)
-- **`JWTConfig.AccessSecret`**: Secret for access token signing (required)
+- **`JWTConfig.AccessSecret`**: Secret for access token signing (required unless `JWTConfig.SigningKey` is set)
 - **`JWTConfig.RefreshTokenHMACSecret`**: Secret for HMAC-SHA256 hashing of refresh tokens in storage (required)
 - **`APIKeyConfig.HMACSecret`**: Secret for API key hashing (required)
 - **`OTPConfig.HMACSecret`**: Secret for HMAC-SHA256 hashing of OTP codes in storage (required **when `OTPService` is used**; validated for length at construction when set, and `Generate`/`Validate` return `ErrOTPSecretMissing` if absent)
 
 ### Optional Configuration
 
+- **`JWTConfig.SigningKey`**: Asymmetric key that signs access tokens instead of `AccessSecret`, stamping its key id; publish its public half with `AuthKit.JSONWebKeySet` (see [docs/signing-keys.md](docs/signing-keys.md))
+- **`JWTConfig.VerificationKeys`**: Further public keys accepted during a key switch or rotation
 - **`JWTConfig.AccessExpiry`**: Access token expiration (default: 15 minutes)
 - **`JWTConfig.RefreshExpiry`**: Refresh token expiration (default: 7 days)
 - **`PasswordConfig.BcryptCost`**: Bcrypt cost factor (default: 12, range: 4-31)

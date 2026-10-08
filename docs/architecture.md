@@ -79,7 +79,8 @@ The provided migration creates the default `authkit` schema. Applications using 
 Callers are responsible for:
 
 - Using TLS for all network traffic.
-- Providing high-entropy secrets for JWT signing, API key HMACs, refresh-token HMACs, and secret encryption.
+- Providing high-entropy secrets for JWT signing (or an asymmetric signing key), API key HMACs, refresh-token HMACs, and secret encryption.
+- Serving `AuthKit.JSONWebKeySet` when other services check access tokens with the public key, and accepting that those services do not see revocation (only `AuthService.ValidateJWT` does).
 - Storing secrets outside source control.
 - Enforcing application-specific authorization and role policy.
 - Running the OAuth/OIDC client protocol (state, nonce, PKCE, ID-token
@@ -98,6 +99,7 @@ Library guarantees:
 - OTPs are stored only as a keyed HMAC-SHA256 (never plaintext); validation consumes the code atomically within a transaction (`SELECT ... FOR UPDATE`, then `DELETE`).
 - Secrets are encrypted with AES-256-GCM before storage.
 - Passwords are hashed with bcrypt.
+- Access tokens are checked only with configured keys, each in its own algorithm: a token's `kid` must name a configured key, and only HS256 goes without one (see [signing-keys.md](signing-keys.md)).
 
 ## Non-Goals
 

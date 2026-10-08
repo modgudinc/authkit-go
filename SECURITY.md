@@ -34,7 +34,11 @@ Include:
 Applications using this library must provide and protect several independent
 secrets:
 
-- `JWTConfig.AccessSecret`: signs access-token JWTs
+- `JWTConfig.AccessSecret`: signs access-token JWTs (HS256), unless
+  `JWTConfig.SigningKey` is set
+- `JWTConfig.SigningKey`: an optional asymmetric private key that signs access tokens
+  instead. Its public half, and `JWTConfig.VerificationKeys`, are not secrets. A key
+  held in a KMS or an HSM works as a `crypto.Signer`
 - `JWTConfig.RefreshTokenHMACSecret`: hashes refresh tokens before storage
 - `APIKeyConfig.HMACSecret`: hashes API keys before storage
 - `OTPConfig.HMACSecret`: hashes OTP codes before storage (required when OTPService
@@ -107,7 +111,11 @@ Recommended cadence:
 
 Rotation impact:
 
-- Rotating `JWTConfig.AccessSecret` invalidates all existing access tokens.
+- Rotating `JWTConfig.AccessSecret` invalidates all existing access tokens. A
+  `JWTConfig.SigningKey` rotates without that, through `VerificationKeys`: see
+  [docs/signing-keys.md](docs/signing-keys.md). A leaked signing key should be removed
+  from `SigningKey` and `VerificationKeys` at once; its tokens stop validating
+  immediately.
 - Rotating `RefreshTokenHMACSecret` makes existing stored refresh-token hashes
   unverifiable. Revoke all refresh tokens and require re-login.
 - Rotating `APIKeyConfig.HMACSecret` makes existing stored API key hashes
