@@ -8,6 +8,7 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -229,11 +230,15 @@ func TestLinkAndUnlink(t *testing.T) {
 		}
 	}
 	links, err := svc.ListByUser(ctx, adminID)
-	if err != nil || len(links) != 3 {
+	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if got := []string{links[0].Subject, links[1].Subject, links[2].Subject}; got[0] != "9" || got[1] != "s-1" || got[2] != "s-2" {
-		t.Fatalf("list order: %v", got)
+	var subjects []string
+	for _, link := range links {
+		subjects = append(subjects, link.Subject)
+	}
+	if want := []string{"9", "s-1", "s-2"}; !slices.Equal(subjects, want) {
+		t.Fatalf("list order: %v, want %v", subjects, want)
 	}
 	none, err := svc.ListByUser(ctx, "01a11a39-0000-7000-8000-000000000000")
 	if err != nil || none == nil || len(none) != 0 {
