@@ -143,6 +143,16 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 		}
 	}
 
+	// No password to check: the user signs in only through OpenSession. Equalize
+	// timing as for the paths above and do NOT count a failed attempt, so password
+	// guesses against a passwordless account cannot lock its owner out.
+	if !user.HasPassword() {
+		s.passwordService.DummyVerify(password)
+		s.logger.Warn(ctx, "Login failed: account has no password", "user_id", user.ID, "email", maskEmail(email))
+		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "no_password")
+		return nil, model.ErrInvalidCredentials
+	}
+
 	// Verify password.
 	if err := s.passwordService.VerifyPassword(password, user.PasswordHash); err != nil {
 		s.logger.Warn(ctx, "Password verification failed", "user_id", user.ID, "email", maskEmail(email))
@@ -284,36 +294,12 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 		return nil, err
 	}
 
-	// Load the identity's workspaces. Determine the active selection BEFORE opening the
-	// session so an explicit-but-unauthorized workspace is rejected without minting a
-	// (then-orphaned) refresh token.
-	memberships, err := s.repo.ListMembershipsByUser(ctx, user.ID)
+	// Determine the active selection BEFORE opening the session so an
+	// explicit-but-unauthorized workspace is rejected without minting a (then-orphaned)
+	// refresh token.
+	memberships, selected, err := s.selectWorkspace(ctx, user.ID, req.TenantID)
 	if err != nil {
-		return nil, sanitizeError(ctx, s.logger, "load memberships", err)
-	}
-
-	var selected *model.Membership
-	if req.TenantID != "" {
-		// Authorize the explicitly requested workspace against the PRIMARY (matching
-		// Login / MintWorkspaceToken) so a just-committed revoke/suspend is observed
-		// immediately and a token is never minted for a workspace the user just left.
-		// The replica-sourced list above is informational only. A missing/suspended
-		// membership surfaces as ErrNoActiveMembership.
-		selected, err = s.activeMembership(ctx, user.ID, req.TenantID)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// No explicit workspace: auto-select iff the identity has exactly one active one.
-		var active []*model.Membership
-		for _, m := range memberships {
-			if m.IsActive() {
-				active = append(active, m)
-			}
-		}
-		if len(active) == 1 {
-			selected = active[0]
-		}
+		return nil, err
 	}
 
 	// Open the identity session (refresh token) regardless of workspace selection.
@@ -346,6 +332,40 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 	s.logger.Info(ctx, "User login-by-email successful", "user_id", user.ID, "workspace_selected", selected != nil)
 	incMetric(s.metrics, metrics.CounterLoginSuccess)
 	return resp, nil
+}
+
+// selectWorkspace loads the identity's memberships and picks the workspace a login
+// mints its first access token for: tenantID when given (it must be an active
+// membership, else ErrNoActiveMembership), otherwise the only active membership, if
+// there is exactly one. selected is nil when the caller must choose.
+func (s *AuthService) selectWorkspace(ctx context.Context, userID, tenantID string) ([]*model.Membership, *model.Membership, error) {
+	memberships, err := s.repo.ListMembershipsByUser(ctx, userID)
+	if err != nil {
+		return nil, nil, sanitizeError(ctx, s.logger, "load memberships", err)
+	}
+	if tenantID != "" {
+		// Authorize the explicitly requested workspace against the PRIMARY (matching
+		// Login / MintWorkspaceToken) so a just-committed revoke/suspend is observed
+		// immediately and a token is never minted for a workspace the user just left.
+		// The replica-sourced list above is informational only. A missing/suspended
+		// membership surfaces as ErrNoActiveMembership.
+		selected, err := s.activeMembership(ctx, userID, tenantID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return memberships, selected, nil
+	}
+	// No explicit workspace: auto-select iff the identity has exactly one active one.
+	var active []*model.Membership
+	for _, m := range memberships {
+		if m.IsActive() {
+			active = append(active, m)
+		}
+	}
+	if len(active) == 1 {
+		return memberships, active[0], nil
+	}
+	return memberships, nil, nil
 }
 
 // MintWorkspaceToken mints a fresh workspace-scoped access token for an existing
@@ -629,6 +649,12 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		return model.ErrAccountLocked
 	}
 
+	// A user without a password has no old password to match; the application sets a
+	// first password with UserService.SetPassword after verifying the person itself.
+	if !user.HasPassword() {
+		s.logger.Warn(ctx, "Password change rejected: account has no password", "user_id", req.UserID)
+		return fmt.Errorf("account has no password: %w", model.ErrIncorrectPassword)
+	}
 	if err := s.passwordService.VerifyPassword(req.OldPassword, user.PasswordHash); err != nil {
 		s.logger.Warn(ctx, "Old password verification failed", "user_id", req.UserID)
 		return fmt.Errorf("incorrect old password: %w", model.ErrIncorrectPassword)

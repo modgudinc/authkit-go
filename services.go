@@ -24,6 +24,27 @@ type InstallationAuthService interface {
 	ValidateInstallationJWT(context.Context, string) (*model.InstallationClaims, error)
 }
 
+// VerifiedLoginService opens sessions for users the application has verified
+// itself: through an OAuth or OIDC provider, a signed email link, an OTP, a
+// passkey or an approved device code. authkit checks no credential here, so
+// OpenSession must only ever receive a user id from the application's own
+// verification, never one taken from a request. It is additive, like
+// InstallationAuthService. See docs/verified-sign-in.md.
+type VerifiedLoginService interface {
+	OpenSession(ctx context.Context, req model.OpenSessionRequest) (*model.OpenSessionResponse, error)
+}
+
+// ExternalIdentityService links accounts at outside sign-in providers to authkit
+// users and finds the user for a provider sign-in the application has verified.
+// It does not implement OAuth or OIDC. Requires migration 000004.
+type ExternalIdentityService interface {
+	Resolve(ctx context.Context, req model.ResolveExternalIdentityRequest) (*model.ResolvedExternalIdentity, error)
+	Link(ctx context.Context, req model.LinkExternalIdentityRequest) (*model.ExternalIdentity, error)
+	Unlink(ctx context.Context, userID, provider, subject string) error
+	Get(ctx context.Context, provider, subject string) (*model.ExternalIdentity, error)
+	ListByUser(ctx context.Context, userID string) ([]*model.ExternalIdentity, error)
+}
+
 // SessionService is scoped to Config.SessionConfig.Namespace. The embedding
 // application must authorize the actor before passing a target userID.
 // List/Get return records, including expired/revoked ones, not authentication.
@@ -255,6 +276,8 @@ type UserService interface {
 // consumer's call site.
 var (
 	_ InstallationAuthService = (*service.AuthService)(nil)
+	_ VerifiedLoginService    = (*service.AuthService)(nil)
+	_ ExternalIdentityService = (*service.ExternalIdentityService)(nil)
 	_ SessionService          = (*service.SessionService)(nil)
 	_ APIKeyService           = (*service.APIKeyService)(nil)
 	_ AuthService             = (*service.AuthService)(nil)

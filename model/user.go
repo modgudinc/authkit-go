@@ -8,6 +8,7 @@ import "time"
 // User is the GLOBAL identity: it carries no tenant_id and no roles — those
 // live on Membership. email is globally unique. TokenVersion is the identity-level
 // token version (credential events invalidate every workspace's access tokens).
+// An empty PasswordHash means the user has no password (see HasPassword).
 type User struct {
 	ID           string `json:"id" db:"id"`
 	Email        string `json:"email" db:"email"`
@@ -30,8 +31,15 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
+// HasPassword reports whether the user can sign in with a password. A user
+// without one signs in only through VerifiedLoginService.OpenSession (after the
+// application verifies them some other way); password login always fails for
+// them with ErrInvalidCredentials and never counts toward the failed-login lockout.
+func (u *User) HasPassword() bool { return u.PasswordHash != "" }
+
 // CreateUserRequest creates a GLOBAL identity. No tenant or roles — grant tenant
 // access separately via MembershipService.Add. Email must be globally unique.
+// Leave PasswordHash empty to create a user without a password.
 type CreateUserRequest struct {
 	Email        string
 	PasswordHash string

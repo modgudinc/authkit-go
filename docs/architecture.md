@@ -20,14 +20,20 @@
 Core tables:
 
 - `tenants`: Tenant records and allowed email domains.
-- `users`: Global user identities — **no** `tenant_id`, **no** `roles`. Email is globally unique, case-insensitively (`UNIQUE (lower(email))`). `token_version` is the identity-level token version (credential events invalidate every workspace's access tokens).
+- `users`: Global user identities — **no** `tenant_id`, **no** `roles`. Email is globally unique, case-insensitively (`UNIQUE (lower(email))`). `token_version` is the identity-level token version (credential events invalidate every workspace's access tokens). An empty `password_hash` means the user has no password and signs in only through a verified sign-in.
 - `memberships`: The `user ↔ tenant` graph — which identity belongs to which tenant, with `roles` (opaque JSONB strings the embedding app interprets), a per-membership `token_version` (a role change or revoke invalidates only that workspace's access tokens), and a `status` (`active` / `suspended`). Primary key `(user_id, tenant_id)`; both foreign keys cascade on delete.
 - `refresh_tokens`: Stored refresh token hashes and session metadata. The refresh token is the **identity session** (user-scoped, no tenant); one login = one family.
-- `sessions` (optional migration 000002): Installation-bound login records scoped
-  by application namespace and user. Their IDs are refresh-family IDs and signed
-  `sid` claims. Records carry independent revocation and idle/absolute expiry;
-  consuming a refresh token does not revoke its session. See
+- `sessions` (optional migrations 000002 and 000003): Login records scoped by
+  application namespace and user, bound to an app installation or (for sessions
+  opened by `VerifiedLoginService.OpenSession`) to none, with the sign-in method
+  that opened them. Their IDs are refresh-family IDs and signed `sid` claims.
+  Records carry independent revocation and idle/absolute expiry; consuming a
+  refresh token does not revoke its session. See
   [installation sessions](installation-sessions.md).
+- `external_identities` (optional migration 000004): Links from an outside sign-in
+  provider's account, keyed by `(provider, subject)`, to one user, with the email
+  the provider last reported. Cascades on user delete. See
+  [verified sign-in](verified-sign-in.md).
 - `api_keys`: Tenant-scoped API key hashes and metadata (`created_by` is a global user id).
 - `invitations`: Invitation codes, target email, roles, expiry, and usage limits.
 - `verification_codes`: OTPs stored as a keyed HMAC-SHA256 (`code_hash`), never in plaintext, plus purpose, failed-attempt count, expiry, and creation time; keyed by `(email, purpose)` globally (email is a global identity, so an OTP is identity-level, not tenant-scoped).
@@ -76,6 +82,10 @@ Callers are responsible for:
 - Providing high-entropy secrets for JWT signing, API key HMACs, refresh-token HMACs, and secret encryption.
 - Storing secrets outside source control.
 - Enforcing application-specific authorization and role policy.
+- Running the OAuth/OIDC client protocol (state, nonce, PKCE, ID-token
+  verification) and deciding which providers' email verification to trust, before
+  calling `ExternalIdentityService`; and passing `VerifiedLoginService.OpenSession`
+  only user ids from their own completed verification.
 - Sending OTPs/invitations through a trusted delivery channel.
 - Running cleanup jobs for expired API keys, OTPs, invitations, and refresh tokens.
 - Configuring branch protection and release controls for their deployment workflow.
@@ -93,6 +103,8 @@ Library guarantees:
 
 - HTTP middleware, routing, and cookie/session transport.
 - Email/SMS delivery.
-- OAuth/OIDC provider implementation.
+- OAuth/OIDC provider (authorization server) implementation, and the OAuth/OIDC
+  client protocol itself: applications use a client library and pass the verified
+  result to `ExternalIdentityService` and `VerifiedLoginService`.
 - Role/permission authorization engine.
 - Schema migration runner abstraction.

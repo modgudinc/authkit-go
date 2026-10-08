@@ -12,6 +12,8 @@ A Go library for identity and authentication management built on a **decoupled-i
 - **API Key Management**: Secure API key generation and validation with HMAC-SHA256 hashing
 - **Invitation System**: Invitation-based onboarding with secure access codes (reuses an existing global identity for the invited email, or creates one)
 - **OTP Verification**: One-Time Password generation and email verification
+- **Verified Sign-In**: `VerifiedLoginService.OpenSession` opens a session for a user your app verified another way (OAuth/OIDC, email link, passkey, device code), recording the sign-in method; users may have no password
+- **Linked Sign-In Identities**: `ExternalIdentityService` maps a provider account (provider + subject) to one user, linking by verified email only under safe rules; bring your own OAuth/OIDC client
 - **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 string identifiers
 - **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`LoginByEmail`/`RefreshToken`/OTP generation
 - **Flexible Logging & Metrics**: Dependency-injected, context-aware `Logger` and an optional `Metrics` counter sink
@@ -31,6 +33,7 @@ go get github.com/modgudinc/authkit-go
 - [Common patterns](docs/patterns.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Optional installation-bound sessions](docs/installation-sessions.md)
+- [Verified sign-in and linked identities (OAuth/OIDC, email links, device codes)](docs/verified-sign-in.md)
 
 ## Quick Start
 
@@ -175,8 +178,9 @@ mode selection, enrollment contract and rollout instructions.
 
 authkit uses a **decoupled-identity** model. The two concepts are deliberately separate:
 
-- A **user is a global identity** — a globally-unique, case-insensitive email plus a
-  password. It carries **no** tenant and **no** roles. There is exactly one identity per
+- A **user is a global identity** — a globally-unique, case-insensitive email plus an
+  optional password (see [verified sign-in](docs/verified-sign-in.md) for users who
+  sign in another way). It carries **no** tenant and **no** roles. There is exactly one identity per
   email across the whole system (uniqueness is enforced on `lower(email)`). Identities
   are managed by `UserService`.
 - A **membership** is a `(user, tenant)` row that grants the identity access to one
@@ -1674,6 +1678,8 @@ The library currently requires PostgreSQL with the `authkit` schema containing t
 - **`authkit.verification_codes`**: OTP codes keyed by `(email, purpose)` (no `tenant_id`), stored as a keyed HMAC-SHA256 (`code_hash`), never plaintext
 - **`authkit.provider_keys`**: Encrypted provider secrets (tenant-scoped)
 - **`authkit.user_status_changes`**: Account status-change audit trail (enable/disable/lock/unlock), written in the same transaction as the change; read via `UserService.StatusHistory`, pruned via `UserService.CleanupStatusChanges`
+- **`authkit.sessions`** (optional, migrations `000002` and `000003`): Login records for installation-bound and verified sign-in sessions, with the sign-in method; see [installation sessions](docs/installation-sessions.md)
+- **`authkit.external_identities`** (optional, migration `000004`): Outside sign-in accounts keyed by `(provider, subject)`, each linked to one user; see [verified sign-in](docs/verified-sign-in.md)
 
 Migration scripts are included in [`migrations/`](migrations/). Migration `000001` is
 the single consolidated schema (edited in place across `0.x`); a fresh `migrate up`
@@ -1827,7 +1833,10 @@ Exported sentinels include `ErrInvalidCredentials`, `ErrAccountDisabled`,
 `ErrOTPSecretMissing`, `ErrInvalidAPIKey`, `ErrIncorrectPassword`,
 `ErrInvitationInvalid`, `ErrUserExists`, `ErrPasswordTooWeak`,
 `ErrSecretEncryptionKeyMissing`, `ErrRateLimited`, `ErrInvalidInput`,
-`ErrValueTooLong`, `ErrNotFound`, and `ErrInternal`. `ErrValueTooLong` and
+`ErrValueTooLong`, `ErrNotFound`, and `ErrInternal`, plus the session sentinels in
+[installation sessions](docs/installation-sessions.md) and `ErrIdentityLinkRequired`,
+`ErrIdentityAlreadyLinked` and `ErrEmailNotVerified` from
+[verified sign-in](docs/verified-sign-in.md). `ErrValueTooLong` and
 `ErrInvalidInput` both map to a 400 — the former when a caller-supplied value exceeds
 the column/size limit, the latter when input is otherwise malformed (e.g. tenant
 settings that cannot be serialized to JSON); `ErrRateLimited` maps to a 429 and is
@@ -2053,6 +2062,7 @@ This project is licensed under the Apache License, Version 2.0 - see the [LICENS
 - [x] Account status-change audit trail (`user_status_changes` + `UserService.StatusHistory`)
 - [x] Rate Limiting (pluggable `Config.RateLimiter` consulted by Login/RefreshToken/OTP generation)
 - [x] Metrics hooks (`Config.Metrics`) and health checks (`AuthKit.Ping` / `Config.VerifyConnectivity`)
+- [x] Verified sign-in sessions and linked sign-in identities (OAuth/OIDC client protocol left to the app)
 - [ ] General audit logging beyond status changes (planned)
 - [ ] Key Rotation Support (planned)
 
