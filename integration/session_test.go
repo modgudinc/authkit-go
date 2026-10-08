@@ -10,7 +10,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +52,7 @@ func sessionFixture(t *testing.T, mode authkit.SessionMode, migrate bool) (*sql.
 	applyMigration(t, db, "000001_identity_schema.up.sql")
 	if migrate {
 		applyMigration(t, db, "000002_installation_sessions.up.sql")
+		applyMigration(t, db, "000003_session_sign_in.up.sql")
 	}
 	repo := repository.New(db, db)
 	userID := createTenantAndUser(t, context.Background(), &repo, "sessions.test")
@@ -572,13 +572,8 @@ func TestSessionCustomSchema(t *testing.T) {
 	db := openTestDB(t)
 	t.Cleanup(func() { _, _ = db.Exec("DROP SCHEMA IF EXISTS session_custom CASCADE"); _ = db.Close() })
 	applyCustomSchemaMigration(t, db, "session_custom")
-	migration, err := os.ReadFile("../migrations/000002_installation_sessions.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(strings.ReplaceAll(string(migration), "authkit.", "session_custom.")); err != nil {
-		t.Fatal(err)
-	}
+	applyRenamedMigration(t, db, "000002_installation_sessions.up.sql", "session_custom")
+	applyRenamedMigration(t, db, "000003_session_sign_in.up.sql", "session_custom")
 	repo := repository.NewWithSchema(db, db, "session_custom")
 	userID := createTenantAndUser(t, context.Background(), &repo, "sessions.test")
 	k := sessionKit(t, db, authkit.SessionRequired, "hugin", "session_custom")
@@ -589,6 +584,6 @@ func TestSessionCustomSchema(t *testing.T) {
 	if err := k.SessionService().Revoke(context.Background(), userID, login.Session.ID); err != nil {
 		t.Fatal(err)
 	}
-	_, err = k.AuthService().ValidateJWT(context.Background(), login.AccessToken)
+	_, err := k.AuthService().ValidateJWT(context.Background(), login.AccessToken)
 	requireError(t, err, authkit.ErrSessionRevoked)
 }

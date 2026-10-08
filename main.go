@@ -327,6 +327,20 @@ func (k *AuthKit) InstallationAuthService() InstallationAuthService {
 	return k.newAuthService()
 }
 
+// VerifiedLoginService opens sessions for users the application has verified
+// itself (OAuth/OIDC, email links, OTPs, passkeys, device codes). It works in every
+// session mode; see docs/verified-sign-in.md.
+func (k *AuthKit) VerifiedLoginService() VerifiedLoginService {
+	return k.newAuthService()
+}
+
+// ExternalIdentityService links accounts at outside sign-in providers (Google,
+// GitHub, enterprise OIDC) to users. Requires migration 000004.
+func (k *AuthKit) ExternalIdentityService() ExternalIdentityService {
+	repo := k.repository()
+	return service.NewExternalIdentityService(&repo, k.logger, k.metrics)
+}
+
 // SessionService manages sessions scoped to the configured application namespace.
 // Callers must authorize session-management actions for the supplied user.
 func (k *AuthKit) SessionService() SessionService {

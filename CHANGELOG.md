@@ -8,6 +8,51 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+### Added
+
+- `VerifiedLoginService.OpenSession` opens a session for a user the application has
+  verified itself (an OAuth or OIDC provider, an email link, an OTP, a passkey, an
+  approved device code). It works in every session mode, with or without an
+  installation, applies the login account gates and workspace selection, and
+  records the sign-in method on the session (`Session.SignInMethod`; `"password"`
+  for password logins). Sessions with no installation are allowed in Optional and
+  Required modes.
+- Users without a password: an empty `PasswordHash` in `UserService.Create` or
+  `InvitationService.Accept`, and `User.HasPassword`.
+- `ExternalIdentityService` (`Resolve`, `Link`, `Unlink`, `Get`, `ListByUser`) links
+  an outside provider account, keyed by provider and the provider's subject, to one
+  user. `Resolve` finds a returning sign-in by subject, links a first sign-in by a
+  provider-verified email only to a user with no password and no other account at
+  that provider, and can create a passwordless user. The OAuth/OIDC client protocol
+  stays with the application.
+- Sentinels `ErrIdentityLinkRequired`, `ErrIdentityAlreadyLinked` and
+  `ErrEmailNotVerified`; counters `authkit_verified_login_total{method}` and
+  `authkit_identity_link_refused_total{reason}`; `no_password` reason on
+  `authkit_login_failure_total`.
+- Migrations `000003_session_sign_in` (session sign-in method, sessions without an
+  installation) and `000004_external_identities`. Guide:
+  [docs/verified-sign-in.md](docs/verified-sign-in.md).
+
+### Security
+
+- Password login for a user without a password fails like a wrong password (dummy
+  bcrypt comparison, `ErrInvalidCredentials`) and does not count toward the
+  failed-login lockout. `ChangePassword` refuses such a user.
+- `Resolve` refuses to link by email to an account that has a password
+  (pre-account hijacking) or is linked to another account at the same provider
+  (recycled addresses), and an unverified email never finds an account.
+- `ValidateInstallationJWT` refuses a session that has no installation.
+
+### Upgrade
+
+- Applications with session support enabled (Optional or Required) must apply
+  migration 000003 before deploying this release; session queries read its new
+  column. It is safe to apply while the previous release runs. Disabled mode needs
+  neither new migration unless it uses `ExternalIdentityService` (000004).
+- Existing interfaces, request and response types are unchanged; the new calls are
+  on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`).
+  `model.Session` gains `SignInMethod`.
+
 ## [0.20.2] - 2026-09-07
 
 ### Added

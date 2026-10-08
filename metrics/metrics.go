@@ -34,7 +34,8 @@ const (
 	// CounterLoginSuccess counts successful AuthService.Login calls.
 	CounterLoginSuccess = "authkit_login_success_total"
 	// CounterLoginFailure counts failed AuthService.Login calls. Emitted with a
-	// "reason" label (not_found, account_disabled, account_locked, bad_password).
+	// "reason" label (not_found, account_disabled, account_locked, bad_password,
+	// no_password).
 	CounterLoginFailure = "authkit_login_failure_total"
 	// CounterAccountLockout counts accounts auto-locked after too many failed logins.
 	CounterAccountLockout = "authkit_account_lockout_total"
@@ -58,4 +59,14 @@ const (
 	// update, failed-count reset, auto-unlock). Emitted with an "op" label. A
 	// sustained nonzero rate signals a degraded primary even while logins still work.
 	CounterBestEffortWriteFailure = "authkit_best_effort_write_failure_total"
+	// CounterVerifiedLogin counts sessions opened by VerifiedLoginService.OpenSession
+	// for users the application verified itself. Emitted with a "method" label (the
+	// sign-in method the application passed, e.g. "google" or "device_code").
+	CounterVerifiedLogin = "authkit_verified_login_total"
+	// CounterIdentityLinkRefused counts ExternalIdentityService.Resolve calls that
+	// found a user by a verified email but refused to link the sign-in to them
+	// (ErrIdentityLinkRequired). Emitted with a "reason" label (has_password,
+	// provider_account_mismatch). A spike can mean someone is trying to take over
+	// accounts through a provider.
+	CounterIdentityLinkRefused = "authkit_identity_link_refused_total"
 )

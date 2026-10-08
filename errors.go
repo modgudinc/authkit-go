@@ -11,6 +11,12 @@ var (
 	ErrSessionRevoked  = model.ErrSessionRevoked
 )
 
+var (
+	ErrIdentityLinkRequired  = model.ErrIdentityLinkRequired
+	ErrIdentityAlreadyLinked = model.ErrIdentityAlreadyLinked
+	ErrEmailNotVerified      = model.ErrEmailNotVerified
+)
+
 // Sentinel errors re-exported from the model package for convenience, so callers
 // can write errors.Is(err, authkit.ErrInvalidCredentials). These are the same
 // values the services return (model.Err*), so matching against either works.
