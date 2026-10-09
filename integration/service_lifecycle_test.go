@@ -31,7 +31,7 @@ func TestSecretServiceRoundTrip(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "secrets.test"
@@ -122,7 +122,7 @@ func TestTenantServiceDomainManagement(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	authKit := newIntegrationAuthKit(t, db)
 	tenants := authKit.TenantService()
@@ -216,7 +216,7 @@ func TestUserServiceCRUD(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	authKit := newIntegrationAuthKit(t, db)
@@ -331,7 +331,7 @@ func TestMaintenanceCleanups(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	authKit := newIntegrationAuthKit(t, db)

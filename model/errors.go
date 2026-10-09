@@ -11,6 +11,26 @@ var (
 	ErrSessionRevoked  = errors.New("installation session revoked or expired")
 )
 
+// Sentinel errors for external identities (ExternalIdentityService).
+var (
+	// ErrIdentityLinkRequired is returned by ExternalIdentityService.Resolve when a
+	// user already exists for the provider's verified email but authkit cannot
+	// safely link the new sign-in identity to them on its own: the user's own email
+	// is not verified, the user has a password, or the user is already linked to a
+	// different account at the same provider.
+	// Have the person sign in to the existing user first, then call Link with that
+	// user's id. Nothing is changed. Map it to HTTP 409.
+	ErrIdentityLinkRequired = errors.New("authkit: sign-in identity must be linked by the account owner")
+
+	// ErrIdentityAlreadyLinked is returned by ExternalIdentityService.Link when the
+	// provider identity is already linked to a different user. Map it to HTTP 409.
+	ErrIdentityAlreadyLinked = errors.New("authkit: sign-in identity is linked to another user")
+
+	// ErrEmailNotVerified is returned by ExternalIdentityService.Resolve when it
+	// was asked to create a user but the provider gave no verified email address.
+	ErrEmailNotVerified = errors.New("authkit: a verified email address is required")
+)
+
 // Sentinel errors returned by the library so callers can branch on outcome with
 // errors.Is instead of matching on error strings. They are defined in the model
 // (leaf) package so every layer can return them without an import cycle; the root

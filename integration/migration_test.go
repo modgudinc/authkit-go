@@ -31,7 +31,7 @@ func TestMigrationsAlignWithRepository(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 	assertTablesExist(t, db)
 
 	repo := repository.New(db, db)
@@ -65,7 +65,7 @@ func TestDecoupledSchemaStructure(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	columnExists := func(table, column string) bool {
 		var ok bool
@@ -222,7 +222,7 @@ func TestAuthServiceFlows(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	passwordService := service.NewPasswordService(4, nil)
@@ -438,20 +438,31 @@ func applyMigration(t *testing.T, db *sql.DB, name string) {
 	}
 }
 
+// applyIdentitySchema applies the migrations every deployment needs: the identity
+// schema (000001) and the email-verification column (000005). Tests that use the
+// optional session or external-identity tables apply those migrations themselves.
+func applyIdentitySchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyMigration(t, db, "000005_email_verification.up.sql")
+}
+
 func applyCustomSchemaMigration(t *testing.T, db *sql.DB, schema string) {
 	t.Helper()
 
 	_, _ = db.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`)
 
-	path := filepath.Join("..", "migrations", "000001_identity_schema.up.sql")
-	sqlBytes, err := os.ReadFile(path) //nolint:gosec // G304: test reads migration SQL from the repo's fixed migrations dir
-	if err != nil {
-		t.Fatalf("read custom schema migration: %v", err)
-	}
+	for _, name := range []string{"000001_identity_schema.up.sql", "000005_email_verification.up.sql"} {
+		path := filepath.Join("..", "migrations", name)
+		sqlBytes, err := os.ReadFile(path) //nolint:gosec // G304: test reads migration SQL from the repo's fixed migrations dir
+		if err != nil {
+			t.Fatalf("read custom schema migration %s: %v", name, err)
+		}
 
-	migrationSQL := strings.ReplaceAll(string(sqlBytes), "authkit", schema)
-	if _, err := db.Exec(migrationSQL); err != nil {
-		t.Fatalf("apply custom schema migration: %v", err)
+		migrationSQL := strings.ReplaceAll(string(sqlBytes), "authkit", schema)
+		if _, err := db.Exec(migrationSQL); err != nil {
+			t.Fatalf("apply custom schema migration %s: %v", name, err)
+		}
 	}
 }
 
@@ -893,7 +904,7 @@ func TestValidateRefreshTokenRejectsInactiveAccount(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	pw := service.NewPasswordService(4, nil)
@@ -942,7 +953,7 @@ func TestDisableRevokesRefreshTokens(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	pw := service.NewPasswordService(4, nil)
@@ -1001,7 +1012,7 @@ func TestRefreshTokenReuseDetectionViaTokenService(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "reuse.test"
