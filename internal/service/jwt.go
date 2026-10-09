@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,8 +26,12 @@ const clockSkewLeeway = 30 * time.Second
 
 // JWTService handles JWT token generation and validation
 type JWTService struct {
-	sessionMode   model.SessionMode
-	accessSecret  string
+	sessionMode  model.SessionMode
+	accessSecret string // HS256; signs only when keys has no signing key
+	// keys holds the asymmetric keys, or nil. A token with a "kid" header is
+	// checked against the key it names; one without is checked as HS256.
+	keys          *AccessKeys
+	validMethods  []string
 	accessExpiry  time.Duration
 	refreshExpiry time.Duration
 	logger        logger.Logger
@@ -76,10 +81,17 @@ func WithAudience(audience string) JWTOption {
 	return func(s *JWTService) { s.audience = audience }
 }
 
+// WithAccessKeys adds asymmetric keys. With a signing key, new tokens are signed
+// with it and carry its key id, and the HS256 secret (if any) only validates
+// tokens signed before the switch. Verification keys are accepted either way.
+func WithAccessKeys(keys *AccessKeys) JWTOption {
+	return func(s *JWTService) { s.keys = keys }
+}
+
 // NewJWTService creates a new JWTService instance
 //
 // Parameters:
-//   - accessSecret: Secret key for signing access tokens (required)
+//   - accessSecret: HS256 secret for access tokens; may be empty with WithAccessKeys
 //   - accessExpiry: Access token expiration duration (e.g., 15 minutes)
 //   - refreshExpiry: Refresh token expiration duration (e.g., 7 days)
 //   - logger: Optional logger for structured logging
@@ -99,6 +111,16 @@ func NewJWTService(
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	// Accept exactly the algorithms of the configured keys.
+	if s.accessSecret != "" {
+		s.validMethods = append(s.validMethods, jwt.SigningMethodHS256.Alg())
+	}
+	if s.keys != nil {
+		s.validMethods = append(s.validMethods, s.keys.algorithms()...)
+	}
+	if s.validMethods == nil {
+		s.validMethods = []string{}
 	}
 	return s
 }
@@ -177,8 +199,7 @@ func (s *JWTService) generateAccessToken(user *model.User, membership *model.Mem
 		claims.Audience = jwt.ClaimStrings{s.audience}
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signedToken, err := token.SignedString([]byte(s.accessSecret))
+	signedToken, err := s.sign(claims)
 	if err != nil {
 		s.logger.Error(context.Background(), "Failed to sign JWT token", "error", err.Error())
 		return "", fmt.Errorf("failed to sign JWT token: %w", err)
@@ -192,6 +213,28 @@ func (s *JWTService) generateAccessToken(user *model.User, membership *model.Mem
 	return signedToken, nil
 }
 
+// sign signs claims with the signing key, stamping its key id, or with the HS256
+// secret (and no key id) when there is no signing key.
+func (s *JWTService) sign(claims model.JWTClaims) (string, error) {
+	if s.keys == nil || s.keys.signing == nil {
+		if s.accessSecret == "" {
+			return "", errors.New("no access-token signing key is configured")
+		}
+		return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.accessSecret))
+	}
+	token := jwt.NewWithClaims(jwt.GetSigningMethod(s.keys.signing.alg), claims)
+	token.Header["kid"] = s.keys.signing.id
+	signingInput, err := token.SigningString()
+	if err != nil {
+		return "", err
+	}
+	signature, err := s.keys.sign(signingInput)
+	if err != nil {
+		return "", err
+	}
+	return signingInput + "." + token.EncodeSegment(signature), nil
+}
+
 // ValidateAccessToken validates a JWT access token and extracts claims
 //
 // Parameters:
@@ -200,7 +243,9 @@ func (s *JWTService) generateAccessToken(user *model.User, membership *model.Mem
 // # Returns parsed model.JWTClaims or error if validation fails
 //
 // Validation includes:
-//   - Signature verification using HMAC-SHA256
+//   - Signature verification: a token with a "kid" header against the configured
+//     key with that id, in that key's algorithm only; a token without one as HS256
+//     against the access secret, when one is configured
 //   - Expiration check
 //   - Claims parsing
 //
@@ -213,11 +258,12 @@ func (s *JWTService) generateAccessToken(user *model.User, membership *model.Mem
 //	}
 //	// Use claims.UserID, claims.TenantID, etc.
 func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, error) {
-	// Pin the exact signing algorithm, require an expiration, and allow a small
-	// clock-skew leeway. WithValidMethods is the canonical defense against
-	// algorithm-confusion / "alg:none" attacks (the keyfunc also checks the family).
+	// Pin the configured signing algorithms, require an expiration, and allow a
+	// small clock-skew leeway. WithValidMethods is the canonical defense against
+	// algorithm-confusion / "alg:none" attacks; the keyfunc also pins each key to
+	// its own algorithm.
 	parserOpts := []jwt.ParserOption{
-		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithValidMethods(s.validMethods),
 		jwt.WithExpirationRequired(),
 		jwt.WithLeeway(clockSkewLeeway),
 	}
@@ -229,9 +275,12 @@ func (s *JWTService) ValidateAccessToken(tokenString string) (*model.JWTClaims, 
 	}
 
 	token, err := jwt.ParseWithClaims(tokenString, &parsedAccessClaims{}, func(token *jwt.Token) (interface{}, error) {
-		// Verify signing method is HMAC
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		if kid, ok := token.Header["kid"]; ok {
+			return s.keys.verificationKey(token, kid)
+		}
+		// authkit never puts a key id on HS256 tokens, and only HS256 goes without one.
+		if s.accessSecret == "" || token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+			return nil, errors.New("token has no key id")
 		}
 		return []byte(s.accessSecret), nil
 	}, parserOpts...)

@@ -38,6 +38,15 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   that `Resolve` creates start verified; invitation acceptance and
   `UserService.Create` do not set it. The guide shows passwordless sign-in by
   emailed code with `OTPService`, `MarkEmailVerified` and `OpenSession`.
+- Asymmetric access-token signing: `JWTConfig.SigningKey` (Ed25519 as EdDSA, ECDSA
+  P-256 as ES256, RSA of 2048 bits or more as RS256; any `crypto.Signer`, so KMS and
+  HSM keys work) stamps a key id on each token, and `JWTConfig.VerificationKeys`
+  accepts further public keys while switching or rotating keys. Key ids default to
+  the RFC 7638 thumbprint. `AuthKit.JSONWebKeySet` returns the public keys as a JSON
+  Web Key Set to serve at a jwks_uri, and `ParsePrivateKeyPEM` / `ParsePublicKeyPEM`
+  read PEM keys. `AccessSecret` is optional when a signing key is set, and validates
+  older HS256 tokens until it is removed. Guide:
+  [docs/signing-keys.md](docs/signing-keys.md).
 
 ### Security
 
@@ -50,6 +59,10 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   email never finds an account. The `email_unverified` reason joins
   `authkit_identity_link_refused_total`.
 - `ValidateInstallationJWT` refuses a session that has no installation.
+- Access-token validation picks the key from the token's `kid` and accepts only that
+  key's algorithm; a token without a `kid` is accepted only as HS256, and only while
+  `AccessSecret` is set. An HS256 token that carries a `kid` is now refused. authkit
+  has never put a `kid` on its HS256 tokens, so tokens it issued are unaffected.
 
 ### Upgrade
 
@@ -64,7 +77,9 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`),
   except `UserService.MarkEmailVerified`, which, like 0.20.1's `MembershipService`
   additions, extends an interface authkit returns. `model.Session` gains
-  `SignInMethod` and `model.User` gains `EmailVerifiedAt`.
+  `SignInMethod`, `model.User` gains `EmailVerifiedAt`, and `JWTConfig` gains
+  `SigningKey` and `VerificationKeys` (positional `JWTConfig` literals need keyed
+  fields).
 
 ## [0.20.2] - 2026-09-07
 
