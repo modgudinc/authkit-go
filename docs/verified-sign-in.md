@@ -26,8 +26,8 @@ Verify the provider's response with a client library such as
 
 All are additive and idempotent, and safe to apply while older code runs. Apps in
 `SessionDisabled` mode need only `000005` for `OpenSession`, and `000004` as well for
-linked identities. For a custom `IdentitySchema`, replace `authkit.` with your schema in
-the migration files, as for `000002`.
+linked identities. For a custom `IdentitySchema`, take the files from
+`authkit.Migrations(schema)` ([migrations.md](migrations.md)).
 
 Rolling `000003` back deletes sessions that have no installation (and their refresh
 tokens), since the older schema cannot hold them.

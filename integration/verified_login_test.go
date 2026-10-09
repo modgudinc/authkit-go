@@ -8,8 +8,6 @@ package integration
 import (
 	"context"
 	"database/sql"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -443,11 +441,7 @@ func TestVerifiedLoginCustomSchema(t *testing.T) {
 
 func applyRenamedMigration(t *testing.T, db *sql.DB, name, schema string) {
 	t.Helper()
-	sqlBytes, err := os.ReadFile(filepath.Join("..", "migrations", name)) //nolint:gosec // G304: test reads migration SQL from the repo's fixed migrations dir
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(strings.ReplaceAll(string(sqlBytes), "authkit.", schema+".")); err != nil {
+	if _, err := db.Exec(migrationSQL(t, name, schema)); err != nil {
 		t.Fatalf("apply %s to %s: %v", name, schema, err)
 	}
 }

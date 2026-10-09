@@ -38,6 +38,10 @@ merge.
 - Keep changes focused and describe the behavior being changed.
 - Add or update tests for bug fixes, migrations, and public API behavior.
 - Update `README.md`, `docs/`, or migration docs when configuration, schema, or setup changes.
+- Never edit a migration that has shipped in a release: change the schema with a new
+  numbered `.up.sql`/`.down.sql` pair in `migrations/`, pin its SHA-256 in
+  `migrations_test.go`, and list it in [docs/migrations.md](docs/migrations.md). An
+  unreleased migration may still change, together with its pinned checksum.
 - Do not include secrets, private keys, or production credentials in examples or tests.
 
 ## Releasing

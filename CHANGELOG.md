@@ -47,6 +47,11 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   read PEM keys. `AccessSecret` is optional when a signing key is set, and validates
   older HS256 tokens until it is removed. Guide:
   [docs/signing-keys.md](docs/signing-keys.md).
+- `Migrations(schema)` returns the SQL migrations embedded in the module, as numbered
+  `.up.sql`/`.down.sql` files for golang-migrate (`source/iofs`) or any tool that
+  runs them in order, so applications no longer copy them from the repository. For a
+  custom `IdentitySchema` it returns them with that schema in place of `authkit`,
+  replacing the hand edit. Guide: [docs/migrations.md](docs/migrations.md).
 
 ### Security
 
@@ -66,6 +71,9 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Changed
 
+- Migrations are frozen once released: `000001` stays as released in v0.20.2, and
+  schema changes arrive as new numbered migrations. A test pins every migration's
+  checksum.
 - Update `golang.org/x/crypto` to v0.57.0, which requires Go 1.26 (0.20.x needed
   1.25), with indirect updates to `golang.org/x/sync` v0.23.0 and
   `golang.org/x/text` v0.42.0. Update `github.com/jackc/pgx/v5` to v5.11.0.

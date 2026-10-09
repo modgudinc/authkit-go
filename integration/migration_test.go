@@ -9,8 +9,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -425,15 +425,26 @@ func openTestDB(t *testing.T) *sql.DB {
 	}
 }
 
-func applyMigration(t *testing.T, db *sql.DB, name string) {
+// migrationSQL returns a shipped migration for schema ("" for authkit), read through
+// authkit.Migrations like an application would.
+func migrationSQL(t *testing.T, name, schema string) string {
 	t.Helper()
 
-	path := filepath.Join("..", "migrations", name)
-	sqlBytes, err := os.ReadFile(path) //nolint:gosec // G304: test reads migration SQL from the repo's fixed migrations dir
+	fsys, err := authkit.Migrations(schema)
+	if err != nil {
+		t.Fatalf("migrations for schema %q: %v", schema, err)
+	}
+	sqlBytes, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		t.Fatalf("read migration %s: %v", name, err)
 	}
-	if _, err := db.Exec(string(sqlBytes)); err != nil {
+	return string(sqlBytes)
+}
+
+func applyMigration(t *testing.T, db *sql.DB, name string) {
+	t.Helper()
+
+	if _, err := db.Exec(migrationSQL(t, name, "")); err != nil {
 		t.Fatalf("apply migration %s: %v", name, err)
 	}
 }
@@ -453,14 +464,7 @@ func applyCustomSchemaMigration(t *testing.T, db *sql.DB, schema string) {
 	_, _ = db.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`)
 
 	for _, name := range []string{"000001_identity_schema.up.sql", "000005_email_verification.up.sql"} {
-		path := filepath.Join("..", "migrations", name)
-		sqlBytes, err := os.ReadFile(path) //nolint:gosec // G304: test reads migration SQL from the repo's fixed migrations dir
-		if err != nil {
-			t.Fatalf("read custom schema migration %s: %v", name, err)
-		}
-
-		migrationSQL := strings.ReplaceAll(string(sqlBytes), "authkit", schema)
-		if _, err := db.Exec(migrationSQL); err != nil {
+		if _, err := db.Exec(migrationSQL(t, name, schema)); err != nil {
 			t.Fatalf("apply custom schema migration %s: %v", name, err)
 		}
 	}

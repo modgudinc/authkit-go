@@ -12,7 +12,7 @@
 - `ratelimit/`: Public, optional `RateLimiter` interface (aliased as `authkit.RateLimiter`). Injected via `Config.RateLimiter`; consulted before `Login`, `RefreshToken`, and `OTPService.Generate`, with a rejection surfacing as `authkit.ErrRateLimited` (HTTP 429). Key formats are documented in the package.
 - `internal/repository/`: PostgreSQL data access (not importable by consumers). Queries are schema-qualified with `authkit.` and rewritten when `DatabaseConnection.IdentitySchema` is configured.
 - `internal/service/`: Business logic for global users, memberships, tokens, passwords, API keys, invitations, tenants, OTPs, and encrypted secrets (not importable by consumers; the public contracts are the service interfaces in package `authkit`).
-- `migrations/`: PostgreSQL schema used by the default `authkit` schema.
+- `migrations/`: PostgreSQL schema used by the default `authkit` schema, embedded in the module and returned by `authkit.Migrations` (see [migrations.md](migrations.md)).
 - `integration/`: Docker-backed tests that apply migrations and exercise repository/service behavior against real PostgreSQL.
 
 ## Data Model
@@ -72,7 +72,7 @@ The default schema is `authkit`.
 
 Set `DatabaseConnection.IdentitySchema` to use another PostgreSQL schema. The schema name must be a single valid PostgreSQL identifier, such as `authkit`, `identity`, or `custom_identity`. Dotted names and raw SQL are rejected.
 
-The provided migration creates the default `authkit` schema. Applications using a custom schema should copy the migration and replace `authkit` with the configured schema name.
+The shipped migrations create the default `authkit` schema. For a custom schema, `authkit.Migrations(schema)` returns them with that schema in place of `authkit` (see [migrations.md](migrations.md)).
 
 ## Security Assumptions
 
