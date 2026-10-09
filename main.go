@@ -78,6 +78,7 @@ type AuthKit struct {
 
 	accessTokenExpiry  time.Duration
 	refreshTokenExpiry time.Duration
+	refreshGrace       time.Duration // JWTConfig.RefreshGracePeriod
 
 	apiKeyHMACSecret     string
 	passwordBcryptCost   int
@@ -93,7 +94,8 @@ type AuthKit struct {
 // New validates the Config and returns a configured AuthKit. It fails fast if a
 // required connection or secret is missing, a secret is shorter than
 // MinSecretLength, a signing or verification key has an unsupported type, curve or
-// size or reuses another key's id, the identity schema is not a valid identifier,
+// size or reuses another key's id, the refresh grace period is negative, the
+// identity schema is not a valid identifier,
 // the secret encryption key (when provided) is not a base64-encoded 32-byte key, or
 // the OTP HMAC secret (when provided) is shorter than MinSecretLength. The OTP HMAC secret
 // is only required at use time (OTPService.Generate/Validate), not at construction.
@@ -185,6 +187,9 @@ func New(config Config) (*AuthKit, error) {
 	if config.JWTConfig.RefreshExpiry > 0 {
 		refreshTokenExpiry = config.JWTConfig.RefreshExpiry
 	}
+	if config.JWTConfig.RefreshGracePeriod < 0 {
+		return nil, errors.New("refresh grace period must not be negative")
+	}
 
 	// Bcrypt cost: 0 means "unset" and uses the default. A non-zero value outside
 	// bcrypt's supported range is rejected (fail fast at construction) rather than
@@ -254,6 +259,7 @@ func New(config Config) (*AuthKit, error) {
 
 		accessTokenExpiry:  accessTokenExpiry,
 		refreshTokenExpiry: refreshTokenExpiry,
+		refreshGrace:       config.JWTConfig.RefreshGracePeriod,
 
 		apiKeyHMACSecret:     config.APIKeyConfig.HMACSecret,
 		passwordBcryptCost:   passwordBcryptCost,
@@ -399,7 +405,8 @@ func (k *AuthKit) newJWTService() *service.JWTService {
 
 func (k *AuthKit) newTokenService() *service.TokenService {
 	repo := k.repository()
-	return service.NewTokenService(&repo, k.newJWTService(), k.refreshTokenExpiry, k.refreshTokenHMACSecret, k.logger, k.metrics, service.WithTokenSessions(k.sessionConfig))
+	return service.NewTokenService(&repo, k.newJWTService(), k.refreshTokenExpiry, k.refreshTokenHMACSecret, k.logger, k.metrics,
+		service.WithTokenSessions(k.sessionConfig), service.WithRefreshGracePeriod(k.refreshGrace))
 }
 
 // OTPService returns the OTP service

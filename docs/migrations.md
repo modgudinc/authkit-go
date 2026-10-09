@@ -13,6 +13,7 @@ instead of copying SQL out of the repository.
 | `000003_session_sign_in` | `sessions.sign_in_method`; sessions without an installation | Session modes, from the release with `VerifiedLoginService` |
 | `000004_external_identities` | `external_identities` | `ExternalIdentityService` |
 | `000005_email_verification` | `users.email_verified_at` | Every deployment |
+| `000006_refresh_token_replacement` | `refresh_tokens.replaced_by` | `JWTConfig.RefreshGracePeriod` ([refresh-tokens.md](refresh-tokens.md)) |
 
 Each has an `.up.sql` and a `.down.sql`. With a migration tool, apply them all, in
 order. The ones a feature needs only add tables and a column that stay empty when

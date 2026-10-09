@@ -40,6 +40,12 @@ type CreateRefreshTokenRequest struct {
 	UserAgent  *string
 	DeviceName *string
 	ExpiresAt  time.Time
+	// GracePeriod applies when the request rotates a token (RotateRefreshToken,
+	// RotateBoundRefresh). When positive, a token consumed less than GracePeriod ago
+	// whose replacement has never been used can be exchanged again: the unused
+	// replacement is revoked and the token this request creates takes its place.
+	// Zero keeps strict rotation. A positive value needs migration 000006.
+	GracePeriod time.Duration
 }
 
 // Refresh Token Repository Methods:
@@ -104,22 +110,24 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, req CreateRefreshTo
 }
 
 // ============================================================================
-// RotateRefreshToken - Atomically consumes one refresh token and stores a new one
+// RotateRefreshToken - Atomically consumes one refresh token and stores a new one.
+// It returns the user, the new token's id, and whether the rotation was a retry
+// within req.GracePeriod (see CreateRefreshTokenRequest.GracePeriod).
 // ============================================================================
-func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, string, error) {
+func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, string, bool, error) {
 	return r.rotateRefreshToken(ctx, oldTokenHash, req, false)
 }
 
 // RotateRefreshTokenWithUserLock coordinates legacy rotation with opt-in
 // account/session mutations. The default legacy query path stays unchanged.
-func (r *Repository) RotateRefreshTokenWithUserLock(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, string, error) {
+func (r *Repository) RotateRefreshTokenWithUserLock(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, string, bool, error) {
 	return r.rotateRefreshToken(ctx, oldTokenHash, req, true)
 }
 
-func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest, lockUser bool) (*model.User, string, error) {
+func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest, lockUser bool) (*model.User, string, bool, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to begin refresh token rotation: %w", err)
+		return nil, "", false, fmt.Errorf("failed to begin refresh token rotation: %w", err)
 	}
 
 	committed := false
@@ -133,13 +141,13 @@ func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string
 		var owner string
 		err := tx.QueryRowContext(ctx, r.q("SELECT user_id FROM {{schema}}.refresh_tokens WHERE token_hash=$1"), oldTokenHash).Scan(&owner)
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, "", model.ErrInvalidRefreshToken
+			return nil, "", false, model.ErrInvalidRefreshToken
 		}
 		if err != nil {
-			return nil, "", err
+			return nil, "", false, err
 		}
 		if _, err := r.lockSessionUser(ctx, tx, owner); err != nil {
-			return nil, "", err
+			return nil, "", false, err
 		}
 	}
 
@@ -157,44 +165,58 @@ func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string
 	var expiresAt time.Time
 	if err := tx.QueryRowContext(ctx, r.q(lookupQuery), oldTokenHash).Scan(&userID, &familyID, &revokedAt, &expiresAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, "", fmt.Errorf("refresh token not found: %w", model.ErrInvalidRefreshToken)
+			return nil, "", false, fmt.Errorf("refresh token not found: %w", model.ErrInvalidRefreshToken)
 		}
-		return nil, "", fmt.Errorf("failed to look up refresh token: %w", err)
+		return nil, "", false, fmt.Errorf("failed to look up refresh token: %w", err)
 	}
 
-	// Reuse/theft: an already-consumed token is being presented again. Revoke the
-	// entire family (every still-active token descended from the same login) so
-	// neither the legitimate holder nor an attacker can keep refreshing, AND bump
-	// the user's token_version in the same transaction so every already-issued
-	// access token minted from this family is immediately rejected by ValidateJWT
-	// (otherwise live access tokens would remain valid until their own exp).
-	if revokedAt != nil {
-		now := time.Now()
+	now := time.Now()
+
+	// An already-consumed token is being presented again. Within the grace period,
+	// while the token that replaced it has never been used, this is a client retrying
+	// a refresh whose response it lost: retryOf is that unused replacement, which the
+	// new token supersedes below.
+	retryOf := ""
+	if revokedAt != nil && now.Before(expiresAt) {
+		replacement, ok, err := r.unusedReplacement(ctx, tx, oldTokenHash, *revokedAt, now, req.GracePeriod)
+		if err != nil {
+			return nil, "", false, err
+		}
+		if ok {
+			retryOf = replacement
+		}
+	}
+
+	// Reuse/theft: any other already-consumed token. Revoke the entire family (every
+	// still-active token descended from the same login) so neither the legitimate
+	// holder nor an attacker can keep refreshing, AND bump the user's token_version
+	// in the same transaction so every already-issued access token minted from this
+	// family is immediately rejected by ValidateJWT (otherwise live access tokens
+	// would remain valid until their own exp).
+	if revokedAt != nil && retryOf == "" {
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.refresh_tokens
 			SET revoked_at = $1
 			WHERE family_id = $2 AND revoked_at IS NULL
 		`), now, familyID); err != nil {
-			return nil, "", fmt.Errorf("failed to revoke reused token family: %w", err)
+			return nil, "", false, fmt.Errorf("failed to revoke reused token family: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users
 			SET token_version = token_version + 1, updated_at = $1
 			WHERE id = $2
 		`), now, userID); err != nil {
-			return nil, "", fmt.Errorf("failed to bump token version on reuse: %w", err)
+			return nil, "", false, fmt.Errorf("failed to bump token version on reuse: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
-			return nil, "", fmt.Errorf("failed to commit token family revocation: %w", err)
+			return nil, "", false, fmt.Errorf("failed to commit token family revocation: %w", err)
 		}
 		committed = true
 		// Return a typed error carrying the user/family so the service layer can log
 		// and meter the theft event; it unwraps to model.ErrRefreshTokenReuse so
 		// errors.Is callers and sanitizeError keep working unchanged.
-		return nil, "", &model.RefreshTokenReuseError{UserID: userID, FamilyID: familyID}
+		return nil, "", false, &model.RefreshTokenReuseError{UserID: userID, FamilyID: familyID}
 	}
-
-	now := time.Now()
 
 	// Expired but never consumed: reject as expired. We deliberately do NOT set
 	// revoked_at here — leaving it NULL means a later re-presentation is treated as
@@ -202,23 +224,27 @@ func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string
 	// reserved for genuinely consumed/rotated tokens). The deferred rollback
 	// releases the row lock with no changes; DeleteExpired removes the row.
 	if now.After(expiresAt) {
-		return nil, "", fmt.Errorf("refresh token expired: %w", model.ErrInvalidRefreshToken)
+		return nil, "", false, fmt.Errorf("refresh token expired: %w", model.ErrInvalidRefreshToken)
 	}
 
-	// Consume (soft-revoke) the presented token. It is retained, not deleted, so a
-	// later replay is detectable until the row is cleaned up after expiry.
-	if _, err := tx.ExecContext(ctx, r.q(`UPDATE {{schema}}.refresh_tokens SET revoked_at = $1 WHERE token_hash = $2`), now, oldTokenHash); err != nil {
-		return nil, "", fmt.Errorf("failed to consume refresh token: %w", err)
+	if retryOf == "" {
+		// Consume (soft-revoke) the presented token. It is retained, not deleted, so a
+		// later replay is detectable until the row is cleaned up after expiry.
+		if _, err := tx.ExecContext(ctx, r.q(`UPDATE {{schema}}.refresh_tokens SET revoked_at = $1 WHERE token_hash = $2`), now, oldTokenHash); err != nil {
+			return nil, "", false, fmt.Errorf("failed to consume refresh token: %w", err)
+		}
+	} else if err := r.revokeReplacement(ctx, tx, retryOf, now); err != nil {
+		return nil, "", false, err
 	}
 
 	user, err := scanUser(tx.QueryRowContext(ctx, r.q(`SELECT `+userColumns+` FROM {{schema}}.users WHERE id = $1`), userID))
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to get user for refresh token: %w", err)
+		return nil, "", false, fmt.Errorf("failed to get user for refresh token: %w", err)
 	}
 
 	gen, err := uuid.NewV7()
 	if err != nil {
-		return nil, "", fmt.Errorf("could not generate ID for refresh token: %w", err)
+		return nil, "", false, fmt.Errorf("could not generate ID for refresh token: %w", err)
 	}
 	tokenID := gen.String()
 
@@ -242,15 +268,70 @@ func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string
 		req.ExpiresAt,
 		now,
 	); err != nil {
-		return nil, "", fmt.Errorf("failed to create rotated refresh token: %w", err)
+		return nil, "", false, fmt.Errorf("failed to create rotated refresh token: %w", err)
+	}
+	if err := r.recordReplacement(ctx, tx, oldTokenHash, tokenID, req.GracePeriod); err != nil {
+		return nil, "", false, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, "", fmt.Errorf("failed to commit refresh token rotation: %w", err)
+		return nil, "", false, fmt.Errorf("failed to commit refresh token rotation: %w", err)
 	}
 	committed = true
 
-	return user, tokenID, nil
+	return user, tokenID, retryOf != "", nil
+}
+
+// unusedReplacement reports whether a consumed refresh token may be exchanged again
+// under a grace period: it was consumed less than grace ago, and the token that
+// replaced it has never been used or revoked. It returns that replacement's id with
+// its row locked; the caller's transaction already holds the consumed token's lock.
+// With no grace period it reads nothing, so it needs no migration 000006.
+func (r *Repository) unusedReplacement(ctx context.Context, tx *sql.Tx, tokenHash string, consumedAt, now time.Time, grace time.Duration) (string, bool, error) {
+	if grace <= 0 || now.Sub(consumedAt) >= grace {
+		return "", false, nil
+	}
+	var replacedBy sql.NullString
+	if err := tx.QueryRowContext(ctx, r.q(`SELECT replaced_by FROM {{schema}}.refresh_tokens WHERE token_hash = $1`), tokenHash).Scan(&replacedBy); err != nil {
+		return "", false, fmt.Errorf("failed to look up refresh token replacement: %w", err)
+	}
+	if !replacedBy.Valid {
+		return "", false, nil // revoked by a logout or a reuse, or consumed without a grace period
+	}
+	var revokedAt *time.Time
+	err := tx.QueryRowContext(ctx, r.q(`SELECT revoked_at FROM {{schema}}.refresh_tokens WHERE id = $1 FOR UPDATE`), replacedBy.String).Scan(&revokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil // deleted, by a logout of every session for example
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to look up refresh token replacement: %w", err)
+	}
+	if revokedAt != nil {
+		return "", false, nil // the replacement has been used, or revoked
+	}
+	return replacedBy.String, true, nil
+}
+
+// revokeReplacement revokes the unused replacement that a grace-period retry
+// supersedes. Its replaced_by stays NULL, so presenting it later is reuse.
+func (r *Repository) revokeReplacement(ctx context.Context, tx *sql.Tx, tokenID string, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, r.q(`UPDATE {{schema}}.refresh_tokens SET revoked_at = $1 WHERE id = $2`), now, tokenID); err != nil {
+		return fmt.Errorf("failed to revoke unused refresh token replacement: %w", err)
+	}
+	return nil
+}
+
+// recordReplacement records which token replaced a consumed one, so a retry within
+// the grace period can find it. Without a grace period it writes nothing, so it
+// needs no migration 000006.
+func (r *Repository) recordReplacement(ctx context.Context, tx *sql.Tx, tokenHash, replacementID string, grace time.Duration) error {
+	if grace <= 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, r.q(`UPDATE {{schema}}.refresh_tokens SET replaced_by = $1 WHERE token_hash = $2`), replacementID, tokenHash); err != nil {
+		return fmt.Errorf("failed to record refresh token replacement: %w", err)
+	}
+	return nil
 }
 
 // ============================================================================
@@ -312,29 +393,45 @@ func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*Ref
 }
 
 // ============================================================================
-// GetRefreshTokenUserByHash - Returns the user_id for a refresh token hash and
-// whether the token is currently revoked, WITHOUT filtering on revoked/expired state.
+// GetRefreshTokenUserByHash - Returns the user_id for a refresh token hash,
+// whether the token is currently revoked, and whether a revoked token is one a
+// rotation with this grace period would accept as a retry (see
+// CreateRefreshTokenRequest.GracePeriod). It does NOT filter on revoked/expired
+// state.
 //
 // It backs RefreshTokenPair's non-destructive membership pre-check: a LIVE token's
 // workspace membership is verified before rotation (so refreshing a workspace the user
 // has left does not strand the rotated token and kill the whole identity session),
-// while a REVOKED token must NOT be short-circuited on this path — the caller routes it
-// into RotateRefreshToken so its reuse/theft detection (family revoke + token_version
-// bump + alert) still fires. Reads from the PRIMARY (rw): this is part of the refresh
-// gate, mirroring GetByTokenHash. Returns model.ErrInvalidRefreshToken when no row
-// matches the hash.
+// and so is a retryable one's, while any other REVOKED token must NOT be
+// short-circuited on this path — the caller routes it into RotateRefreshToken so its
+// reuse/theft detection (family revoke + token_version bump + alert) still fires.
+// The rotation re-checks retryability under its row locks. Reads from the PRIMARY
+// (rw): this is part of the refresh gate, mirroring GetByTokenHash. Returns
+// model.ErrInvalidRefreshToken when no row matches the hash.
 // ============================================================================
-func (r *Repository) GetRefreshTokenUserByHash(ctx context.Context, tokenHash string) (userID string, revoked bool, err error) {
-	query := `SELECT user_id, revoked_at FROM {{schema}}.refresh_tokens WHERE token_hash = $1`
-
+func (r *Repository) GetRefreshTokenUserByHash(ctx context.Context, tokenHash string, grace time.Duration) (userID string, revoked, retryable bool, err error) {
 	var revokedAt *time.Time
-	if err := r.rw.QueryRowContext(ctx, r.q(query), tokenHash).Scan(&userID, &revokedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", false, fmt.Errorf("refresh token not found: %w", model.ErrInvalidRefreshToken)
-		}
-		return "", false, fmt.Errorf("failed to look up refresh token: %w", err)
+	unusedReplacement := false
+	if grace > 0 {
+		query := `
+			SELECT t.user_id, t.revoked_at, n.id IS NOT NULL AND n.revoked_at IS NULL
+			FROM {{schema}}.refresh_tokens t
+			LEFT JOIN {{schema}}.refresh_tokens n ON n.id = t.replaced_by
+			WHERE t.token_hash = $1`
+		err = r.rw.QueryRowContext(ctx, r.q(query), tokenHash).Scan(&userID, &revokedAt, &unusedReplacement)
+	} else {
+		query := `SELECT user_id, revoked_at FROM {{schema}}.refresh_tokens WHERE token_hash = $1`
+		err = r.rw.QueryRowContext(ctx, r.q(query), tokenHash).Scan(&userID, &revokedAt)
 	}
-	return userID, revokedAt != nil, nil
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, false, fmt.Errorf("refresh token not found: %w", model.ErrInvalidRefreshToken)
+		}
+		return "", false, false, fmt.Errorf("failed to look up refresh token: %w", err)
+	}
+	revoked = revokedAt != nil
+	retryable = revoked && unusedReplacement && time.Since(*revokedAt) < grace
+	return userID, revoked, retryable, nil
 }
 
 // ============================================================================

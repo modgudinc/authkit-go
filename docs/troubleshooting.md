@@ -80,6 +80,11 @@ workspaces are unaffected.
 
 This is expected. Refresh tokens rotate. A successful refresh consumes the old token and returns a replacement.
 
+Presenting the old token again is treated as theft and signs the user out everywhere
+(`ErrRefreshTokenReuse`). If clients lose refresh responses (timeouts, a process killed
+before it saves the new token), set `JWTConfig.RefreshGracePeriod` so they can retry.
+See [refresh-tokens.md](refresh-tokens.md).
+
 ## OTP Validation Fails
 
 Check:

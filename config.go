@@ -108,8 +108,18 @@ type JWTConfig struct {
 	RefreshTokenHMACSecret string // Secret for HMAC-SHA256 hashing of refresh tokens in storage
 	AccessExpiry           time.Duration
 	RefreshExpiry          time.Duration
-	Issuer                 string // Optional: if set, stamped as the "iss" claim and required on validation
-	Audience               string // Optional: if set, stamped as the "aud" claim and required on validation
+	// RefreshGracePeriod lets a client retry a refresh whose response it lost.
+	// Rotation consumes the presented refresh token, and presenting a consumed token
+	// again is treated as theft: the family is revoked and the user signed out
+	// everywhere. With a grace period, a consumed token can be exchanged again for
+	// up to this long, as long as the token that replaced it has never been used; the
+	// unused replacement is revoked. Once the replacement has been used, the old token
+	// is reuse as before, so whichever of a thief and the owner refreshes second still
+	// trips detection. Optional; zero keeps strict rotation. Needs migration 000006.
+	// See docs/refresh-tokens.md.
+	RefreshGracePeriod time.Duration
+	Issuer             string // Optional: if set, stamped as the "iss" claim and required on validation
+	Audience           string // Optional: if set, stamped as the "aud" claim and required on validation
 }
 
 // APIKeyConfig configures API key hashing. HMACSecret is required and must be at

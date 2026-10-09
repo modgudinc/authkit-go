@@ -99,6 +99,13 @@ func TestNewValidatesRequiredConfig(t *testing.T) {
 			},
 			wantErr: "valid PostgreSQL identifier",
 		},
+		{
+			name: "negative refresh grace period",
+			mutate: func(config *Config) {
+				config.JWTConfig.RefreshGracePeriod = -time.Second
+			},
+			wantErr: "refresh grace period must not be negative",
+		},
 	}
 
 	for _, test := range tests {
@@ -147,6 +154,7 @@ func TestNewUsesExplicitDurationsAndDefaultSchema(t *testing.T) {
 	config := validTestConfig()
 	config.JWTConfig.AccessExpiry = 2 * time.Minute
 	config.JWTConfig.RefreshExpiry = 3 * time.Hour
+	config.JWTConfig.RefreshGracePeriod = 10 * time.Minute
 	config.OTPConfig.RateLimitDuration = 4 * time.Minute
 	config.PasswordConfig.BcryptCost = 5
 
@@ -163,6 +171,9 @@ func TestNewUsesExplicitDurationsAndDefaultSchema(t *testing.T) {
 	}
 	if authKit.refreshTokenExpiry != 3*time.Hour {
 		t.Fatalf("refresh expiry = %s", authKit.refreshTokenExpiry)
+	}
+	if authKit.refreshGrace != 10*time.Minute {
+		t.Fatalf("refresh grace period = %s", authKit.refreshGrace)
 	}
 	if authKit.otpRateLimitDuration != 4*time.Minute {
 		t.Fatalf("otp rate limit = %s", authKit.otpRateLimitDuration)

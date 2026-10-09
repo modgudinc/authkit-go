@@ -114,111 +114,132 @@ func (r *Repository) CreateBoundSession(ctx context.Context, expectedUser *model
 	if err != nil {
 		return err
 	}
-	if err := r.insertSessionRefresh(ctx, tx, s, token); err != nil {
+	if _, err := r.insertSessionRefresh(ctx, tx, s, token); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (r *Repository) insertSessionRefresh(ctx context.Context, tx *sql.Tx, s *model.Session, req CreateRefreshTokenRequest) error {
+func (r *Repository) insertSessionRefresh(ctx context.Context, tx *sql.Tx, s *model.Session, req CreateRefreshTokenRequest) (string, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
-		return err
+		return "", err
 	}
 	_, err = tx.ExecContext(ctx, r.q(`
 		INSERT INTO {{schema}}.refresh_tokens
 		(id,user_id,token_hash,family_id,ip_address,user_agent,device_name,last_used_at,expires_at,created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$8)`),
 		id.String(), s.UserID, req.TokenHash, s.ID, req.IPAddress, req.UserAgent, req.DeviceName, time.Now(), s.ExpiresAt)
-	return err
+	return id.String(), err
 }
 
 // RotateBoundRefresh checks account, session and workspace inside the same
-// transaction as rotation. It returns the authoritative snapshots for minting.
-func (r *Repository) RotateBoundRefresh(ctx context.Context, namespace, oldHash, tenantID string, req CreateRefreshTokenRequest) (*model.User, *model.Membership, *model.Session, error) {
+// transaction as rotation. It returns the authoritative snapshots for minting, and
+// whether the rotation was a retry within req.GracePeriod.
+func (r *Repository) RotateBoundRefresh(ctx context.Context, namespace, oldHash, tenantID string, req CreateRefreshTokenRequest) (*model.User, *model.Membership, *model.Session, bool, error) {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	var userID, familyID string
 	err = tx.QueryRowContext(ctx, r.q("SELECT user_id, family_id FROM {{schema}}.refresh_tokens WHERE token_hash=$1"), oldHash).Scan(&userID, &familyID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, nil, model.ErrInvalidRefreshToken
+		return nil, nil, nil, false, model.ErrInvalidRefreshToken
 	}
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
 	u, err := r.lockSessionUser(ctx, tx, userID)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
 	s, err := scanSession(tx.QueryRowContext(ctx, r.q("SELECT "+sessionColumns+
 		" FROM {{schema}}.sessions WHERE id=$1 AND user_id=$2 AND namespace=$3 FOR UPDATE"), familyID, userID, namespace))
 	if errors.Is(err, model.ErrNotFound) {
-		return nil, nil, nil, model.ErrSessionRevoked
+		return nil, nil, nil, false, model.ErrSessionRevoked
 	}
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
 	now := time.Now()
 	if !sessionActive(s, u, now) {
-		return nil, nil, nil, model.ErrSessionRevoked
+		return nil, nil, nil, false, model.ErrSessionRevoked
 	}
 	var consumed *time.Time
 	var expiry time.Time
 	err = tx.QueryRowContext(ctx, r.q("SELECT revoked_at, expires_at FROM {{schema}}.refresh_tokens WHERE token_hash=$1 FOR UPDATE"), oldHash).Scan(&consumed, &expiry)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, nil, model.ErrInvalidRefreshToken
+		return nil, nil, nil, false, model.ErrInvalidRefreshToken
 	}
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
-	if consumed != nil {
+	// A consumed token is a retry within the grace period while its replacement has
+	// never been used (the client lost the response); otherwise it is reuse.
+	retryOf := ""
+	if consumed != nil && now.Before(expiry) {
+		replacement, ok, err := r.unusedReplacement(ctx, tx, oldHash, *consumed, now, req.GracePeriod)
+		if err != nil {
+			return nil, nil, nil, false, err
+		}
+		if ok {
+			retryOf = replacement
+		}
+	}
+	if consumed != nil && retryOf == "" {
 		if err := r.revokeSessionTx(ctx, tx, s.ID, "refresh_reuse"); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, false, err
 		}
 		// Preserve the existing identity-wide access-token invalidation response.
 		if _, err := tx.ExecContext(ctx, r.q("UPDATE {{schema}}.users SET token_version=token_version+1, updated_at=$1 WHERE id=$2"), now, userID); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, false, err
 		}
 		if err := tx.Commit(); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, false, err
 		}
-		return nil, nil, nil, &model.RefreshTokenReuseError{UserID: userID, FamilyID: familyID}
+		return nil, nil, nil, false, &model.RefreshTokenReuseError{UserID: userID, FamilyID: familyID}
 	}
 	if !now.Before(expiry) {
-		return nil, nil, nil, model.ErrInvalidRefreshToken
+		return nil, nil, nil, false, model.ErrInvalidRefreshToken
 	}
 	// No token is consumed for a workspace the user cannot access.
 	m, err := scanMembership(tx.QueryRowContext(ctx, r.q("SELECT "+membershipColumns+" FROM {{schema}}.memberships WHERE user_id=$1 AND tenant_id=$2"), userID, tenantID))
 	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, model.ErrNotFound) {
-		return nil, nil, nil, model.ErrNoActiveMembership
+		return nil, nil, nil, false, model.ErrNoActiveMembership
 	}
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
 	if !m.IsActive() {
-		return nil, nil, nil, model.ErrNoActiveMembership
+		return nil, nil, nil, false, model.ErrNoActiveMembership
 	}
 	s.ExpiresAt = req.ExpiresAt
 	if s.AbsoluteExpiresAt.Before(s.ExpiresAt) {
 		s.ExpiresAt = s.AbsoluteExpiresAt
 	}
 	s.LastUsedAt = now
-	if _, err := tx.ExecContext(ctx, r.q("UPDATE {{schema}}.refresh_tokens SET revoked_at=$1 WHERE token_hash=$2"), now, oldHash); err != nil {
-		return nil, nil, nil, err
+	if retryOf == "" {
+		if _, err := tx.ExecContext(ctx, r.q("UPDATE {{schema}}.refresh_tokens SET revoked_at=$1 WHERE token_hash=$2"), now, oldHash); err != nil {
+			return nil, nil, nil, false, err
+		}
+	} else if err := r.revokeReplacement(ctx, tx, retryOf, now); err != nil {
+		return nil, nil, nil, false, err
 	}
 	if _, err := tx.ExecContext(ctx, r.q("UPDATE {{schema}}.sessions SET expires_at=$1,last_used_at=$2 WHERE id=$3"), s.ExpiresAt, now, s.ID); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
-	if err := r.insertSessionRefresh(ctx, tx, s, req); err != nil {
-		return nil, nil, nil, err
+	tokenID, err := r.insertSessionRefresh(ctx, tx, s, req)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	if err := r.recordReplacement(ctx, tx, oldHash, tokenID, req.GracePeriod); err != nil {
+		return nil, nil, nil, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
-	return u, m, s, nil
+	return u, m, s, retryOf != "", nil
 }
 
 func (r *Repository) revokeSessionTx(ctx context.Context, tx *sql.Tx, sessionID, reason string) error {
