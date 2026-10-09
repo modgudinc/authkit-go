@@ -1869,7 +1869,9 @@ access tokens are revoked without touching the identity session). `Login` delibe
 collapses not-found / wrong-password / disabled / locked into a single
 `ErrInvalidCredentials` to avoid account enumeration (it does NOT collapse
 `ErrNoActiveMembership`, which is an authorization, not an authentication, outcome); the
-specific reason is logged server-side only.
+specific reason is logged server-side only. A storage failure (an unreachable database,
+a missing migration) is `ErrInternal`, never `ErrInvalidCredentials`, and the same holds
+for `APIKeyService.Validate` and `ErrInvalidAPIKey`.
 
 **Do not render `err.Error()` to end users** — wrapped errors may carry internal
 context. Map to a status with `errors.Is`, and log the raw error server-side.

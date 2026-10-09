@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +188,26 @@ func TestLoginUnknownUserReturnsGenericError(t *testing.T) {
 	})
 	if !errors.Is(err, model.ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+}
+
+// A user that cannot be read (database down, migration missing) is an internal
+// error, not a wrong password, so the application answers 500 instead of telling the
+// person their credentials are wrong. The driver's error stays in the log.
+func TestLoginStorageFailureIsInternalError(t *testing.T) {
+	repo := &fakeAuthRepository{getByEmailErr: errors.New("failed to get user by email: dial tcp 10.0.0.5:5432: connection refused")}
+	svc := newTestAuthService(repo)
+	ctx := context.Background()
+
+	_, loginErr := svc.Login(ctx, model.LoginRequest{Email: "user@acme.test", Password: "whatever", TenantID: testTenantID})
+	_, byEmailErr := svc.LoginByEmail(ctx, model.LoginByEmailRequest{Email: "user@acme.test", Password: "whatever"})
+	for name, err := range map[string]error{"Login": loginErr, "LoginByEmail": byEmailErr} {
+		if !errors.Is(err, model.ErrInternal) || errors.Is(err, model.ErrInvalidCredentials) {
+			t.Fatalf("%s: expected ErrInternal and not ErrInvalidCredentials, got %v", name, err)
+		}
+		if strings.Contains(err.Error(), "10.0.0.5") {
+			t.Fatalf("%s: the driver error reached the caller: %v", name, err)
+		}
 	}
 }
 
