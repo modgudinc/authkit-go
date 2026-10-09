@@ -1688,12 +1688,14 @@ The library currently requires PostgreSQL with the `authkit` schema containing t
 - **`authkit.sessions`** (optional, migrations `000002` and `000003`): Login records for installation-bound and verified sign-in sessions, with the sign-in method; see [installation sessions](docs/installation-sessions.md)
 - **`authkit.external_identities`** (optional, migration `000004`): Outside sign-in accounts keyed by `(provider, subject)`, each linked to one user; see [verified sign-in](docs/verified-sign-in.md)
 
-Migration scripts are included in [`migrations/`](migrations/). Migration `000001` is
-the single consolidated schema (edited in place across `0.x`); a fresh `migrate up`
-gives the current schema:
+The migrations ship inside the module: `authkit.Migrations` returns them as numbered
+SQL files for golang-migrate or any tool that runs `NNNNNN_name.up.sql` files in
+order. Apply them all; a migration that has shipped in a release never changes. See
+[database migrations](docs/migrations.md).
 
-```bash
-migrate -path migrations -database "$DATABASE_URL" up
+```go
+files, err := authkit.Migrations("") // the default authkit schema
+source, err := iofs.New(files, ".")   // github.com/golang-migrate/migrate/v4/source/iofs
 ```
 
 ### Configurable Schema
@@ -1711,7 +1713,7 @@ identity, err := authkit.New(authkit.Config{
 })
 ```
 
-Schema names are validated as simple PostgreSQL identifiers and quoted before being inserted into SQL. If you use a custom schema, copy the migration and replace `authkit` with your schema name before applying it.
+Schema names are validated as simple PostgreSQL identifiers and quoted before being inserted into SQL. For a custom schema, `authkit.Migrations("my_identity")` returns the migrations with that schema in place of `authkit`.
 
 ## Security Best Practices
 

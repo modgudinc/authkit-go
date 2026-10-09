@@ -8,8 +8,8 @@ Session support is disabled by default.
 
 Apply `000002_installation_sessions.up.sql` and then
 `000003_session_sign_in.up.sql` after the identity migration before enabling the
-feature. For a custom `IdentitySchema`, replace the schema name consistently in
-each migration file, just as with the identity migration.
+feature. `authkit.Migrations` returns them all, and for a custom `IdentitySchema`
+it names your schema in place of `authkit` ([migrations.md](migrations.md)).
 
 ```go
 config.SessionConfig = authkit.SessionConfig{

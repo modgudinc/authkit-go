@@ -26,7 +26,7 @@ make postgres-up
 make test-integration
 ```
 
-For a custom schema, copy the migration and replace `authkit` with your configured schema name.
+For a custom schema, apply the migrations from `authkit.Migrations("your_schema")`, which name your schema in place of `authkit` (see [migrations.md](migrations.md)).
 
 ## Integration Tests Cannot Connect To PostgreSQL
 
