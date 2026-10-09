@@ -373,7 +373,7 @@ func TestSingleSessionLogoutEnablesReuseDetection(t *testing.T) {
 
 	// Replaying the logged-out token must be detected as reuse, not as a benign
 	// invalid token — the retained, revoked row is what makes that possible.
-	if _, _, err := repo.RotateRefreshToken(ctx, tokenHash, repository.CreateRefreshTokenRequest{ //nolint:gosec // G101 false positive: fixed test token-hash literal, not a credential
+	if _, _, _, err := repo.RotateRefreshToken(ctx, tokenHash, repository.CreateRefreshTokenRequest{ //nolint:gosec // G101 false positive: fixed test token-hash literal, not a credential
 		UserID:    userID,
 		TokenHash: "logout-reuse-replacement",
 		ExpiresAt: time.Now().Add(time.Hour),

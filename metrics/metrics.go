@@ -48,6 +48,10 @@ const (
 	// omits "Token" so it does not trip gosec's hardcoded-credential heuristic (G101);
 	// the metric string is unchanged.
 	CounterRefreshReuse = "authkit_refresh_token_reuse_total"
+	// CounterRefreshRetry counts refreshes accepted as a retry within
+	// JWTConfig.RefreshGracePeriod: a client presented a consumed refresh token whose
+	// replacement it never used, typically because it lost the response.
+	CounterRefreshRetry = "authkit_refresh_token_retry_total"
 	// CounterRateLimited counts operations rejected by a configured RateLimiter.
 	// Emitted with a "key" label identifying the operation/bucket.
 	CounterRateLimited = "authkit_rate_limited_total"

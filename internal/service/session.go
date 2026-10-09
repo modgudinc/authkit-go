@@ -288,9 +288,9 @@ func (s *TokenService) refreshBoundPair(ctx context.Context, token, tenantID str
 	}
 	replacement := boundRefreshPrefix + random
 	ip, agent, name := sessionPointers(info)
-	user, membership, session, err := s.repo.RotateBoundRefresh(ctx, s.sessionConfig.Namespace, s.hashToken(token), tenantID, repository.CreateRefreshTokenRequest{
+	user, membership, session, retried, err := s.repo.RotateBoundRefresh(ctx, s.sessionConfig.Namespace, s.hashToken(token), tenantID, repository.CreateRefreshTokenRequest{
 		TokenHash: s.hashToken(replacement), ExpiresAt: time.Now().Add(s.refreshExpiry),
-		IPAddress: ip, UserAgent: agent, DeviceName: name,
+		IPAddress: ip, UserAgent: agent, DeviceName: name, GracePeriod: s.refreshGrace,
 	})
 	if err != nil {
 		if errors.Is(err, model.ErrRefreshTokenReuse) {
@@ -298,6 +298,9 @@ func (s *TokenService) refreshBoundPair(ctx context.Context, token, tenantID str
 			s.logger.Warn(ctx, "bound refresh token reuse detected; identity token version invalidated", "error", err)
 		}
 		return nil, sanitizeError(ctx, s.logger, "rotate bound refresh token", err)
+	}
+	if retried {
+		s.logRefreshRetry(ctx, user.ID)
 	}
 	access, expires, err := s.mintSessionAccess(user, membership, session)
 	if err != nil {

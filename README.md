@@ -503,7 +503,7 @@ if err != nil {
 2. Server atomically consumes the current refresh token
 3. New refresh token is stored in the same transaction
 4. New access token (JWT) is generated
-5. If the old refresh token is missing, expired, or already consumed, rotation fails
+5. If the old refresh token is missing, expired, or already consumed, rotation fails; a consumed token is treated as theft unless `JWTConfig.RefreshGracePeriod` lets the client retry ([docs/refresh-tokens.md](docs/refresh-tokens.md))
 6. Client receives both new tokens
 
 ### Revoke Refresh Tokens
@@ -1653,12 +1653,13 @@ code rather than via environment.
 - **`JWTConfig.VerificationKeys`**: Further public keys accepted during a key switch or rotation
 - **`JWTConfig.AccessExpiry`**: Access token expiration (default: 15 minutes)
 - **`JWTConfig.RefreshExpiry`**: Refresh token expiration (default: 7 days)
+- **`JWTConfig.RefreshGracePeriod`**: How long a client may retry a refresh whose response it lost, while the replacement it never received is unused (default: 0, strict rotation; needs migration `000006`; see [docs/refresh-tokens.md](docs/refresh-tokens.md))
 - **`PasswordConfig.BcryptCost`**: Bcrypt cost factor (default: 12, range: 4-31)
 - **`OTPConfig.RateLimitDuration`**: Minimum time between OTP generation attempts (default: 1 minute)
 - **`DatabaseConnection.IdentitySchema`**: PostgreSQL schema name (default: `authkit`)
 - **`SecretConfig.EncryptionKey`**: Base64-encoded 32-byte AES-256 key for `SecretService`
 - **`Logger`**: Logger implementation (default: nil, no logging). Some security signals (OTP lockout, refresh-token reuse, sub-threshold failed logins) are logger-only — inject one in production.
-- **`Metrics`**: Counter sink (default: nil, no metrics); survives independently of log level, so it's the recommended basis for alerting. The library emits the `metrics.Counter*` constants — `authkit_login_success_total`, `authkit_login_failure_total`, `authkit_account_lockout_total`, `authkit_otp_failure_total`, `authkit_otp_lockout_total`, `authkit_refresh_token_reuse_total`, `authkit_rate_limited_total`, `authkit_rate_limiter_error_total`, `authkit_best_effort_write_failure_total` — see the `metrics` package for the authoritative list.
+- **`Metrics`**: Counter sink (default: nil, no metrics); survives independently of log level, so it's the recommended basis for alerting. The library emits the `metrics.Counter*` constants — `authkit_login_success_total`, `authkit_login_failure_total`, `authkit_account_lockout_total`, `authkit_otp_failure_total`, `authkit_otp_lockout_total`, `authkit_refresh_token_reuse_total`, `authkit_refresh_token_retry_total`, `authkit_rate_limited_total`, `authkit_rate_limiter_error_total`, `authkit_best_effort_write_failure_total` — see the `metrics` package for the authoritative list.
 - **`RateLimiter`**: Optional throttle (`ratelimit.RateLimiter`) consulted by `Login`/`RefreshToken`/`OTPService.Generate` (default: nil, no limiting). The recommended place to enforce IP/global rate limiting — see "Rate Limiting" below.
 - **`VerifyConnectivity`**: When `true`, `New` pings both DB handles and fails fast if either is unreachable (default: `false`, lazy connection). See "Health Checks".
 

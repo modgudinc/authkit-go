@@ -657,7 +657,7 @@ func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repositor
 		t.Fatalf("create refresh token: %v", err)
 	}
 
-	user, _, err := repo.RotateRefreshToken(ctx, oldHash, repository.CreateRefreshTokenRequest{
+	user, _, _, err := repo.RotateRefreshToken(ctx, oldHash, repository.CreateRefreshTokenRequest{
 		TokenHash: "new-refresh-hash",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -669,7 +669,7 @@ func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repositor
 	}
 
 	// Reusing the already-consumed old token must be detected as reuse/theft.
-	_, _, err = repo.RotateRefreshToken(ctx, oldHash, repository.CreateRefreshTokenRequest{
+	_, _, _, err = repo.RotateRefreshToken(ctx, oldHash, repository.CreateRefreshTokenRequest{
 		TokenHash: "should-not-exist",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -682,7 +682,7 @@ func testRefreshTokenRotation(t *testing.T, ctx context.Context, repo *repositor
 
 	// Reuse detection must revoke the whole family, so the active replacement
 	// token ("new-refresh-hash") can no longer be rotated either.
-	if _, _, err := repo.RotateRefreshToken(ctx, "new-refresh-hash", repository.CreateRefreshTokenRequest{
+	if _, _, _, err := repo.RotateRefreshToken(ctx, "new-refresh-hash", repository.CreateRefreshTokenRequest{
 		TokenHash: "should-also-not-exist",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}); err == nil {

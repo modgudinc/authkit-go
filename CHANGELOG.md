@@ -52,6 +52,14 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   runs them in order, so applications no longer copy them from the repository. For a
   custom `IdentitySchema` it returns them with that schema in place of `authkit`,
   replacing the hand edit. Guide: [docs/migrations.md](docs/migrations.md).
+- `JWTConfig.RefreshGracePeriod` lets a client retry a refresh whose response it lost
+  (a timeout, a process killed before it saved the new token) instead of being signed
+  out everywhere as a suspected thief. A consumed refresh token can be exchanged again
+  within the period while its replacement has never been used; the unused replacement
+  is revoked. Once the replacement is used, the old token is reuse as before, so theft
+  is still caught on the second of the two refreshes. Off by default. Migration
+  `000006_refresh_token_replacement`, counter `authkit_refresh_token_retry_total`.
+  Guide: [docs/refresh-tokens.md](docs/refresh-tokens.md).
 
 ### Security
 
@@ -100,13 +108,15 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   migration 000003 before deploying this release; session queries read its new
   column. It is safe to apply while the previous release runs. Disabled mode needs
   neither 000003 nor 000004 unless it uses `ExternalIdentityService` (000004).
+- Applications that set `JWTConfig.RefreshGracePeriod` must apply migration 000006
+  first. It only adds a nullable column; code without a grace period never touches it.
 - Existing interfaces, request and response types are unchanged; the new calls are
   on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`),
   except `UserService.MarkEmailVerified`, which, like 0.20.1's `MembershipService`
   additions, extends an interface authkit returns. `model.Session` gains
   `SignInMethod`, `model.User` gains `EmailVerifiedAt`, and `JWTConfig` gains
-  `SigningKey` and `VerificationKeys` (positional `JWTConfig` literals need keyed
-  fields).
+  `SigningKey`, `VerificationKeys` and `RefreshGracePeriod` (positional `JWTConfig`
+  literals need keyed fields).
 
 ## [0.20.2] - 2026-09-07
 

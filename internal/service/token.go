@@ -83,7 +83,8 @@ type TokenService struct {
 	jwtService             *JWTService
 	repo                   *repository.Repository
 	refreshExpiry          time.Duration
-	refreshTokenHMACSecret string // Secret for HMAC-SHA256 hashing of refresh tokens
+	refreshGrace           time.Duration // see WithRefreshGracePeriod
+	refreshTokenHMACSecret string        // Secret for HMAC-SHA256 hashing of refresh tokens
 	logger                 logger.Logger
 	metrics                metrics.Metrics
 }
@@ -124,6 +125,24 @@ type TokenOption func(*TokenService)
 
 func WithTokenSessions(config model.SessionConfig) TokenOption {
 	return func(s *TokenService) { s.sessionConfig = config }
+}
+
+// WithRefreshGracePeriod lets a consumed refresh token be exchanged again for up to
+// grace after it was consumed, while the token that replaced it has never been used:
+// a client that lost the response to a refresh can retry it. The unused replacement
+// is revoked. Zero (the default) keeps strict rotation. A positive period needs
+// migration 000006.
+func WithRefreshGracePeriod(grace time.Duration) TokenOption {
+	return func(s *TokenService) { s.refreshGrace = grace }
+}
+
+// logRefreshRetry records a refresh accepted as a retry within the grace period.
+func (s *TokenService) logRefreshRetry(ctx context.Context, userID string) {
+	s.logger.Info(ctx, "Refresh token retried within the grace period; its unused replacement is revoked",
+		"event", "refresh_token_retry",
+		"user_id", userID,
+	)
+	incMetric(s.metrics, metrics.CounterRefreshRetry)
 }
 
 // GenerateTokenPair generates a workspace-scoped access token (JWT) plus a new
@@ -396,18 +415,19 @@ func (s *TokenService) RefreshTokenPair(
 	// The token is looked up WITHOUT filtering on revoked state: a REVOKED token is NOT
 	// short-circuited here — it must fall through to RotateRefreshToken so its
 	// reuse/theft detection (family revoke + token_version bump + alert) still fires. So
-	// only a LIVE token gets the non-destructive membership pre-check; a missing or
-	// suspended membership is rejected with ErrNoActiveMembership without touching the
-	// session. The membership is read from the PRIMARY so a just-committed revoke/suspend
-	// is observed immediately.
+	// only a LIVE token, or one the rotation would accept as a retry within the grace
+	// period, gets the non-destructive membership pre-check; a missing or suspended
+	// membership is rejected with ErrNoActiveMembership without touching the session.
+	// The membership is read from the PRIMARY so a just-committed revoke/suspend is
+	// observed immediately.
 	oldTokenHash := s.hashToken(refreshToken)
-	userID, revoked, err := s.repo.GetRefreshTokenUserByHash(ctx, oldTokenHash)
+	userID, revoked, retryable, err := s.repo.GetRefreshTokenUserByHash(ctx, oldTokenHash, s.refreshGrace)
 	if err != nil {
 		s.logger.Warn(ctx, "Refresh token not found", "error", err.Error())
 		return nil, sanitizeError(ctx, s.logger, "lookup refresh token", err)
 	}
 	var preCheckedMembership *model.Membership
-	if !revoked {
+	if !revoked || retryable {
 		membership, mErr := s.repo.GetMembershipFromPrimary(ctx, userID, tenantID)
 		if mErr != nil {
 			if errors.Is(mErr, model.ErrNotFound) {
@@ -439,22 +459,24 @@ func (s *TokenService) RefreshTokenPair(
 	if s.sessionConfig.Mode != model.SessionDisabled {
 		rotate = s.repo.RotateRefreshTokenWithUserLock
 	}
-	user, tokenID, err := rotate(ctx, oldTokenHash, repository.CreateRefreshTokenRequest{
-		TokenHash:  newTokenHash,
-		IPAddress:  ipAddress,
-		UserAgent:  userAgent,
-		DeviceName: deviceName,
-		ExpiresAt:  expiresAt,
+	user, tokenID, retried, err := rotate(ctx, oldTokenHash, repository.CreateRefreshTokenRequest{
+		TokenHash:   newTokenHash,
+		IPAddress:   ipAddress,
+		UserAgent:   userAgent,
+		DeviceName:  deviceName,
+		ExpiresAt:   expiresAt,
+		GracePeriod: s.refreshGrace,
 	})
 	if err != nil {
 		// Surface refresh-token reuse/theft as a distinguishable, elevated security
 		// event (separate from routine invalid/expired-token failures) so operators
 		// can alert on it via log level/event name and the metrics counter rather
 		// than substring-matching. RotateRefreshToken has already revoked the whole
-		// family and bumped the user's token_version. NOTE: this also fires on a
-		// benign lost-response retry (the client never received the rotated token),
-		// which is an inherent property of strict reuse detection — treat the counter
-		// as "possible theft", not "confirmed theft".
+		// family and bumped the user's token_version. NOTE: without a grace period
+		// (WithRefreshGracePeriod) this also fires on a benign lost-response retry (the
+		// client never received the rotated token), which is an inherent property of
+		// strict reuse detection — treat the counter as "possible theft", not
+		// "confirmed theft".
 		var reuseErr *model.RefreshTokenReuseError
 		if errors.As(err, &reuseErr) {
 			s.logger.Error(ctx, "SECURITY: refresh token reuse detected; token family revoked and all sessions invalidated",
@@ -470,6 +492,9 @@ func (s *TokenService) RefreshTokenPair(
 		// model.ErrRefreshTokenReuse) so callers can distinguish a benign
 		// invalid/expired token from a detected reuse/theft event.
 		return nil, sanitizeError(ctx, s.logger, "rotate refresh token", err)
+	}
+	if retried {
+		s.logRefreshRetry(ctx, user.ID)
 	}
 
 	// 3. Re-check account standing before minting a new access token.
@@ -508,8 +533,9 @@ func (s *TokenService) RefreshTokenPair(
 	// first use — a safe born-revoked token, not an authorization gap.
 	//
 	// preCheckedMembership is non-nil here: mint is reached only when the token was live
-	// (revoked == false, so the pre-check ran) AND the rotate succeeded — a revoked token
-	// would have been caught by RotateRefreshToken's reuse path above. The guard makes
+	// or retryable (so the pre-check ran) AND the rotate succeeded — any other revoked
+	// token would have been caught by RotateRefreshToken's reuse path above, and a
+	// token the pre-check found not retryable cannot become retryable. The guard makes
 	// that invariant explicit and prevents a nil deref if the flow is ever refactored.
 	if preCheckedMembership == nil {
 		return nil, sanitizeError(ctx, s.logger, "mint rotated access token", fmt.Errorf("internal: missing pre-checked membership for refresh"))
