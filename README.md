@@ -2,7 +2,7 @@
 
 A Go library for identity and authentication management built on a **decoupled-identity** model: a user is a single **global identity**, and access to a tenant (workspace) is a separate **membership** row. It supports API key authentication, invitation-based onboarding, and OTP verification.
 
-[![Go Version](https://img.shields.io/badge/go-1.25-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26-blue.svg)](https://golang.org/dl/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
 ## Features

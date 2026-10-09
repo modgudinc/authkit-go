@@ -20,11 +20,11 @@ func validTestConfig() Config {
 			IdentityRWDB: db,
 			IdentityRODB: db,
 		},
-		JWTConfig: JWTConfig{
+		JWTConfig: JWTConfig{ //nolint:gosec // G101 false positive: fixed test secrets
 			AccessSecret:           "access-secret-that-is-at-least-32-bytes-long",
 			RefreshTokenHMACSecret: "refresh-hmac-secret-that-is-at-least-32-bytes",
 		},
-		APIKeyConfig: APIKeyConfig{
+		APIKeyConfig: APIKeyConfig{ //nolint:gosec // G101 false positive: fixed test secret
 			HMACSecret: "api-hmac-secret-that-is-at-least-32-bytes",
 		},
 	}

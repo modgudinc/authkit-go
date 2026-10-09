@@ -64,8 +64,18 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   `AccessSecret` is set. An HS256 token that carries a `kid` is now refused. authkit
   has never put a `kid` on its HS256 tokens, so tokens it issued are unaffected.
 
+### Changed
+
+- Update `golang.org/x/crypto` to v0.57.0, which requires Go 1.26 (0.20.x needed
+  1.25), with indirect updates to `golang.org/x/sync` v0.23.0 and
+  `golang.org/x/text` v0.42.0. Update `github.com/jackc/pgx/v5` to v5.11.0.
+- Update pinned CI actions: checkout v7.0.1, setup-go v7.0.0, gosec v2.29.0,
+  govulncheck-action v1.1.0 and CodeQL SARIF upload v4.37.9. CI lints with
+  golangci-lint v2.14.0, since v2.6.0 cannot load a module that targets Go 1.26.
+
 ### Upgrade
 
+- Build with Go 1.26 or newer.
 - Every application must apply migration 000005 before deploying this release:
   every user query reads `users.email_verified_at`. It only adds a nullable column,
   so it is safe while the previous release runs. Existing users start unverified.

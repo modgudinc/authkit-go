@@ -128,7 +128,7 @@ func TestIsUserLocked(t *testing.T) {
 }
 
 func TestTokenServiceHashToken(t *testing.T) {
-	s := &TokenService{refreshTokenHMACSecret: "unit-test-refresh-hmac-0123456789abcdef0123"}
+	s := &TokenService{refreshTokenHMACSecret: "unit-test-refresh-hmac-0123456789abcdef0123"} //nolint:gosec // G101 false positive: fixed test secret
 
 	h := s.hashToken("a-refresh-token")
 	if h != s.hashToken("a-refresh-token") {
@@ -140,7 +140,7 @@ func TestTokenServiceHashToken(t *testing.T) {
 	if s.hashToken("a-different-token") == h {
 		t.Fatal("distinct inputs must hash differently")
 	}
-	other := &TokenService{refreshTokenHMACSecret: "unit-test-refresh-hmac-ffffffffffffffffffff"}
+	other := &TokenService{refreshTokenHMACSecret: "unit-test-refresh-hmac-ffffffffffffffffffff"} //nolint:gosec // G101 false positive: fixed test secret
 	if other.hashToken("a-refresh-token") == h {
 		t.Fatal("a different HMAC secret must produce a different hash (keyed)")
 	}
