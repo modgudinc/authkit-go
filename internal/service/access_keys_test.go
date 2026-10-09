@@ -356,7 +356,7 @@ func TestNewAccessKeysRefusesBadKeys(t *testing.T) {
 	}
 	shortEd := edKey[:40]
 	evenExponent := &rsa.PublicKey{N: sharedRSAKey(t).N, E: 65536}
-	offCurve := &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)}
+	offCurve := &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)} //nolint:staticcheck // SA1019: an off-curve key on purpose; the newer constructors refuse to build one
 
 	for _, tc := range []struct {
 		name         string

@@ -23,7 +23,7 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
-const defaultDatabaseURL = "postgres://authkit_test:authkit_test@localhost:55432/authkit_test?sslmode=disable"
+const defaultDatabaseURL = "postgres://authkit_test:authkit_test@localhost:55432/authkit_test?sslmode=disable" //nolint:gosec // G101 false positive: the local test database's fixed credentials
 
 func TestMigrationsAlignWithRepository(t *testing.T) {
 	ctx := context.Background()
