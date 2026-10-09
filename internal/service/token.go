@@ -261,13 +261,15 @@ func (s *TokenService) CreateIdentitySession(ctx context.Context, userID string,
 
 // sessionPointers converts a *model.SessionInfo into the nullable string pointers
 // the repository stores: a nil SessionInfo or an empty field becomes a nil pointer
-// (stored as SQL NULL).
+// (stored as SQL NULL). The IP address is stored as an address: "host:port" keeps
+// its host, and one that does not parse is dropped, rather than failing the sign-in
+// on the INET column.
 func sessionPointers(sessionInfo *model.SessionInfo) (ipAddress, userAgent, deviceName *string) {
 	if sessionInfo == nil {
 		return nil, nil, nil
 	}
-	if sessionInfo.IPAddress != "" {
-		ipAddress = &sessionInfo.IPAddress
+	if ip := cleanIPAddress(sessionInfo.IPAddress); ip != "" {
+		ipAddress = &ip
 	}
 	if sessionInfo.UserAgent != "" {
 		userAgent = &sessionInfo.UserAgent

@@ -79,6 +79,7 @@ type AuthKit struct {
 	accessTokenExpiry  time.Duration
 	refreshTokenExpiry time.Duration
 	refreshGrace       time.Duration // JWTConfig.RefreshGracePeriod
+	recordSignIns      bool          // Config.RecordSignIns
 
 	apiKeyHMACSecret     string
 	passwordBcryptCost   int
@@ -260,6 +261,7 @@ func New(config Config) (*AuthKit, error) {
 		accessTokenExpiry:  accessTokenExpiry,
 		refreshTokenExpiry: refreshTokenExpiry,
 		refreshGrace:       config.JWTConfig.RefreshGracePeriod,
+		recordSignIns:      config.RecordSignIns,
 
 		apiKeyHMACSecret:     config.APIKeyConfig.HMACSecret,
 		passwordBcryptCost:   passwordBcryptCost,
@@ -378,9 +380,20 @@ func (k *AuthKit) SessionService() SessionService {
 	return service.NewSessionService(&repo, k.sessionConfig, k.logger)
 }
 
+// SignInHistoryService reads the sign-in history that Config.RecordSignIns
+// records. Requires migration 000007; see docs/sign-in-history.md.
+func (k *AuthKit) SignInHistoryService() SignInHistoryService {
+	repo := k.repository()
+	return service.NewSignInHistoryService(&repo, k.logger)
+}
+
 func (k *AuthKit) newAuthService() *service.AuthService {
 	repo := k.repository()
-	return service.NewAuthService(&repo, k.newPasswordService(), k.newTokenService(), k.newJWTService(), k.logger, k.metrics, k.rateLimiter)
+	var opts []service.AuthOption
+	if k.recordSignIns {
+		opts = append(opts, service.WithSignInHistory(&repo, k.sessionConfig.Namespace))
+	}
+	return service.NewAuthService(&repo, k.newPasswordService(), k.newTokenService(), k.newJWTService(), k.logger, k.metrics, k.rateLimiter, opts...)
 }
 
 // newPasswordService / newJWTService / newTokenService return the concrete

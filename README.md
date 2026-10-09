@@ -16,6 +16,7 @@ A Go library for identity and authentication management built on a **decoupled-i
 - **Email Verification State**: `User.EmailVerifiedAt`, set by `UserService.MarkEmailVerified` after a code or link proves the address; with `OTPService` and `OpenSession` it gives passwordless sign-in by emailed code
 - **Asymmetric Signing Keys**: Optional Ed25519, ECDSA P-256 or RSA access-token signing (any `crypto.Signer`, KMS keys included) with key ids, a published JSON Web Key Set, and rotation without logging anyone out
 - **Linked Sign-In Identities**: `ExternalIdentityService` maps a provider account (provider + subject) to one user, linking by verified email only under safe rules; bring your own OAuth/OIDC client
+- **Sign-In History**: Optional record of every sign-in attempt on an account (method, workspace, session, IP address, user agent, and the reason for a refusal), read with `SignInHistoryService`
 - **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 string identifiers
 - **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`LoginByEmail`/`RefreshToken`/OTP generation
 - **Flexible Logging & Metrics**: Dependency-injected, context-aware `Logger` and an optional `Metrics` counter sink
@@ -37,6 +38,7 @@ go get github.com/modgudinc/authkit-go
 - [Optional installation-bound sessions](docs/installation-sessions.md)
 - [Verified sign-in and linked identities (OAuth/OIDC, email links, device codes)](docs/verified-sign-in.md)
 - [Asymmetric signing keys, the key set, and key rotation](docs/signing-keys.md)
+- [Sign-in history](docs/sign-in-history.md)
 
 ## Quick Start
 
@@ -1662,6 +1664,7 @@ code rather than via environment.
 - **`Metrics`**: Counter sink (default: nil, no metrics); survives independently of log level, so it's the recommended basis for alerting. The library emits the `metrics.Counter*` constants — `authkit_login_success_total`, `authkit_login_failure_total`, `authkit_account_lockout_total`, `authkit_otp_failure_total`, `authkit_otp_lockout_total`, `authkit_refresh_token_reuse_total`, `authkit_refresh_token_retry_total`, `authkit_rate_limited_total`, `authkit_rate_limiter_error_total`, `authkit_best_effort_write_failure_total` — see the `metrics` package for the authoritative list.
 - **`RateLimiter`**: Optional throttle (`ratelimit.RateLimiter`) consulted by `Login`/`RefreshToken`/`OTPService.Generate` (default: nil, no limiting). The recommended place to enforce IP/global rate limiting — see "Rate Limiting" below.
 - **`VerifyConnectivity`**: When `true`, `New` pings both DB handles and fails fast if either is unreachable (default: `false`, lazy connection). See "Health Checks".
+- **`RecordSignIns`**: When `true`, records every sign-in attempt on an existing account for `SignInHistoryService` (default: `false`; needs migration `000007`; see [docs/sign-in-history.md](docs/sign-in-history.md)).
 
 ### Expiration Duration
 
@@ -1688,6 +1691,7 @@ The library currently requires PostgreSQL with the `authkit` schema containing t
 - **`authkit.user_status_changes`**: Account status-change audit trail (enable/disable/lock/unlock), written in the same transaction as the change; read via `UserService.StatusHistory`, pruned via `UserService.CleanupStatusChanges`
 - **`authkit.sessions`** (optional, migrations `000002` and `000003`): Login records for installation-bound and verified sign-in sessions, with the sign-in method; see [installation sessions](docs/installation-sessions.md)
 - **`authkit.external_identities`** (optional, migration `000004`): Outside sign-in accounts keyed by `(provider, subject)`, each linked to one user; see [verified sign-in](docs/verified-sign-in.md)
+- **`authkit.sign_in_events`** (optional, migration `000007`): One row per sign-in attempt when `RecordSignIns` is set; read via `SignInHistoryService.List`, pruned via `SignInHistoryService.Cleanup`; see [sign-in history](docs/sign-in-history.md)
 
 The migrations ship inside the module: `authkit.Migrations` returns them as numbered
 SQL files for golang-migrate or any tool that runs `NNNNNN_name.up.sql` files in
@@ -2075,6 +2079,7 @@ This project is licensed under the Apache License, Version 2.0 - see the [LICENS
 - [x] Rate Limiting (pluggable `Config.RateLimiter` consulted by Login/RefreshToken/OTP generation)
 - [x] Metrics hooks (`Config.Metrics`) and health checks (`AuthKit.Ping` / `Config.VerifyConnectivity`)
 - [x] Verified sign-in sessions and linked sign-in identities (OAuth/OIDC client protocol left to the app)
+- [x] Sign-in history (`Config.RecordSignIns` + `SignInHistoryService`)
 - [ ] General audit logging beyond status changes (planned)
 - [ ] Key Rotation Support (planned)
 

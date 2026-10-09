@@ -48,6 +48,9 @@ type AuthService struct {
 	logger          logger.Logger
 	metrics         metrics.Metrics
 	rateLimiter     ratelimit.RateLimiter
+	// signIns records sign-in history (WithSignInHistory); nil when it is off.
+	signIns         signInRecorder
+	signInNamespace string
 }
 
 const (
@@ -67,6 +70,7 @@ const (
 //   - logger: Optional logger for structured logging
 //   - metrics: Optional counter sink for login/lockout events (may be nil)
 //   - rateLimiter: Optional throttle for Login/RefreshToken (may be nil)
+//   - opts: Optional behavior, such as WithSignInHistory
 func NewAuthService(
 	repo *repository.Repository,
 	passwordService *PasswordService,
@@ -75,8 +79,9 @@ func NewAuthService(
 	logger logger.Logger,
 	metrics metrics.Metrics,
 	rateLimiter ratelimit.RateLimiter,
+	opts ...AuthOption,
 ) *AuthService {
-	return &AuthService{
+	s := &AuthService{
 		repo:            repo,
 		passwordService: passwordService,
 		tokenService:    tokenService,
@@ -85,6 +90,10 @@ func NewAuthService(
 		metrics:         metrics,
 		rateLimiter:     rateLimiter,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // authenticateIdentity verifies email+password against the GLOBAL identity and
@@ -95,8 +104,10 @@ func NewAuthService(
 // a dummy bcrypt compare on the not-found / disabled / locked paths, so an
 // unauthenticated caller cannot distinguish them (no account / state enumeration). On
 // success it resets the failed-login count (if any) and updates last_login
-// (best-effort). It does NOT check workspace membership — that is the caller's gate.
-func (s *AuthService) authenticateIdentity(ctx context.Context, email, password string) (*model.User, error) {
+// (best-effort). It records a refusal of an existing account in the sign-in history
+// (attempt describes the sign-in); the caller records the outcome after it. It
+// does NOT check workspace membership — that is the caller's gate.
+func (s *AuthService) authenticateIdentity(ctx context.Context, email, password string, attempt signIn) (*model.User, error) {
 	// Read from the PRIMARY: the is_enabled/is_locked gate must observe an admin
 	// disable/lock (or an auto-lock just written by RegisterFailedLogin) immediately,
 	// not after replica catch-up.
@@ -124,6 +135,7 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 		s.passwordService.DummyVerify(password)
 		s.logger.Warn(ctx, "Login failed: account disabled", "user_id", user.ID, "email", maskEmail(email))
 		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_disabled")
+		s.recordSignInFailure(ctx, attempt, user.ID, model.SignInFailureAccountDisabled)
 		return nil, model.ErrInvalidCredentials
 	}
 
@@ -146,6 +158,7 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 			s.passwordService.DummyVerify(password)
 			s.logger.Warn(ctx, "Login failed: account locked", "user_id", user.ID, "locked_until", user.LockedUntil)
 			incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "account_locked")
+			s.recordSignInFailure(ctx, attempt, user.ID, model.SignInFailureAccountLocked)
 			return nil, model.ErrInvalidCredentials
 		}
 	}
@@ -157,6 +170,7 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 		s.passwordService.DummyVerify(password)
 		s.logger.Warn(ctx, "Login failed: account has no password", "user_id", user.ID, "email", maskEmail(email))
 		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "no_password")
+		s.recordSignInFailure(ctx, attempt, user.ID, model.SignInFailureNoPassword)
 		return nil, model.ErrInvalidCredentials
 	}
 
@@ -178,6 +192,7 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 		}
 
 		incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "bad_password")
+		s.recordSignInFailure(ctx, attempt, user.ID, model.SignInFailureBadPassword)
 		return nil, model.ErrInvalidCredentials
 	}
 
@@ -234,7 +249,8 @@ func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding
 
 	s.logger.Debug(ctx, "User login attempt", "email", maskEmail(email), "tenant_id", req.TenantID)
 
-	user, err := s.authenticateIdentity(ctx, email, req.Password)
+	attempt := signIn{method: model.SignInMethodPassword, tenantID: req.TenantID, installation: binding, info: req.SessionInfo}
+	user, err := s.authenticateIdentity(ctx, email, req.Password, attempt)
 	if err != nil {
 		return nil, err
 	}
@@ -244,12 +260,13 @@ func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding
 	if err != nil {
 		if errors.Is(err, model.ErrNoActiveMembership) {
 			incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "no_membership")
+			s.recordSignInFailure(ctx, attempt, user.ID, model.SignInFailureNoMembership)
 		}
 		return nil, err
 	}
 
 	// Mint the workspace-scoped access token + open the identity session.
-	tokenPair, err := s.tokenService.generateInstallationPair(ctx, user, membership, req.SessionInfo, binding)
+	tokenPair, session, err := s.tokenService.generateInstallationPair(ctx, user, membership, req.SessionInfo, binding)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to generate token pair", "error", err.Error())
 		return nil, sanitizeError(ctx, s.logger, "generate tokens", err)
@@ -257,6 +274,7 @@ func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding
 
 	s.logger.Info(ctx, "User login successful", "user_id", user.ID, "email", maskEmail(email), "tenant_id", req.TenantID)
 	incMetric(s.metrics, metrics.CounterLoginSuccess)
+	s.recordSignInSuccess(ctx, attempt, user.ID, req.TenantID, session)
 
 	return &model.LoginResponse{
 		AccessToken:  tokenPair.AccessToken,
@@ -299,7 +317,8 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 
 	s.logger.Debug(ctx, "User login-by-email attempt", "email", maskEmail(email))
 
-	user, err := s.authenticateIdentity(ctx, email, req.Password)
+	attempt := signIn{method: model.SignInMethodPassword, tenantID: req.TenantID, installation: binding, info: req.SessionInfo}
+	user, err := s.authenticateIdentity(ctx, email, req.Password, attempt)
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +328,9 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 	// refresh token.
 	memberships, selected, err := s.selectWorkspace(ctx, user.ID, req.TenantID)
 	if err != nil {
+		if reason := signInFailureReason(err); reason != "" {
+			s.recordSignInFailure(ctx, attempt, user.ID, reason)
+		}
 		return nil, err
 	}
 
@@ -341,6 +363,7 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 
 	s.logger.Info(ctx, "User login-by-email successful", "user_id", user.ID, "workspace_selected", selected != nil)
 	incMetric(s.metrics, metrics.CounterLoginSuccess)
+	s.recordSignInSuccess(ctx, attempt, user.ID, resp.TenantID, session)
 	return resp, nil
 }
 

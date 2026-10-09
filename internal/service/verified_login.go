@@ -73,13 +73,18 @@ func (s *AuthService) OpenSession(ctx context.Context, req model.OpenSessionRequ
 	if err != nil {
 		return nil, sanitizeError(ctx, s.logger, "load user", err)
 	}
+	attempt := signIn{method: method, tenantID: req.TenantID, installation: req.Installation, info: req.SessionInfo}
 	if err := accountGate(user); err != nil {
 		s.logger.Warn(ctx, "Verified login refused: account not active", "user_id", user.ID, "error", err.Error())
+		s.recordSignInFailure(ctx, attempt, user.ID, signInFailureReason(err))
 		return nil, err
 	}
 
 	memberships, selected, err := s.selectWorkspace(ctx, user.ID, req.TenantID)
 	if err != nil {
+		if reason := signInFailureReason(err); reason != "" {
+			s.recordSignInFailure(ctx, attempt, user.ID, reason)
+		}
 		return nil, err
 	}
 
@@ -88,6 +93,9 @@ func (s *AuthService) OpenSession(ctx context.Context, req model.OpenSessionRequ
 		// The account changed between the gate above and the session insert (the
 		// repository re-checks it under a row lock). Report what changed.
 		err = s.recheckAccount(ctx, user.ID)
+		if reason := signInFailureReason(err); reason != "" {
+			s.recordSignInFailure(ctx, attempt, user.ID, reason)
+		}
 	}
 	if err != nil {
 		return nil, sanitizeError(ctx, s.logger, "open verified session", err)
@@ -118,6 +126,7 @@ func (s *AuthService) OpenSession(ctx context.Context, req model.OpenSessionRequ
 	s.logger.Info(ctx, "Verified login successful", "user_id", user.ID, "sign_in_method", method,
 		"session_bound", session != nil, "workspace_selected", selected != nil)
 	incMetric(s.metrics, metrics.CounterVerifiedLogin, "method", method)
+	s.recordSignInSuccess(ctx, attempt, user.ID, resp.TenantID, session)
 	return resp, nil
 }
 

@@ -14,6 +14,7 @@ instead of copying SQL out of the repository.
 | `000004_external_identities` | `external_identities` | `ExternalIdentityService` |
 | `000005_email_verification` | `users.email_verified_at` | Every deployment |
 | `000006_refresh_token_replacement` | `refresh_tokens.replaced_by` | `JWTConfig.RefreshGracePeriod` ([refresh-tokens.md](refresh-tokens.md)) |
+| `000007_sign_in_events` | `sign_in_events` | `Config.RecordSignIns` ([sign-in-history.md](sign-in-history.md)) |
 
 Each has an `.up.sql` and a `.down.sql`. With a migration tool, apply them all, in
 order. The ones a feature needs only add tables and a column that stay empty when

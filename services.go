@@ -45,6 +45,21 @@ type ExternalIdentityService interface {
 	ListByUser(ctx context.Context, userID string) ([]*model.ExternalIdentity, error)
 }
 
+// SignInHistoryService reads the sign-in history recorded when
+// Config.RecordSignIns is set: one SignInEvent per attempt on an existing account,
+// successful or refused. It is identity-wide, covering every application that
+// shares the identity database. The embedding application must authorize the actor
+// before passing a target userID. Requires migration 000007; see
+// docs/sign-in-history.md.
+type SignInHistoryService interface {
+	// List returns a page of the user's sign-in attempts, newest first. limit is 1
+	// to 200; anything else is ErrInvalidInput.
+	List(ctx context.Context, userID string, limit, offset int) ([]*model.SignInEvent, error)
+	// Cleanup deletes attempts older than olderThan (which must be positive) and
+	// returns how many it removed. Run it periodically to bound the history.
+	Cleanup(ctx context.Context, olderThan time.Duration) (int64, error)
+}
+
 // SessionService is scoped to Config.SessionConfig.Namespace. The embedding
 // application must authorize the actor before passing a target userID.
 // List/Get return records, including expired/revoked ones, not authentication.
@@ -283,6 +298,7 @@ var (
 	_ VerifiedLoginService    = (*service.AuthService)(nil)
 	_ ExternalIdentityService = (*service.ExternalIdentityService)(nil)
 	_ SessionService          = (*service.SessionService)(nil)
+	_ SignInHistoryService    = (*service.SignInHistoryService)(nil)
 	_ APIKeyService           = (*service.APIKeyService)(nil)
 	_ AuthService             = (*service.AuthService)(nil)
 	_ InvitationService       = (*service.InvitationService)(nil)
