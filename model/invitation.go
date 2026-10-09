@@ -26,7 +26,7 @@ type AcceptInvitationRequest struct {
 	Code         string // Invitation code being redeemed
 	Email        string // Email of the user being created; must match the invitation's target
 	DisplayName  string // Display name for the new user
-	PasswordHash string // Pre-hashed password (use PasswordService.HashPassword first)
+	PasswordHash string // Pre-hashed password (use PasswordService.HashPassword first); empty for a user without a password
 }
 
 // CreateInvitationRequest is the input to InvitationService.CreateInvitation.

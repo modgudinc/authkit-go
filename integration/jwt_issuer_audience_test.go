@@ -31,7 +31,7 @@ func TestAuthServiceJWTIssuerAudience(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	const (
 		accessSecret = "integration-access-secret-at-least-32-bytes"
