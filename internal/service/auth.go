@@ -101,6 +101,13 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 	// disable/lock (or an auto-lock just written by RegisterFailedLogin) immediately,
 	// not after replica catch-up.
 	user, err := s.repo.GetByEmailFromPrimary(ctx, email)
+	if err != nil && !errors.Is(err, model.ErrNotFound) {
+		// The user could not be read (database down, migration missing). That is not
+		// a wrong password, and it says nothing about whether the account exists:
+		// report an internal error so the caller does not tell the person their
+		// credentials are wrong.
+		return nil, sanitizeError(ctx, s.logger, "load user for login", err)
+	}
 	if err != nil {
 		// Burn a bcrypt comparison so the unknown-email path takes about as long as the
 		// wrong-password path (prevents enumeration by timing), and return a generic
@@ -201,6 +208,8 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 //
 // Returns model.ErrInvalidCredentials on auth failure and model.ErrNoActiveMembership
 // when the credentials are valid but the user has no active membership in req.TenantID.
+// A storage failure, such as an unreachable database, is an error wrapping
+// model.ErrInternal, never ErrInvalidCredentials.
 func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error) {
 	return s.login(ctx, req, nil)
 }
@@ -267,6 +276,7 @@ func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding
 //
 // Returns model.ErrInvalidCredentials on auth failure, and model.ErrNoActiveMembership
 // when req.TenantID is given but is not one of the identity's active memberships.
+// A storage failure is an error wrapping model.ErrInternal, as for Login.
 func (s *AuthService) LoginByEmail(ctx context.Context, req model.LoginByEmailRequest) (*model.LoginResponse, error) {
 	return s.loginByEmail(ctx, req, nil)
 }

@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -129,7 +130,9 @@ func (s *APIKeyService) Create(ctx context.Context, req model.CreateAPIKeyReques
 // 5. Update last_used_at (async, non-blocking)
 // 6. Return tenant context
 //
-// Returns the API key context (tenant_id, key_id) or error
+// Returns the API key context (tenant_id, key_id), model.ErrInvalidAPIKey for a key
+// that is malformed, unknown or expired, or an error wrapping model.ErrInternal when
+// the lookup itself fails.
 func (s *APIKeyService) Validate(ctx context.Context, apiKey string) (*model.APIKeyContext, error) {
 	// Validate key format. The specific reason is logged, not returned, so the
 	// caller only sees a generic invalid-key error.
@@ -143,6 +146,11 @@ func (s *APIKeyService) Validate(ctx context.Context, apiKey string) (*model.API
 
 	// Lookup API key by hash
 	key, err := s.repo.GetAPIKeyByHash(ctx, keyHash)
+	if err != nil && !errors.Is(err, model.ErrInvalidAPIKey) {
+		// The lookup failed (database down, migration missing): an internal error,
+		// not an invalid key.
+		return nil, sanitizeError(ctx, s.logger, "look up api key", err)
+	}
 	if err != nil {
 		// Untrusted input: log at Warn to avoid error-level floods from invalid keys.
 		s.logger.Warn(ctx, "API key not found", "error", err.Error())
