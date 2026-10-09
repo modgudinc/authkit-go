@@ -41,14 +41,26 @@ type InstallationLoginByEmailRequest struct {
 	Installation InstallationBinding
 }
 
+// SignInMethodPassword is the SignInMethod recorded for a session that authkit
+// opened after checking a password itself (LoginWithInstallation and
+// LoginByEmailWithInstallation). VerifiedLoginService.OpenSession refuses it, so
+// the value always means authkit verified a password.
+const SignInMethodPassword = "password"
+
 // Session describes one login, whose ID is also its refresh-token family ID.
 // It contains no credentials. TokenVersion is an internal credential-epoch
 // snapshot: account credential changes invalidate the bound login permanently.
+//
+// InstallationID is empty for a session opened by VerifiedLoginService.OpenSession
+// without an installation (a browser, for example). SignInMethod records how the
+// person signed in: SignInMethodPassword, or the method the application passed to
+// OpenSession ("google", "email_link", "device_code", ...).
 type Session struct {
 	ID                string     `json:"id"`
 	UserID            string     `json:"user_id"`
 	Namespace         string     `json:"namespace"`
 	InstallationID    string     `json:"installation_id"`
+	SignInMethod      string     `json:"sign_in_method"`
 	CreatedAt         time.Time  `json:"created_at"`
 	LastUsedAt        time.Time  `json:"last_used_at"`
 	ExpiresAt         time.Time  `json:"expires_at"`

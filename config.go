@@ -57,6 +57,11 @@ type Config struct {
 type (
 	SessionMode   = model.SessionMode
 	SessionConfig = model.SessionConfig
+
+	SigningKey      = model.SigningKey
+	VerificationKey = model.VerificationKey
+	JSONWebKey      = model.JSONWebKey
+	JSONWebKeySet   = model.JSONWebKeySet
 )
 
 const (
@@ -75,15 +80,31 @@ type DatabaseConnection struct {
 }
 
 // JWTConfig configures access-token signing and refresh-token hashing.
-// AccessSecret and RefreshTokenHMACSecret are required and must each be at least
-// MinSecretLength bytes of high-entropy random data. Expiries default to
-// DefaultAccessExpiry / DefaultRefreshExpiry when zero.
+// RefreshTokenHMACSecret is required, and so is AccessSecret unless SigningKey is
+// set; each secret must be at least MinSecretLength bytes of high-entropy random
+// data. Expiries default to DefaultAccessExpiry / DefaultRefreshExpiry when zero.
+//
+// Access tokens are signed with SigningKey when it is set, and otherwise with
+// AccessSecret (HS256, no key id). Validation accepts a token with a "kid" header
+// only from the key with that id (SigningKey or one of VerificationKeys), and a
+// token without one only as HS256 with AccessSecret. AuthKit.JSONWebKeySet
+// publishes the public keys. See docs/signing-keys.md for moving off HS256 and
+// for rotating keys without logging anyone out.
 //
 // Note: refresh tokens are opaque random strings, not JWTs — they are not signed,
 // only HMAC-hashed (with RefreshTokenHMACSecret) for storage. There is therefore
 // no separate refresh-token signing secret.
 type JWTConfig struct {
-	AccessSecret           string
+	// AccessSecret is the HS256 secret. With SigningKey set it only validates
+	// tokens signed before the switch; remove it once they have expired.
+	AccessSecret string
+	// SigningKey, when set, signs access tokens with an asymmetric key and stamps
+	// its key id. Optional.
+	SigningKey *SigningKey
+	// VerificationKeys are further public keys whose tokens validate: the next
+	// key, published before it signs, or the previous one, until its tokens have
+	// expired. Optional.
+	VerificationKeys       []VerificationKey
 	RefreshTokenHMACSecret string // Secret for HMAC-SHA256 hashing of refresh tokens in storage
 	AccessExpiry           time.Duration
 	RefreshExpiry          time.Duration

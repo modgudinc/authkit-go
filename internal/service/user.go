@@ -192,6 +192,27 @@ func (s *UserService) VerifyPassword(ctx context.Context, userID string) (string
 }
 
 // ============================================================================
+// Email Verification
+// ============================================================================
+
+// MarkEmailVerified records that the user proved they own their current email
+// address, for example by entering a code from OTPService that was sent to it. Call
+// it only after such a proof: ExternalIdentityService.Resolve trusts the record when
+// it links a provider sign-in to this user. Accepting an invitation is not a proof,
+// because whoever created the invitation knows its code. The first verification
+// time is kept. Returns ErrNotFound for an unknown user.
+func (s *UserService) MarkEmailVerified(ctx context.Context, userID string) error {
+	if userID == "" {
+		return fmt.Errorf("user id is required: %w", model.ErrInvalidInput)
+	}
+	if err := s.repo.MarkEmailVerified(ctx, userID); err != nil {
+		return sanitizeError(ctx, s.logger, "mark email verified", err)
+	}
+	s.logger.Info(ctx, "Email marked verified", "user_id", userID)
+	return nil
+}
+
+// ============================================================================
 // Activity Tracking
 // ============================================================================
 
