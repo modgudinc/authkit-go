@@ -81,6 +81,15 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   govulncheck-action v1.1.0 and CodeQL SARIF upload v4.37.9. CI lints with
   golangci-lint v2.14.0, since v2.6.0 cannot load a module that targets Go 1.26.
 
+### Fixed
+
+- `Login` and `LoginByEmail` reported any failure to read the user, such as an
+  unreachable database or a missing migration, as `ErrInvalidCredentials`, so an
+  outage looked like wrong passwords. They now return an error wrapping `ErrInternal`
+  (map it to 500); only an unknown email is still `ErrInvalidCredentials`.
+  `APIKeyService.Validate` did the same with `ErrInvalidAPIKey` and is fixed the same
+  way.
+
 ### Upgrade
 
 - Build with Go 1.26 or newer.

@@ -59,6 +59,11 @@ Check:
 - The user is not locked.
 - The read connection can see the latest user row.
 
+If `Login` returns `authkit.ErrInternal` instead, the user could not be read at all:
+the database is unreachable, or a migration is missing. The server log names the
+cause; `column "email_verified_at" does not exist` means migration `000005` has not
+been applied. Earlier releases reported these as `ErrInvalidCredentials`.
+
 ## JWT Validation Fails After Logout-All Or Password Change
 
 This is expected. `LogoutAll` and `ChangePassword` increment the identity
@@ -126,6 +131,9 @@ Check:
 - Key has not expired.
 - The same `APIKeyConfig.HMACSecret` is used for creation and validation.
 - The key has not been revoked.
+
+`authkit.ErrInternal` instead of `ErrInvalidAPIKey` means the lookup failed (the
+database is unreachable, or the schema is missing); the server log names the cause.
 
 ## Secret Encryption Fails
 
