@@ -86,6 +86,37 @@ func TestSessionDisabledAndRequiredGatesWithoutDatabase(t *testing.T) {
 	assertSessionError(t, k.SessionService().RevokeInstallation(ctx, "user", ""), ErrInvalidInput)
 }
 
+// OpenSession and the external identity calls refuse bad input before touching the
+// database, so the unusable sql.DB in validTestConfig is never reached.
+func TestVerifiedSignInGatesWithoutDatabase(t *testing.T) {
+	ctx := context.Background()
+	k, err := New(validTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = k.VerifiedLoginService().OpenSession(ctx, model.OpenSessionRequest{UserID: "user", SignInMethod: "password"})
+	assertSessionError(t, err, ErrInvalidInput)
+	_, err = k.VerifiedLoginService().OpenSession(ctx, model.OpenSessionRequest{
+		UserID: "user", SignInMethod: "device_code", Installation: &model.InstallationBinding{InstallationID: "cli"},
+	})
+	assertSessionError(t, err, ErrSessionDisabled)
+	_, err = k.ExternalIdentityService().Resolve(ctx, model.ResolveExternalIdentityRequest{Provider: "google"})
+	assertSessionError(t, err, ErrInvalidInput)
+	_, err = k.ExternalIdentityService().Link(ctx, model.LinkExternalIdentityRequest{Provider: "google", Subject: "1"})
+	assertSessionError(t, err, ErrInvalidInput)
+
+	config := validTestConfig()
+	config.SessionConfig = SessionConfig{Mode: SessionRequired, Namespace: "app"}
+	k, err = New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = k.VerifiedLoginService().OpenSession(ctx, model.OpenSessionRequest{
+		UserID: "user", SignInMethod: "device_code", Installation: &model.InstallationBinding{InstallationID: " cli"},
+	})
+	assertSessionError(t, err, ErrInvalidInput)
+}
+
 func assertSessionError(t *testing.T, err, want error) {
 	t.Helper()
 	if !errors.Is(err, want) {

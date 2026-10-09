@@ -14,13 +14,13 @@ import (
 	"github.com/modgudinc/authkit-go/model"
 )
 
-const sessionColumns = "id, user_id, namespace, installation_id, token_version, created_at, last_used_at, expires_at, absolute_expires_at, revoked_at, revocation_reason"
+const sessionColumns = "id, user_id, namespace, installation_id, sign_in_method, token_version, created_at, last_used_at, expires_at, absolute_expires_at, revoked_at, revocation_reason"
 
 type sessionScanner interface{ Scan(...any) error }
 
 func scanSession(row sessionScanner) (*model.Session, error) {
 	var s model.Session
-	err := row.Scan(&s.ID, &s.UserID, &s.Namespace, &s.InstallationID, &s.TokenVersion,
+	err := row.Scan(&s.ID, &s.UserID, &s.Namespace, &s.InstallationID, &s.SignInMethod, &s.TokenVersion,
 		&s.CreatedAt, &s.LastUsedAt, &s.ExpiresAt, &s.AbsoluteExpiresAt, &s.RevokedAt, &s.RevocationReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, model.ErrNotFound
@@ -91,6 +91,8 @@ func sessionActive(s *model.Session, u *model.User, now time.Time) bool {
 }
 
 // CreateBoundSession atomically opens the session and its first refresh token.
+// expectedUser is the snapshot the caller authenticated or verified: if the account
+// was disabled, locked or had its credentials changed since, nothing is written.
 func (r *Repository) CreateBoundSession(ctx context.Context, expectedUser *model.User, s *model.Session, token CreateRefreshTokenRequest) error {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {
@@ -106,9 +108,9 @@ func (r *Repository) CreateBoundSession(ctx context.Context, expectedUser *model
 	}
 	_, err = tx.ExecContext(ctx, r.q(`
 		INSERT INTO {{schema}}.sessions
-		(id,user_id,namespace,installation_id,token_version,created_at,last_used_at,expires_at,absolute_expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8)`),
-		s.ID, u.ID, s.Namespace, s.InstallationID, u.TokenVersion, s.CreatedAt, s.ExpiresAt, s.AbsoluteExpiresAt)
+		(id,user_id,namespace,installation_id,sign_in_method,token_version,created_at,last_used_at,expires_at,absolute_expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,$9)`),
+		s.ID, u.ID, s.Namespace, s.InstallationID, s.SignInMethod, u.TokenVersion, s.CreatedAt, s.ExpiresAt, s.AbsoluteExpiresAt)
 	if err != nil {
 		return err
 	}

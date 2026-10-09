@@ -8,6 +8,7 @@ import "time"
 // User is the GLOBAL identity: it carries no tenant_id and no roles — those
 // live on Membership. email is globally unique. TokenVersion is the identity-level
 // token version (credential events invalidate every workspace's access tokens).
+// An empty PasswordHash means the user has no password (see HasPassword).
 type User struct {
 	ID           string `json:"id" db:"id"`
 	Email        string `json:"email" db:"email"`
@@ -26,12 +27,29 @@ type User struct {
 	LastFailedLoginAt *time.Time `json:"last_failed_login_at,omitempty" db:"last_failed_login"`
 	LastLoginAt       *time.Time `json:"last_login_at,omitempty" db:"last_login"`
 
+	// EmailVerifiedAt is when the user proved they own Email: through a code or link
+	// the application sent to it (UserService.MarkEmailVerified), or a provider that
+	// verified it when ExternalIdentityService.Resolve created the user. Nil means
+	// not known to be verified. Requires migration 000005.
+	EmailVerifiedAt *time.Time `json:"email_verified_at,omitempty" db:"email_verified_at"`
+
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
+// HasPassword reports whether the user can sign in with a password. A user
+// without one signs in only through VerifiedLoginService.OpenSession (after the
+// application verifies them some other way); password login always fails for
+// them with ErrInvalidCredentials and never counts toward the failed-login lockout.
+func (u *User) HasPassword() bool { return u.PasswordHash != "" }
+
+// HasVerifiedEmail reports whether the user has proven they own their email
+// address (EmailVerifiedAt is set).
+func (u *User) HasVerifiedEmail() bool { return u.EmailVerifiedAt != nil }
+
 // CreateUserRequest creates a GLOBAL identity. No tenant or roles — grant tenant
 // access separately via MembershipService.Add. Email must be globally unique.
+// Leave PasswordHash empty to create a user without a password.
 type CreateUserRequest struct {
 	Email        string
 	PasswordHash string

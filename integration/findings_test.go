@@ -31,7 +31,7 @@ func TestCreateUserDuplicateReturnsErrUserExists(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	pw := service.NewPasswordService(4, nil)
@@ -78,7 +78,7 @@ func TestAcceptInvitationReusesExistingIdentity(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	pw := service.NewPasswordService(4, nil)
@@ -157,7 +157,7 @@ func TestGetByTokenHashReturnsRefreshTokenSentinel(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 
@@ -194,7 +194,7 @@ func TestTenantDomainMatchingIsCaseInsensitive(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	authKit := newIntegrationAuthKit(t, db)
 	tenantSvc := authKit.TenantService()
@@ -240,7 +240,7 @@ func TestConsumeVerificationCodeRejectsExpired(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "otpexp.test"
@@ -283,7 +283,7 @@ func TestConsumeVerificationCodeRetainsLockedOutRow(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "otplock.test"
@@ -351,7 +351,7 @@ func TestSingleSessionLogoutEnablesReuseDetection(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "logoutreuse.test"
@@ -401,7 +401,7 @@ func TestSetPasswordAndBumpTokenVersion(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "pwbump.test"
@@ -455,7 +455,7 @@ func TestRefreshTokenIPRoundTrip(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "ip.test"
@@ -505,7 +505,7 @@ func TestAPIKeyUUIDKeyIDRoundTripAndIndex(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "apikey.test"
@@ -568,7 +568,7 @@ func TestUpsertVerificationCodeAtomicRateLimit(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "otp.rl.test"
@@ -619,7 +619,7 @@ func TestUserStatusAuditWrittenInGo(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	// Consolidated schema: no SQL-side UUID generation, no trigger, no auth_events.
 	mustBeTrue := func(what, q string, args ...any) {
@@ -714,7 +714,7 @@ func TestRegisterFailedLoginAuditsSystemLock(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "lock.test"
@@ -757,7 +757,7 @@ func TestAdminLockIsAdminAttributedAndKeepsFailedCount(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "adminlock.test"
@@ -804,7 +804,7 @@ func TestNotFoundMutatorsWrapErrNotFound(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	missingUser := uuid.Must(uuid.NewV7()).String()
@@ -836,7 +836,7 @@ func TestValidateInvitationKnownInvalidIsFalseNil(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "invite.test"
@@ -883,7 +883,7 @@ func TestCreateAPIKeyExpiresInDuration(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "apikey.dur.test"
@@ -930,7 +930,7 @@ func TestPartialUpdateAndMembershipRoles(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	tenantID := "partial.update.test"
@@ -1014,7 +1014,7 @@ func TestMembershipGatesWorkspaceAccess(t *testing.T) {
 	}()
 
 	applyMigration(t, db, "000001_identity_schema.down.sql")
-	applyMigration(t, db, "000001_identity_schema.up.sql")
+	applyIdentitySchema(t, db)
 
 	repo := repository.New(db, db)
 	pw := service.NewPasswordService(4, nil)
