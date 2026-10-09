@@ -70,10 +70,11 @@ type AuthKit struct {
 	rwConnection  *sql.DB
 	roConnection  *sql.DB
 
-	accessTokenSecret      string
-	refreshTokenHMACSecret string // Secret for HMAC-SHA256 hashing of refresh tokens in storage
-	jwtIssuer              string // Optional "iss" claim
-	jwtAudience            string // Optional "aud" claim
+	accessTokenSecret      string              // HS256; may be empty when accessKeys signs
+	accessKeys             *service.AccessKeys // asymmetric signing and verification keys, or nil
+	refreshTokenHMACSecret string              // Secret for HMAC-SHA256 hashing of refresh tokens in storage
+	jwtIssuer              string              // Optional "iss" claim
+	jwtAudience            string              // Optional "aud" claim
 
 	accessTokenExpiry  time.Duration
 	refreshTokenExpiry time.Duration
@@ -91,9 +92,10 @@ type AuthKit struct {
 
 // New validates the Config and returns a configured AuthKit. It fails fast if a
 // required connection or secret is missing, a secret is shorter than
-// MinSecretLength, the identity schema is not a valid identifier, the secret
-// encryption key (when provided) is not a base64-encoded 32-byte key, or the OTP
-// HMAC secret (when provided) is shorter than MinSecretLength. The OTP HMAC secret
+// MinSecretLength, a signing or verification key has an unsupported type, curve or
+// size or reuses another key's id, the identity schema is not a valid identifier,
+// the secret encryption key (when provided) is not a base64-encoded 32-byte key, or
+// the OTP HMAC secret (when provided) is shorter than MinSecretLength. The OTP HMAC secret
 // is only required at use time (OTPService.Generate/Validate), not at construction.
 func New(config Config) (*AuthKit, error) {
 	sessionConfig := config.SessionConfig
@@ -123,8 +125,12 @@ func New(config Config) (*AuthKit, error) {
 		return nil, errors.New("RO db connection for identity schema is required")
 	}
 
-	if config.JWTConfig.AccessSecret == "" {
-		return nil, errors.New("signing secret for access tokens is required")
+	if config.JWTConfig.AccessSecret == "" && config.JWTConfig.SigningKey == nil {
+		return nil, errors.New("signing secret or signing key for access tokens is required")
+	}
+	accessKeys, err := service.NewAccessKeys(config.JWTConfig.SigningKey, config.JWTConfig.VerificationKeys)
+	if err != nil {
+		return nil, fmt.Errorf("access token keys: %w", err)
 	}
 
 	if config.JWTConfig.RefreshTokenHMACSecret == "" {
@@ -138,13 +144,17 @@ func New(config Config) (*AuthKit, error) {
 	// Reject weak/short secrets. A short secret silently passes the non-empty
 	// checks above but is offline-brute-forceable, allowing token forgery.
 	for _, s := range []struct {
-		name  string
-		value string
+		name     string
+		value    string
+		optional bool
 	}{
-		{"access token signing secret", config.JWTConfig.AccessSecret},
-		{"refresh token HMAC secret", config.JWTConfig.RefreshTokenHMACSecret},
-		{"API key HMAC secret", config.APIKeyConfig.HMACSecret},
+		{"access token signing secret", config.JWTConfig.AccessSecret, config.JWTConfig.SigningKey != nil},
+		{"refresh token HMAC secret", config.JWTConfig.RefreshTokenHMACSecret, false},
+		{"API key HMAC secret", config.APIKeyConfig.HMACSecret, false},
 	} {
+		if s.optional && s.value == "" {
+			continue
+		}
 		if len(s.value) < MinSecretLength {
 			return nil, fmt.Errorf("%s must be at least %d bytes of high-entropy random data", s.name, MinSecretLength)
 		}
@@ -237,6 +247,7 @@ func New(config Config) (*AuthKit, error) {
 		roConnection:  config.DBConnection.IdentityRODB,
 
 		accessTokenSecret:      config.JWTConfig.AccessSecret,
+		accessKeys:             accessKeys,
 		refreshTokenHMACSecret: config.JWTConfig.RefreshTokenHMACSecret,
 		jwtIssuer:              config.JWTConfig.Issuer,
 		jwtAudience:            config.JWTConfig.Audience,
@@ -283,6 +294,19 @@ func (k *AuthKit) Ping(ctx context.Context) error {
 	return nil
 }
 
+// JSONWebKeySet returns the public keys that validate access tokens, as a JSON Web
+// Key Set (RFC 7517) to serve at a jwks_uri such as /.well-known/jwks.json, so
+// other services and API gateways can check tokens without a shared secret. The
+// signing key comes first, then JWTConfig.VerificationKeys. The HS256 secret is
+// never included: the set is empty for a kit that signs with AccessSecret alone.
+//
+// A service that checks tokens this way sees only the signature, expiry, issuer
+// and audience. It does not see revocation (token versions, disabled accounts,
+// revoked sessions): AuthService.ValidateJWT checks those against the database.
+func (k *AuthKit) JSONWebKeySet() JSONWebKeySet {
+	return k.accessKeys.JSONWebKeySet()
+}
+
 // The accessors below each return a service interface. They open no new resources
 // — each just wraps the shared connection pool and configuration — but they are not
 // free: every call allocates a fresh service (and, for the composite ones like
@@ -327,6 +351,20 @@ func (k *AuthKit) InstallationAuthService() InstallationAuthService {
 	return k.newAuthService()
 }
 
+// VerifiedLoginService opens sessions for users the application has verified
+// itself (OAuth/OIDC, email links, OTPs, passkeys, device codes). It works in every
+// session mode; see docs/verified-sign-in.md.
+func (k *AuthKit) VerifiedLoginService() VerifiedLoginService {
+	return k.newAuthService()
+}
+
+// ExternalIdentityService links accounts at outside sign-in providers (Google,
+// GitHub, enterprise OIDC) to users. Requires migration 000004.
+func (k *AuthKit) ExternalIdentityService() ExternalIdentityService {
+	repo := k.repository()
+	return service.NewExternalIdentityService(&repo, k.logger, k.metrics)
+}
+
 // SessionService manages sessions scoped to the configured application namespace.
 // Callers must authorize session-management actions for the supplied user.
 func (k *AuthKit) SessionService() SessionService {
@@ -355,6 +393,7 @@ func (k *AuthKit) newJWTService() *service.JWTService {
 		service.WithIssuer(k.jwtIssuer),
 		service.WithAudience(k.jwtAudience),
 		service.WithSessionMode(k.sessionConfig.Mode),
+		service.WithAccessKeys(k.accessKeys),
 	)
 }
 

@@ -174,10 +174,49 @@ func (s *TokenService) sessionForClaims(ctx context.Context, claims *model.JWTCl
 	return session, nil
 }
 
+// checkOptionalInstallation validates the installation an OpenSession call may
+// carry. Unlike checkInstallation, a missing binding is fine in every mode: without
+// session support it opens a plain identity session, otherwise a session record
+// with no installation.
+func (s *TokenService) checkOptionalInstallation(binding *model.InstallationBinding) error {
+	if binding == nil {
+		return nil
+	}
+	if s == nil || s.sessionConfig.Mode == model.SessionDisabled {
+		return model.ErrSessionDisabled
+	}
+	if !validSessionReference(binding.InstallationID) {
+		return model.ErrInvalidInput
+	}
+	return nil
+}
+
 func (s *TokenService) createBoundSession(ctx context.Context, user *model.User, info *model.SessionInfo, binding *model.InstallationBinding) (string, *model.Session, error) {
 	if err := s.checkInstallation(binding); err != nil {
 		return "", nil, err
 	}
+	return s.openBoundSession(ctx, user, info, binding.InstallationID, model.SignInMethodPassword)
+}
+
+// openVerifiedSession opens the session for VerifiedLoginService.OpenSession: a
+// plain identity session (no record) when session support is disabled, otherwise a
+// session record, bound to the installation when one is given. The caller has run
+// checkOptionalInstallation.
+func (s *TokenService) openVerifiedSession(ctx context.Context, user *model.User, info *model.SessionInfo, binding *model.InstallationBinding, method string) (string, *model.Session, error) {
+	if s.sessionConfig.Mode == model.SessionDisabled {
+		token, err := s.CreateIdentitySession(ctx, user.ID, info)
+		return token, nil, err
+	}
+	installationID := ""
+	if binding != nil {
+		installationID = binding.InstallationID
+	}
+	return s.openBoundSession(ctx, user, info, installationID, method)
+}
+
+// openBoundSession creates a session record and its first refresh token in one
+// transaction. installationID may be empty for a session with no installation.
+func (s *TokenService) openBoundSession(ctx context.Context, user *model.User, info *model.SessionInfo, installationID, method string) (string, *model.Session, error) {
 	random, err := s.jwtService.GenerateRefreshToken()
 	if err != nil {
 		return "", nil, err
@@ -189,7 +228,7 @@ func (s *TokenService) createBoundSession(ctx context.Context, user *model.User,
 	now := time.Now()
 	session := &model.Session{
 		ID: id.String(), UserID: user.ID, Namespace: s.sessionConfig.Namespace,
-		InstallationID: binding.InstallationID, TokenVersion: user.TokenVersion,
+		InstallationID: installationID, SignInMethod: method, TokenVersion: user.TokenVersion,
 		CreatedAt: now, LastUsedAt: now, ExpiresAt: now.Add(s.refreshExpiry),
 		AbsoluteExpiresAt: now.Add(s.sessionConfig.AbsoluteLifetime),
 	}
@@ -306,7 +345,9 @@ func (s *AuthService) ValidateInstallationJWT(ctx context.Context, token string)
 	if err != nil {
 		return nil, err
 	}
-	if session == nil {
+	// A session opened without an installation (VerifiedLoginService.OpenSession
+	// from a browser, say) is not an installation binding.
+	if session == nil || session.InstallationID == "" {
 		return nil, model.ErrSessionRequired
 	}
 	return &model.InstallationClaims{Claims: claims, Session: session}, nil

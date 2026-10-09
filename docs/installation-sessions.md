@@ -6,9 +6,10 @@ Session support is disabled by default.
 
 ## Configure
 
-Apply `000002_installation_sessions.up.sql` after the identity migration before
-enabling the feature. For a custom `IdentitySchema`, replace the schema name
-consistently in both migration files, just as with the identity migration.
+Apply `000002_installation_sessions.up.sql` and then
+`000003_session_sign_in.up.sql` after the identity migration before enabling the
+feature. For a custom `IdentitySchema`, replace the schema name consistently in
+each migration file, just as with the identity migration.
 
 ```go
 config.SessionConfig = authkit.SessionConfig{
@@ -79,6 +80,15 @@ provides association and revocation, not proof of possession on every request.
 Device-key proof, sender-constrained tokens, pairing, permissions and E2EE are
 separate application concerns.
 
+## Sessions without an installation
+
+`VerifiedLoginService.OpenSession` opens a session for a user the application
+verified itself (an OAuth or OIDC provider, an email link, a device code). Without
+an `Installation` it creates a session record whose `InstallationID` is empty, in
+Optional and Required mode alike: a browser session that is listed, revoked and
+expired like any other. Every session records its `SignInMethod` (`"password"` for
+the installation logins above). See [verified sign-in](verified-sign-in.md).
+
 ## Validate, refresh and switch workspace
 
 ```go
@@ -93,7 +103,8 @@ installationID := identity.Session.InstallationID
 
 `AuthService.ValidateJWT` also validates bound sessions, while returning the
 existing `JWTClaims` result. `ValidateInstallationJWT` requires a binding even in
-Optional mode and returns the session metadata as well.
+Optional mode and returns the session metadata as well; it refuses a session with
+no installation with `ErrSessionRequired`.
 
 Validation checks signature, JWT expiry, account state/version, active workspace
 membership/version, session owner, namespace, revocation, and idle/absolute expiry.
@@ -170,9 +181,15 @@ signatures and shapes. New APIs use separate interfaces and request wrappers.
 those two exported structs must switch to keyed literals. Public claims remain
 safe to embed in consumer-defined JSON claim types.
 
-Default mode works without migration 000002. The forward migration leaves the
-released identity migration and existing unbound families intact. Never infer
-bindings from device names, IP addresses or user agents.
+Default mode works without migrations 000002 and 000003. The forward migrations
+leave the released identity migration and existing unbound families intact. Never
+infer bindings from device names, IP addresses or user agents.
+
+Applications already running 000002 must apply 000003 before deploying a release
+that includes it: session queries read the new `sign_in_method` column. The
+migration is safe while older code runs (the column defaults to `"password"`).
+Rolling it back deletes the sessions that have no installation, and their refresh
+tokens, before restoring the installation constraint.
 
 Deploy session-aware code to every validator before issuing bound tokens. Old
 code ignores `sid` and cannot enforce session revocation. Use Optional only for

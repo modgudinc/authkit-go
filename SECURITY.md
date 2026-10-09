@@ -34,7 +34,11 @@ Include:
 Applications using this library must provide and protect several independent
 secrets:
 
-- `JWTConfig.AccessSecret`: signs access-token JWTs
+- `JWTConfig.AccessSecret`: signs access-token JWTs (HS256), unless
+  `JWTConfig.SigningKey` is set
+- `JWTConfig.SigningKey`: an optional asymmetric private key that signs access tokens
+  instead. Its public half, and `JWTConfig.VerificationKeys`, are not secrets. A key
+  held in a KMS or an HSM works as a `crypto.Signer`
 - `JWTConfig.RefreshTokenHMACSecret`: hashes refresh tokens before storage
 - `APIKeyConfig.HMACSecret`: hashes API keys before storage
 - `OTPConfig.HMACSecret`: hashes OTP codes before storage (required when OTPService
@@ -107,7 +111,11 @@ Recommended cadence:
 
 Rotation impact:
 
-- Rotating `JWTConfig.AccessSecret` invalidates all existing access tokens.
+- Rotating `JWTConfig.AccessSecret` invalidates all existing access tokens. A
+  `JWTConfig.SigningKey` rotates without that, through `VerificationKeys`: see
+  [docs/signing-keys.md](docs/signing-keys.md). A leaked signing key should be removed
+  from `SigningKey` and `VerificationKeys` at once; its tokens stop validating
+  immediately.
 - Rotating `RefreshTokenHMACSecret` makes existing stored refresh-token hashes
   unverifiable. Revoke all refresh tokens and require re-login.
 - Rotating `APIKeyConfig.HMACSecret` makes existing stored API key hashes
@@ -165,6 +173,21 @@ are out of scope for the library itself and must be provided by the caller:
   a request under `FOR UPDATE` lock contention (e.g. a failed-login storm against one
   account) can pin connections/row locks and exhaust the pool. See the README
   ("Performance Considerations").
+- **Verified sign-in.** `VerifiedLoginService.OpenSession` checks no credential: it
+  opens a session for whatever user id it is given. Pass it only the user your own
+  completed verification produced (an ID token you verified, a consumed email-link
+  token, an approved device code), never an id from a request. Run the OAuth/OIDC
+  client protocol (state, nonce, PKCE, ID-token verification) with a maintained
+  client library, and throttle your verification step: OpenSession does not consult
+  `Config.RateLimiter`.
+- **Provider email trust.** `ExternalIdentityService.Resolve` links a first sign-in
+  to an existing account only by a provider-verified email, and only to a user
+  whose own email is verified (`User.EmailVerifiedAt`), who has no password and who
+  has no other account at that provider. Set `EmailVerified` only for providers
+  whose verification you trust (see [verified sign-in](docs/verified-sign-in.md)).
+- **Email verification.** Call `UserService.MarkEmailVerified` only after the person
+  proved they control the address, with a code or link sent to it. Accepting an
+  invitation is not proof: its creator knows the code.
 - **Audit retention.** The `user_status_changes` audit table has no expiry; schedule
   `UserService.CleanupStatusChanges` per your retention policy to bound its growth.
 
@@ -175,6 +198,8 @@ In scope:
 - Token issuance, validation, revocation, and rotation bugs
 - API key hashing, validation, or disclosure issues
 - Password hashing and verification issues
+- Session opening, account gates or identity linking in `VerifiedLoginService` and
+  `ExternalIdentityService` (for example, a link made that the documented rules forbid)
 - OTP replay, purpose confusion, or rate-limit bypasses
 - Secret encryption or decryption issues
 
