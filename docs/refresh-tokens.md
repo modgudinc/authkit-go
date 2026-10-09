@@ -51,8 +51,11 @@ The period has to cover the time between a lost response and the client's next
 refresh. A browser or mobile app retries within seconds, so a minute is plenty. A
 command-line tool or a hook may not run again for hours, so give it a day or more.
 A longer period does not hide theft, for the reason above; it only bounds how long an
-old token stays exchangeable while its replacement sits unused. Zero, the default,
-keeps strict rotation.
+old token stays exchangeable while its replacement sits unused. What it does change is
+the worth of a leaked old token: within the period, while the replacement is unused, it
+buys the same access as stealing the current token would, until the owner's next
+refresh trips detection. Strict rotation catches that old token at once. Zero, the
+default, keeps strict rotation.
 
 ### Concurrent refreshes
 
