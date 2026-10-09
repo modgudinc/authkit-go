@@ -27,6 +27,9 @@ import (
 // - SetPassword    - Sets the password hash (accepts hashed password only)
 // - VerifyPassword - Retrieves the password hash for verification
 //
+// Email Verification:
+// - MarkEmailVerified - Records that the user's email was proven (keeps the first time)
+//
 // Query Methods (keyed by global user id or globally-unique email):
 // - GetByID       - Retrieves a user by ID
 // - GetByEmail    - Retrieves a user by email (case-insensitive, globally unique)
@@ -140,14 +143,14 @@ type scannable interface {
 // one edit, not several parallel ones that must stay in lockstep.
 const userColumns = "id, email, password_hash, display_name, token_version, " +
 	"is_enabled, disabled_at, is_locked, locked_until, failed_login_count, last_failed_login, last_login, " +
-	"created_at, updated_at"
+	"created_at, updated_at, email_verified_at"
 
 // scanUser scans a full user row (the userColumns, in order) from row, including the
 // nullable timestamp fields. It returns the raw scan error so callers can map
 // sql.ErrNoRows to their own not-found message.
 func scanUser(row scannable) (*model.User, error) {
 	var user model.User
-	var disabledAt, lockedUntil, lastFailedLogin, lastLogin *time.Time
+	var disabledAt, lockedUntil, lastFailedLogin, lastLogin, emailVerifiedAt *time.Time
 
 	if err := row.Scan(
 		&user.ID,
@@ -164,10 +167,12 @@ func scanUser(row scannable) (*model.User, error) {
 		&lastLogin,
 		&user.CreatedAt,
 		&user.UpdatedAt,
+		&emailVerifiedAt,
 	); err != nil {
 		return nil, err
 	}
 
+	user.EmailVerifiedAt = emailVerifiedAt
 	user.DisabledAt = disabledAt
 	user.LockedUntil = lockedUntil
 	user.LastFailedLoginAt = lastFailedLogin
@@ -544,6 +549,23 @@ func (r *Repository) SetPasswordAndBumpTokenVersion(ctx context.Context, userID,
 	result, err := r.rw.ExecContext(ctx, r.q(query), hashedPassword, time.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to set password and bump token version: %w", err)
+	}
+	return rowsAffectedOrNotFound(result)
+}
+
+// ============================================================================
+// MarkEmailVerified - Records that the user's current email address was proven to
+// belong to them. The first verification time is kept, so repeating it is a no-op.
+// ============================================================================
+func (r *Repository) MarkEmailVerified(ctx context.Context, userID string) error {
+	query := `
+		UPDATE {{schema}}.users
+		SET email_verified_at = COALESCE(email_verified_at, $1), updated_at = $1
+		WHERE id = $2
+	`
+	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID)
+	if err != nil {
+		return fmt.Errorf("failed to mark email verified: %w", err)
 	}
 	return rowsAffectedOrNotFound(result)
 }
