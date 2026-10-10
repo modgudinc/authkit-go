@@ -115,10 +115,11 @@ consult it and return `authkit.ErrRateLimited` (map to HTTP 429) when it rejects
   proceeds) and increments `authkit_rate_limiter_error_total` — a sustained nonzero
   rate there means your limiter backend is degraded.
 - The key passed to `Allow` is `login:<tenant>:<ip|email:...>` (`Login`),
-  `login:<ip|email:...>` (`LoginByEmail`), `refresh:<ip>`, or `otp:<email>:<purpose>`
-  (OTP is keyed by email + purpose, not tenant) — bucket on it directly.
+  `login:<ip|email:...>` (`LoginByEmail`), `refresh:<ip>`, `otp:<email>:<purpose>`
+  (OTP is keyed by email + purpose, not tenant), or `second_factor:<userID>`
+  (`TwoFactorService.CompleteSecondFactor`) — bucket on it directly.
 - `ValidateJWT` is **not** rate-limited (it's a local signature/DB check), so a 429
-  only originates from the login/refresh/OTP-generation paths.
+  only originates from the login/refresh/OTP-generation/second-factor paths.
 
 ## Database Errors Only Appear On The First Query
 

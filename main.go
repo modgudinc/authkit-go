@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/modgudinc/authkit-go/internal/repository"
@@ -84,8 +85,9 @@ type AuthKit struct {
 	apiKeyHMACSecret     string
 	passwordBcryptCost   int
 	otpRateLimitDuration time.Duration
-	otpHMACSecret        string // HMAC-SHA256 secret for hashing OTP codes in storage
-	secretEncryptionKey  []byte // 32-byte AES-256 key for encrypting secrets
+	otpHMACSecret        string                 // HMAC-SHA256 secret for hashing OTP codes in storage
+	secretEncryptionKey  []byte                 // 32-byte AES-256 key for encrypting secrets
+	twoFactorKeys        *service.TwoFactorKeys // Config.TwoFactorConfig; nil when two-factor is off
 	identitySchema       string
 	logger               logger.Logger
 	metrics              metrics.Metrics
@@ -222,6 +224,11 @@ func New(config Config) (*AuthKit, error) {
 		secretEncryptionKey = keyBytes
 	}
 
+	twoFactorKeys, err := newTwoFactorKeys(config.TwoFactorConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	// Default to a no-op logger so the library never holds a nil logger and call
 	// sites can log unconditionally (a missing nil-guard can no longer panic).
 	libLogger := config.Logger
@@ -268,6 +275,7 @@ func New(config Config) (*AuthKit, error) {
 		otpRateLimitDuration: otpRateLimitDuration,
 		otpHMACSecret:        config.OTPConfig.HMACSecret,
 		secretEncryptionKey:  secretEncryptionKey,
+		twoFactorKeys:        twoFactorKeys,
 		identitySchema:       identitySchema,
 		logger:               libLogger,
 		metrics:              libMetrics,
@@ -285,6 +293,30 @@ func New(config Config) (*AuthKit, error) {
 	}
 
 	return kit, nil
+}
+
+// newTwoFactorKeys checks Config.TwoFactorConfig and derives its keys; nil, nil
+// when two-factor is off.
+func newTwoFactorKeys(config TwoFactorConfig) (*service.TwoFactorKeys, error) {
+	if config.EncryptionKey == "" {
+		if config.Issuer != "" {
+			return nil, errors.New("two-factor issuer is set without an encryption key")
+		}
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(config.EncryptionKey)
+	if err != nil {
+		return nil, errors.New("invalid two-factor encryption key: must be base64 encoded")
+	}
+	if len(key) != 32 {
+		return nil, errors.New("two-factor encryption key must be 32 bytes (256 bits)")
+	}
+	issuer := config.Issuer
+	if issuer == "" || strings.TrimSpace(issuer) != issuer || strings.ContainsRune(issuer, ':') || !utf8.ValidString(issuer) ||
+		utf8.RuneCountInString(issuer) > 255 || strings.ContainsFunc(issuer, unicode.IsControl) {
+		return nil, errors.New("two-factor issuer must be 1 to 255 characters without a colon, control characters or surrounding whitespace")
+	}
+	return service.NewTwoFactorKeys(key, issuer)
 }
 
 // Ping verifies connectivity to both the read-write and read-only identity
@@ -381,6 +413,15 @@ func (k *AuthKit) PasskeyService() PasskeyService {
 	return service.NewPasskeyService(&repo, k.logger, k.metrics)
 }
 
+// TwoFactorService sets up two-factor sign-in with an authenticator app and
+// recovery codes, and finishes the password logins that wait for a second factor.
+// Requires Config.TwoFactorConfig (without it every call returns
+// ErrTwoFactorNotConfigured) and migration 000009; see docs/two-factor.md.
+func (k *AuthKit) TwoFactorService() TwoFactorService {
+	repo := k.repository()
+	return service.NewTwoFactorService(&repo, k.newAuthService(), k.twoFactorKeys, k.logger, k.metrics)
+}
+
 // SessionService manages sessions scoped to the configured application namespace.
 // Callers must authorize session-management actions for the supplied user.
 func (k *AuthKit) SessionService() SessionService {
@@ -400,6 +441,9 @@ func (k *AuthKit) newAuthService() *service.AuthService {
 	var opts []service.AuthOption
 	if k.recordSignIns {
 		opts = append(opts, service.WithSignInHistory(&repo, k.sessionConfig.Namespace))
+	}
+	if k.twoFactorKeys != nil {
+		opts = append(opts, service.WithTwoFactor(&repo, k.twoFactorKeys))
 	}
 	return service.NewAuthService(&repo, k.newPasswordService(), k.newTokenService(), k.newJWTService(), k.logger, k.metrics, k.rateLimiter, opts...)
 }

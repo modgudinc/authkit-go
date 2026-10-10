@@ -79,12 +79,30 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   counter `authkit_webauthn_clone_warning_total`). `List`, `Rename` and `Remove`
   manage a user's passkeys. Migration `000008_passkeys`. Guide, with go-webauthn:
   [docs/passkeys.md](docs/passkeys.md).
+- Two-factor sign-in: with `Config.TwoFactorConfig` (an encryption key and the
+  issuer name apps show), `AuthKit.TwoFactorService` sets up an authenticator app
+  (`EnrollTOTP`, then `ConfirmTOTP` with its first code, which returns ten
+  single-use recovery codes) and manages it (`Verify`, `Disable`,
+  `RegenerateRecoveryCodes`, `Status`). Codes are RFC 6238 TOTP (SHA-1, six digits,
+  30 seconds, one step of drift), each accepted once. For a person with it on,
+  `Login`, `LoginByEmail` and their `WithInstallation` forms stop after the password
+  with `ErrSecondFactorRequired`, a `*model.SecondFactorRequiredError` carrying a
+  five-minute challenge, and `CompleteSecondFactor` finishes the login with a code
+  or a recovery code. The secret is stored with AES-256-GCM and the recovery codes
+  as HMAC-SHA256, under keys derived from the configured one. Sentinels
+  `ErrSecondFactorRequired`, `ErrInvalidSecondFactor`, `ErrTwoFactorAlreadyEnabled`
+  and `ErrTwoFactorNotConfigured`; failure reason `bad_second_factor`; rate-limit key
+  `second_factor:<userID>`. `OpenSession` is unaffected. Off by default. Migration
+  `000009_two_factor`. Guide: [docs/two-factor.md](docs/two-factor.md).
 
 ### Security
 
 - Password login for a user without a password fails like a wrong password (dummy
   bcrypt comparison, `ErrInvalidCredentials`) and does not count toward the
   failed-login lockout. `ChangePassword` refuses such a user.
+- With two-factor on, a wrong code counts toward the failed-login lockout, and the
+  right password alone no longer resets the count: it is reset when the whole
+  sign-in succeeds.
 - `Resolve` refuses to link by email to an account whose own email is not
   verified or that has a password (pre-account hijacking), or that is linked to
   another account at the same provider (recycled addresses), and an unverified
@@ -137,13 +155,17 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   only adds a table; code that does not record sign-ins never touches it.
 - Applications that use `PasskeyService` must apply migration 000008 first. It only
   adds tables; other code never touches them.
+- Applications that set `Config.TwoFactorConfig` must apply migration 000009 first:
+  with it set, every password login reads the new tables. It only adds tables; code
+  without two-factor never touches them.
 - Existing interfaces, request and response types are unchanged; the new calls are
   on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`,
-  `AuthKit.SignInHistoryService`, `AuthKit.PasskeyService`), except `UserService.MarkEmailVerified`, which,
+  `AuthKit.SignInHistoryService`, `AuthKit.PasskeyService`, `AuthKit.TwoFactorService`), except `UserService.MarkEmailVerified`, which,
   like 0.20.1's `MembershipService` additions, extends an interface authkit returns.
   `model.Session` gains `SignInMethod`, `model.User` gains `EmailVerifiedAt`,
   `JWTConfig` gains `SigningKey`, `VerificationKeys` and `RefreshGracePeriod`, and
-  `Config` gains `RecordSignIns` (positional literals of either need keyed fields).
+  `Config` gains `RecordSignIns` and `TwoFactorConfig` (positional literals of either
+  need keyed fields).
 
 ## [0.20.2] - 2026-09-07
 

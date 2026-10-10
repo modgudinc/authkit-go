@@ -16,6 +16,7 @@ instead of copying SQL out of the repository.
 | `000006_refresh_token_replacement` | `refresh_tokens.replaced_by` | `JWTConfig.RefreshGracePeriod` ([refresh-tokens.md](refresh-tokens.md)) |
 | `000007_sign_in_events` | `sign_in_events` | `Config.RecordSignIns` ([sign-in-history.md](sign-in-history.md)) |
 | `000008_passkeys` | `passkey_users`, `passkeys` | `PasskeyService` ([passkeys.md](passkeys.md)) |
+| `000009_two_factor` | `totp_factors`, `recovery_codes`, `second_factor_challenges` | `Config.TwoFactorConfig` ([two-factor.md](two-factor.md)) |
 
 Each has an `.up.sql` and a `.down.sql`. With a migration tool, apply them all, in
 order. The ones a feature needs only add tables and a column that stay empty when

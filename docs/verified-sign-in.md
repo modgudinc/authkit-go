@@ -13,7 +13,9 @@ additive services let those sign-ins use authkit's sessions and users:
   the next sign-in.
 
 For passkeys, `PasskeyService` also stores the credentials; see
-[passkeys.md](passkeys.md).
+[passkeys.md](passkeys.md). `OpenSession` never asks for the two-factor code that
+password logins of some people need ([two-factor.md](two-factor.md)); call
+`TwoFactorService.Verify` before it to ask for one.
 
 authkit does not implement OAuth or OIDC and is not an authorization server.
 Verify the provider's response with a client library such as

@@ -17,6 +17,7 @@ A Go library for identity and authentication management built on a **decoupled-i
 - **Asymmetric Signing Keys**: Optional Ed25519, ECDSA P-256 or RSA access-token signing (any `crypto.Signer`, KMS keys included) with key ids, a published JSON Web Key Set, and rotation without logging anyone out
 - **Linked Sign-In Identities**: `ExternalIdentityService` maps a provider account (provider + subject) to one user, linking by verified email only under safe rules; bring your own OAuth/OIDC client
 - **Passkeys**: `PasskeyService` stores WebAuthn credentials and per-user handles for sign-in with passkeys and security keys, refusing a reused credential ID and a signature counter that goes backwards; bring your own WebAuthn library (go-webauthn)
+- **Two-Factor Sign-In**: Optional authenticator-app (TOTP) codes and single-use recovery codes; password logins of people who turn it on wait for a code (`TwoFactorService`), with the secret encrypted and the codes hashed
 - **Sign-In History**: Optional record of every sign-in attempt on an account (method, workspace, session, IP address, user agent, and the reason for a refusal), read with `SignInHistoryService`
 - **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 string identifiers
 - **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`LoginByEmail`/`RefreshToken`/OTP generation
@@ -41,6 +42,7 @@ go get github.com/modgudinc/authkit-go
 - [Asymmetric signing keys, the key set, and key rotation](docs/signing-keys.md)
 - [Sign-in history](docs/sign-in-history.md)
 - [Passkeys (WebAuthn credentials)](docs/passkeys.md)
+- [Two-factor sign-in (authenticator apps and recovery codes)](docs/two-factor.md)
 
 ## Quick Start
 
@@ -1631,8 +1633,9 @@ what the snippets use.
 | `API_KEY_HMAC_SECRET` | `APIKeyConfig.HMACSecret` | Yes | HMAC secret for API-key storage. ≥ 32 bytes. |
 | `OTP_HMAC_SECRET` | `OTPConfig.HMACSecret` | When `OTPService` is used | HMAC secret for OTP storage. ≥ 32 bytes. Omit only if you never call `OTPService`. |
 | `SECRET_ENCRYPTION_KEY` | `SecretConfig.EncryptionKey` | When `SecretService` is used | Base64 of exactly 32 random bytes (AES-256). |
+| `TWO_FACTOR_ENCRYPTION_KEY` | `TwoFactorConfig.EncryptionKey` | When two-factor sign-in is on | Base64 of exactly 32 random bytes, distinct from `SECRET_ENCRYPTION_KEY`. Set `TwoFactorConfig.Issuer` with it. |
 
-All five `*_SECRET`/`*_HMAC_SECRET` values and the encryption key must be high-entropy
+All five `*_SECRET`/`*_HMAC_SECRET` values and the encryption keys must be high-entropy
 CSPRNG output (`openssl rand -base64 32`), distinct from one another, and distinct per
 environment — see "Generating secrets" above and [SECURITY.md](SECURITY.md). The
 issuer/audience and the various durations have safe defaults and are typically set in
@@ -1662,6 +1665,7 @@ code rather than via environment.
 - **`OTPConfig.RateLimitDuration`**: Minimum time between OTP generation attempts (default: 1 minute)
 - **`DatabaseConnection.IdentitySchema`**: PostgreSQL schema name (default: `authkit`)
 - **`SecretConfig.EncryptionKey`**: Base64-encoded 32-byte AES-256 key for `SecretService`
+- **`TwoFactorConfig`**: `EncryptionKey` (base64 of 32 random bytes, its own key) and `Issuer` (the name in people's authenticator apps) turn on two-factor sign-in (default: off; needs migration `000009`; see [docs/two-factor.md](docs/two-factor.md))
 - **`Logger`**: Logger implementation (default: nil, no logging). Some security signals (OTP lockout, refresh-token reuse, sub-threshold failed logins) are logger-only — inject one in production.
 - **`Metrics`**: Counter sink (default: nil, no metrics); survives independently of log level, so it's the recommended basis for alerting. The library emits the `metrics.Counter*` constants — `authkit_login_success_total`, `authkit_login_failure_total`, `authkit_account_lockout_total`, `authkit_otp_failure_total`, `authkit_otp_lockout_total`, `authkit_refresh_token_reuse_total`, `authkit_refresh_token_retry_total`, `authkit_rate_limited_total`, `authkit_rate_limiter_error_total`, `authkit_best_effort_write_failure_total` — see the `metrics` package for the authoritative list.
 - **`RateLimiter`**: Optional throttle (`ratelimit.RateLimiter`) consulted by `Login`/`RefreshToken`/`OTPService.Generate` (default: nil, no limiting). The recommended place to enforce IP/global rate limiting — see "Rate Limiting" below.
@@ -1694,6 +1698,7 @@ The library currently requires PostgreSQL with the `authkit` schema containing t
 - **`authkit.sessions`** (optional, migrations `000002` and `000003`): Login records for installation-bound and verified sign-in sessions, with the sign-in method; see [installation sessions](docs/installation-sessions.md)
 - **`authkit.external_identities`** (optional, migration `000004`): Outside sign-in accounts keyed by `(provider, subject)`, each linked to one user; see [verified sign-in](docs/verified-sign-in.md)
 - **`authkit.sign_in_events`** (optional, migration `000007`): One row per sign-in attempt when `RecordSignIns` is set; read via `SignInHistoryService.List`, pruned via `SignInHistoryService.Cleanup`; see [sign-in history](docs/sign-in-history.md)
+- **`authkit.totp_factors`**, **`authkit.recovery_codes`**, **`authkit.second_factor_challenges`** (optional, migration `000009`): Each user's encrypted authenticator-app secret, their hashed recovery codes, and password logins waiting for a code; see [two-factor sign-in](docs/two-factor.md)
 
 The migrations ship inside the module: `authkit.Migrations` returns them as numbered
 SQL files for golang-migrate or any tool that runs `NNNNNN_name.up.sql` files in
@@ -1930,15 +1935,16 @@ head-of-line blocking and pool exhaustion by **both**:
 The library does **not** rate-limit on its own — the per-account failed-login lockout
 does not stop password spraying, distributed guessing, refresh abuse, or OTP-email
 fan-out (see [SECURITY.md](SECURITY.md)). Plug in your own throttle via
-`Config.RateLimiter`; it is consulted by `Login`, `LoginByEmail`, `RefreshToken`, and
-`OTPService.Generate` before they do work, and a rejection surfaces as
+`Config.RateLimiter`; it is consulted by `Login`, `LoginByEmail`, `RefreshToken`,
+`OTPService.Generate` and `TwoFactorService.CompleteSecondFactor` before they do work, and a rejection surfaces as
 `authkit.ErrRateLimited` (map it to HTTP 429):
 
 ```go
 // A token-bucket / Redis / in-memory limiter, adapted to the ratelimit.RateLimiter
 // interface. key is one of "login:<tenant>:<ip|email:...>" (Login),
 // "login:<ip|email:...>" (LoginByEmail — no tenant in the key), "refresh:<ip>",
-// "otp:<email>:<purpose>" (no tenant) — bucket on it directly.
+// "otp:<email>:<purpose>" (no tenant), "second_factor:<userID>" (CompleteSecondFactor)
+// — bucket on it directly.
 type myLimiter struct{ /* ... */ }
 
 func (l *myLimiter) Allow(ctx context.Context, key string) (bool, error) {

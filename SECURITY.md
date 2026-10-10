@@ -150,7 +150,8 @@ are out of scope for the library itself and must be provided by the caller:
   online-guessing defense is `AuthService.Login`'s per-account failed-login lockout
   (`MaxFailedLoginAttempts`, then a timed lock); it bounds guessing against a *single*
   account but does NOT stop password spraying (a few guesses each across many accounts)
-  or distributed guessing, and neither `AuthService.RefreshToken` nor
+  or distributed guessing. Wrong two-factor codes count toward the same lockout, and a
+  right password does not reset it while the code is outstanding. Neither `AuthService.RefreshToken` nor
   `OTPService.Generate` has a lockout of its own. Configure the pluggable
   **`Config.RateLimiter`** (an `authkit.RateLimiter`): it is consulted before `Login`,
   `RefreshToken`, and `OTPService.Generate`, keyed by tenant / client IP / email (see

@@ -41,6 +41,11 @@ Core tables:
   WebAuthn user handle per relying party ID, and the WebAuthn credentials (passkeys
   and security keys) registered under it, keyed by `(rp_id, credential_id)`.
   Cascade on user delete. See [passkeys](passkeys.md).
+- `totp_factors`, `recovery_codes` and `second_factor_challenges` (optional migration
+  000009): Each user's authenticator-app secret (AES-256-GCM, bound to the user),
+  their recovery codes as keyed HMAC-SHA256 hashes, and password logins waiting for a
+  second factor, keyed by the SHA-256 of their challenge. Cascade on user delete. See
+  [two-factor sign-in](two-factor.md).
 - `api_keys`: Tenant-scoped API key hashes and metadata (`created_by` is a global user id).
 - `invitations`: Invitation codes, target email, roles, expiry, and usage limits.
 - `verification_codes`: OTPs stored as a keyed HMAC-SHA256 (`code_hash`), never in plaintext, plus purpose, failed-attempt count, expiry, and creation time; keyed by `(email, purpose)` globally (email is a global identity, so an OTP is identity-level, not tenant-scoped).

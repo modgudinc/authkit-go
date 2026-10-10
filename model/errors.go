@@ -45,6 +45,29 @@ var (
 	ErrPasskeyCloned = errors.New("authkit: passkey may be cloned")
 )
 
+// Sentinel errors for two-factor sign-in (Config.TwoFactorConfig, TwoFactorService).
+var (
+	// ErrSecondFactorRequired is returned by a password login when the password is
+	// right and the user has two-factor on. The error is a *SecondFactorRequiredError
+	// carrying the challenge to finish the login with
+	// (TwoFactorService.CompleteSecondFactor). No session is opened.
+	ErrSecondFactorRequired = errors.New("authkit: a second factor is required")
+
+	// ErrInvalidSecondFactor is returned when a two-factor code or recovery code is
+	// wrong, already used, or the user has none. During a login the challenge stays
+	// usable until it expires. Map it to HTTP 401.
+	ErrInvalidSecondFactor = errors.New("authkit: invalid two-factor code")
+
+	// ErrTwoFactorAlreadyEnabled is returned by TwoFactorService.EnrollTOTP when the
+	// user already has an authenticator app set up. Turn it off first. Map it to
+	// HTTP 409.
+	ErrTwoFactorAlreadyEnabled = errors.New("authkit: two-factor is already on")
+
+	// ErrTwoFactorNotConfigured is returned by TwoFactorService and
+	// CompleteSecondFactor when Config.TwoFactorConfig has no encryption key.
+	ErrTwoFactorNotConfigured = errors.New("authkit: two-factor is not configured")
+)
+
 // Sentinel errors returned by the library so callers can branch on outcome with
 // errors.Is instead of matching on error strings. They are defined in the model
 // (leaf) package so every layer can return them without an import cycle; the root

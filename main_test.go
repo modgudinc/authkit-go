@@ -5,6 +5,7 @@ package authkit
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,48 @@ func TestNewValidatesRequiredConfig(t *testing.T) {
 			},
 			wantErr: "refresh grace period must not be negative",
 		},
+		{
+			name: "two-factor key not base64",
+			mutate: func(config *Config) {
+				config.TwoFactorConfig = TwoFactorConfig{EncryptionKey: "not base64!", Issuer: "Acme"}
+			},
+			wantErr: "invalid two-factor encryption key",
+		},
+		{
+			name: "two-factor key too short",
+			mutate: func(config *Config) {
+				config.TwoFactorConfig = TwoFactorConfig{EncryptionKey: base64.StdEncoding.EncodeToString(make([]byte, 16)), Issuer: "Acme"}
+			},
+			wantErr: "two-factor encryption key must be 32 bytes",
+		},
+		{
+			name: "two-factor issuer missing",
+			mutate: func(config *Config) {
+				config.TwoFactorConfig = TwoFactorConfig{EncryptionKey: testTwoFactorKey}
+			},
+			wantErr: "two-factor issuer must be",
+		},
+		{
+			name: "two-factor issuer with a colon",
+			mutate: func(config *Config) {
+				config.TwoFactorConfig = TwoFactorConfig{EncryptionKey: testTwoFactorKey, Issuer: "Acme:Prod"}
+			},
+			wantErr: "two-factor issuer must be",
+		},
+		{
+			name: "two-factor issuer with surrounding space",
+			mutate: func(config *Config) {
+				config.TwoFactorConfig = TwoFactorConfig{EncryptionKey: testTwoFactorKey, Issuer: " Acme"}
+			},
+			wantErr: "two-factor issuer must be",
+		},
+		{
+			name: "two-factor issuer without a key",
+			mutate: func(config *Config) {
+				config.TwoFactorConfig = TwoFactorConfig{Issuer: "Acme"}
+			},
+			wantErr: "issuer is set without an encryption key",
+		},
 	}
 
 	for _, test := range tests {
@@ -121,6 +164,28 @@ func TestNewValidatesRequiredConfig(t *testing.T) {
 				t.Fatalf("error = %q, want substring %q", err.Error(), test.wantErr)
 			}
 		})
+	}
+}
+
+// testTwoFactorKey is a fixed 32-byte test key, base64-encoded.
+var testTwoFactorKey = base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+
+func TestNewConfiguresTwoFactor(t *testing.T) {
+	kit, err := New(validTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kit.twoFactorKeys != nil {
+		t.Fatal("two-factor is on without TwoFactorConfig")
+	}
+	config := validTestConfig()
+	config.TwoFactorConfig = TwoFactorConfig{EncryptionKey: testTwoFactorKey, Issuer: "Acme Corp"}
+	kit, err = New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kit.twoFactorKeys == nil || kit.TwoFactorService() == nil {
+		t.Fatal("two-factor is off with TwoFactorConfig")
 	}
 }
 
