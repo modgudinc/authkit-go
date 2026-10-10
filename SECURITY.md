@@ -68,11 +68,11 @@ Best practices:
   `log` package), escape untrusted field values — authkit logs some caller-supplied
   fields (such as tenant name and domain) verbatim; structured loggers escape field
   values, but plain line writers do not, so control characters could forge log lines.
-  Likewise, if you wire up `Config.Metrics`, the rate-limit counters
-  (`authkit_rate_limited_total`, `authkit_rate_limiter_error_total`) carry a `key`
-  label that can contain an email (e.g. `login:<tenant>:email:<email>`,
-  `otp:<tenant>:<email>:<purpose>`) — hash or drop that label if metric-label PII is in
-  scope for your backend.
+  Likewise, a rate-limit key can contain an email address or an IP address (e.g.
+  `login:<tenant>:email:<email>`, `otp:<email>:<purpose>`), so authkit never logs
+  one: `authkit_rate_limited_total`'s `key` label carries only the operation (`login`,
+  `refresh`, `otp`, `second_factor`), and a limiter error is logged with the same.
+  Keep the full key inside your limiter.
 
 Recommended minimum entropy:
 
@@ -154,7 +154,8 @@ are out of scope for the library itself and must be provided by the caller:
   right password does not reset it while the code is outstanding. Neither `AuthService.RefreshToken` nor
   `OTPService.Generate` has a lockout of its own. Configure the pluggable
   **`Config.RateLimiter`** (an `authkit.RateLimiter`): it is consulted before `Login`,
-  `RefreshToken`, and `OTPService.Generate`, keyed by tenant / client IP / email (see
+  `LoginByEmail`, `RefreshToken`, `OTPService.Generate` and
+  `TwoFactorService.CompleteSecondFactor`, keyed by tenant / client IP / email / user (see
   the `ratelimit` package for the exact key formats), and a rejection surfaces as
   `authkit.ErrRateLimited` (map to HTTP 429). Have your limiter fail *open* on its own
   backend errors so an outage degrades to "no limiting", not an auth outage. If you do

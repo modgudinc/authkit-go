@@ -9,7 +9,7 @@
 - `model/`: Public request, response, and database entity structs, plus the sentinel errors (`Err*`) callers branch on.
 - `logger/`: Public, optional `Logger` interface (context-first) plus `NopLogger`. Injected via `Config.Logger`.
 - `metrics/`: Public, optional `Metrics` interface plus a no-op default and the canonical `Counter*` names. Injected via `Config.Metrics`.
-- `ratelimit/`: Public, optional `RateLimiter` interface (aliased as `authkit.RateLimiter`). Injected via `Config.RateLimiter`; consulted before `Login`, `RefreshToken`, and `OTPService.Generate`, with a rejection surfacing as `authkit.ErrRateLimited` (HTTP 429). Key formats are documented in the package.
+- `ratelimit/`: Public, optional `RateLimiter` interface (aliased as `authkit.RateLimiter`). Injected via `Config.RateLimiter`; consulted before `Login`, `LoginByEmail`, `RefreshToken`, `OTPService.Generate` and `TwoFactorService.CompleteSecondFactor`, with a rejection surfacing as `authkit.ErrRateLimited` (HTTP 429). Key formats are documented in the package.
 - `internal/repository/`: PostgreSQL data access (not importable by consumers). Queries are schema-qualified with `authkit.` and rewritten when `DatabaseConnection.IdentitySchema` is configured.
 - `internal/service/`: Business logic for global users, memberships, tokens, passwords, API keys, invitations, tenants, OTPs, and encrypted secrets (not importable by consumers; the public contracts are the service interfaces in package `authkit`).
 - `migrations/`: PostgreSQL schema used by the default `authkit` schema, embedded in the module and returned by `authkit.Migrations` (see [migrations.md](migrations.md)).
@@ -23,7 +23,7 @@ Core tables:
 - `users`: Global user identities — **no** `tenant_id`, **no** `roles`. Email is globally unique, case-insensitively (`UNIQUE (lower(email))`). `token_version` is the identity-level token version (credential events invalidate every workspace's access tokens). An empty `password_hash` means the user has no password and signs in only through a verified sign-in. `email_verified_at` (migration 000005) records when the user proved they own the address.
 - `memberships`: The `user ↔ tenant` graph — which identity belongs to which tenant, with `roles` (opaque JSONB strings the embedding app interprets), a per-membership `token_version` (a role change or revoke invalidates only that workspace's access tokens), and a `status` (`active` / `suspended`). Primary key `(user_id, tenant_id)`; both foreign keys cascade on delete.
 - `refresh_tokens`: Stored refresh token hashes and session metadata. The refresh token is the **identity session** (user-scoped, no tenant); one login = one family.
-- `sessions` (optional migrations 000002 and 000003): Login records scoped by
+- `sessions` (optional migrations 000002 and 000003, with 000010 for the optional roles): Login records scoped by
   application namespace and user, bound to an app installation or (for sessions
   opened by `VerifiedLoginService.OpenSession`) to none, with the sign-in method
   that opened them. Their IDs are refresh-family IDs and signed `sid` claims.

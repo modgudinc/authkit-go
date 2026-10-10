@@ -86,8 +86,15 @@ func (r *Repository) CreateInvitation(ctx context.Context, params InsertInvitati
 		// caller error. Surface a generic sentinel instead of leaking the raw
 		// constraint string, matching the other writers.
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
-			return fmt.Errorf("invitation code collision: %w", model.ErrInternal)
+		if errors.As(err, &pgErr) {
+			switch pgErr.Code {
+			case uniqueViolation:
+				return fmt.Errorf("invitation code collision: %w", model.ErrInternal)
+			case foreignKeyViolation:
+				// tenant_id or created_by names no row: the caller's error, as for
+				// AddMembership.
+				return fmt.Errorf("tenant or creator not found: %w", model.ErrNotFound)
+			}
 		}
 		return fmt.Errorf("failed to create invitation: %w", err)
 	}
@@ -99,6 +106,16 @@ func (r *Repository) CreateInvitation(ctx context.Context, params InsertInvitati
 // GetInvitation - Retrieves an invitation by code
 // ============================================================================
 func (r *Repository) GetInvitation(ctx context.Context, code string) (*model.Invitation, error) {
+	return r.getInvitation(ctx, r.ro, code)
+}
+
+// GetInvitationFromPrimary reads an invitation from the primary, for the read that
+// follows a write: a replica may not have the row yet.
+func (r *Repository) GetInvitationFromPrimary(ctx context.Context, code string) (*model.Invitation, error) {
+	return r.getInvitation(ctx, r.rw, code)
+}
+
+func (r *Repository) getInvitation(ctx context.Context, q rowQuerier, code string) (*model.Invitation, error) {
 	query := `
 		SELECT code, tenant_id, created_by, roles, email, expires_at, max_uses, current_uses, created_at
 		FROM {{schema}}.invitations
@@ -107,7 +124,7 @@ func (r *Repository) GetInvitation(ctx context.Context, code string) (*model.Inv
 
 	var invitation model.Invitation
 	var rolesJSON []byte
-	err := r.ro.QueryRowContext(ctx, r.q(query), code).Scan(
+	err := q.QueryRowContext(ctx, r.q(query), code).Scan(
 		&invitation.Code,
 		&invitation.TenantID,
 		&invitation.CreatedBy,
@@ -169,7 +186,9 @@ func (r *Repository) IncrementUseCount(ctx context.Context, code string) error {
 		return fmt.Errorf("failed to increment invitation use count: %w", err)
 	}
 
-	return requireRowsAffected(result, fmt.Errorf("invitation %q not found or max uses exceeded: %w", code, model.ErrInvitationInvalid))
+	// The code stays out of the message: the service logs the error, and a code
+	// is a credential.
+	return requireRowsAffected(result, fmt.Errorf("invitation not found or max uses exceeded: %w", model.ErrInvitationInvalid))
 }
 
 // ============================================================================
@@ -325,7 +344,7 @@ func (r *Repository) InvalidateInvitation(ctx context.Context, code string) erro
 		return fmt.Errorf("failed to invalidate invitation: %w", err)
 	}
 
-	return requireRowsAffected(result, fmt.Errorf("invitation %q not found: %w", code, model.ErrNotFound))
+	return requireRowsAffected(result, fmt.Errorf("invitation not found: %w", model.ErrNotFound))
 }
 
 // ============================================================================
@@ -452,7 +471,7 @@ func (r *Repository) DeleteInvitation(ctx context.Context, code string) error {
 		return fmt.Errorf("failed to delete invitation: %w", err)
 	}
 
-	return requireRowsAffected(result, fmt.Errorf("invitation %q not found: %w", code, model.ErrNotFound))
+	return requireRowsAffected(result, fmt.Errorf("invitation not found: %w", model.ErrNotFound))
 }
 
 // ============================================================================

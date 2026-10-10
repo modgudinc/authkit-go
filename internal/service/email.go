@@ -25,7 +25,7 @@ func isValidEmail(email string) bool {
 		return false
 	}
 	local, domain := email[:at], email[at+1:]
-	if strings.ContainsAny(local, " \t\r\n") {
+	if strings.ContainsAny(local, "@ \t\r\n") {
 		return false
 	}
 	return domainRegex.MatchString(domain)

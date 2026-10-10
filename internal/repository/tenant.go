@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -45,6 +46,12 @@ func (r *Repository) CreateTenant(ctx context.Context, req model.CreateTenantReq
 		req.AllowedDomains,
 	)
 	if err != nil {
+		// tenant_id is the primary key the caller chose, so a unique violation is
+		// the caller's error, not an internal fault.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+			return fmt.Errorf("tenant %q: %w", req.TenantID, model.ErrTenantExists)
+		}
 		return fmt.Errorf("failed to create tenant: %w", err)
 	}
 
@@ -55,6 +62,16 @@ func (r *Repository) CreateTenant(ctx context.Context, req model.CreateTenantReq
 // GetTenant - Retrieves a tenant by tenant_id (custom identifier)
 // ============================================================================
 func (r *Repository) GetTenant(ctx context.Context, tenantID string) (*model.Tenant, error) {
+	return r.getTenant(ctx, r.ro, tenantID)
+}
+
+// GetTenantFromPrimary reads a tenant from the primary, for the read that follows
+// a write: a replica may not have the row yet.
+func (r *Repository) GetTenantFromPrimary(ctx context.Context, tenantID string) (*model.Tenant, error) {
+	return r.getTenant(ctx, r.rw, tenantID)
+}
+
+func (r *Repository) getTenant(ctx context.Context, q rowQuerier, tenantID string) (*model.Tenant, error) {
 	query := `
 		SELECT tenant_id, name, array_to_json(allowed_domains)::text,
 		       COALESCE(settings::text, '{}'), created_at, updated_at
@@ -65,7 +82,7 @@ func (r *Repository) GetTenant(ctx context.Context, tenantID string) (*model.Ten
 	var tenant model.Tenant
 	var domainsJSON, settingsJSON []byte
 
-	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID).Scan(
+	err := q.QueryRowContext(ctx, r.q(query), tenantID).Scan(
 		&tenant.TenantID,
 		&tenant.Name,
 		&domainsJSON,

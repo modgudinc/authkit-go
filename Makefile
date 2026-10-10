@@ -4,7 +4,7 @@ IDENTITY_TEST_DATABASE_URL ?= postgres://authkit_test:authkit_test@localhost:554
 
 .PHONY: test
 test:
-	GOCACHE=$(GO_CACHE) go test -count=1 ./...
+	GOCACHE=$(GO_CACHE) go test -race -count=1 ./...
 
 .PHONY: lint
 lint:
@@ -12,7 +12,7 @@ lint:
 
 .PHONY: test-integration
 test-integration:
-	IDENTITY_TEST_DATABASE_URL="$(IDENTITY_TEST_DATABASE_URL)" GOCACHE=$(GO_CACHE) go test -count=1 -tags=integration ./...
+	IDENTITY_TEST_DATABASE_URL="$(IDENTITY_TEST_DATABASE_URL)" GOCACHE=$(GO_CACHE) go test -race -count=1 -p 1 -tags=integration ./...
 
 .PHONY: postgres-up
 postgres-up:

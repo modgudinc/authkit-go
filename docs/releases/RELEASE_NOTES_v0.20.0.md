@@ -45,7 +45,7 @@ A login authenticates the identity and opens one refresh-token **identity sessio
 - Passwords are hashed with bcrypt (cost 12 by default); JWT/HMAC secrets must be ≥ 32 bytes.
 - JWT validation pins `HS256` (blocks `alg:none` / algorithm-confusion), requires an `exp` claim, and allows a small clock-skew leeway; optional `iss`/`aud` enforcement.
 
-See [SECURITY.md](SECURITY.md) for the disclosure policy, secret-management expectations, and rotation guidance.
+See [SECURITY.md](../../SECURITY.md) for the disclosure policy, secret-management expectations, and rotation guidance.
 
 ## Requirements
 
@@ -55,15 +55,15 @@ See [SECURITY.md](SECURITY.md) for the disclosure policy, secret-management expe
 
 ## Getting started
 
-See the [README](README.md) for setup and per-service examples, and [docs/](docs/) for architecture, patterns, and troubleshooting.
+See the [README](../../README.md) for setup and per-service examples, and [docs/](../) for architecture, patterns, and troubleshooting.
 
 ## Documentation
 
-- [Architecture, data model & security assumptions](docs/architecture.md)
-- [Service examples](docs/examples.md)
-- [Common patterns](docs/patterns.md)
-- [Troubleshooting](docs/troubleshooting.md)
+- [Architecture, data model & security assumptions](../architecture.md)
+- [Service examples](../examples.md)
+- [Common patterns](../patterns.md)
+- [Troubleshooting](../troubleshooting.md)
 
 ---
 
-Licensed under [Apache-2.0](LICENSE).
+Licensed under [Apache-2.0](../../LICENSE).

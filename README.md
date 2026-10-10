@@ -20,7 +20,7 @@ A Go library for identity and authentication management built on a **decoupled-i
 - **Two-Factor Sign-In**: Optional authenticator-app (TOTP) codes and single-use recovery codes; password logins of people who turn it on wait for a code (`TwoFactorService`), with the secret encrypted and the codes hashed
 - **Sign-In History**: Optional record of every sign-in attempt on an account (method, workspace, session, IP address, user agent, and the reason for a refusal), read with `SignInHistoryService`
 - **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 string identifiers
-- **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`LoginByEmail`/`RefreshToken`/OTP generation
+- **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`LoginByEmail`/`RefreshToken`/OTP generation/`CompleteSecondFactor`
 - **Flexible Logging & Metrics**: Dependency-injected, context-aware `Logger` and an optional `Metrics` counter sink
 - **Health Checks**: `AuthKit.Ping` and fail-fast `Config.VerifyConnectivity`
 - **Read-Write Separation**: Optimized database connection management
@@ -181,8 +181,9 @@ identity, err := authkit.New(authkit.Config{
 
 Applications that need per-installation login and revocation can opt into
 `Config.SessionConfig` and use `InstallationAuthService` / `SessionService`.
-The default remains disabled and works against the original schema. See
-[installation sessions](docs/installation-sessions.md) for the additive migration,
+The default remains disabled and needs no session tables (every deployment still
+applies `000005`, see [Database Schema](#database-schema)). See
+[installation sessions](docs/installation-sessions.md) for the additive migrations,
 mode selection, enrollment contract and rollout instructions.
 
 authkit uses a **decoupled-identity** model. The two concepts are deliberately separate:
@@ -388,8 +389,8 @@ if err != nil {
 ### Validate Access Token
 
 ```go
-// Extract token from HTTP header (e.g., Authorization: Bearer <token>)
-tokenString := req.Header.Get("Authorization")
+// Extract the token from the HTTP header (Authorization: Bearer <token>)
+tokenString := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 
 claims, err := jwtService.ValidateAccessToken(tokenString)
 if err != nil {
@@ -1668,7 +1669,7 @@ code rather than via environment.
 - **`TwoFactorConfig`**: `EncryptionKey` (base64 of 32 random bytes, its own key) and `Issuer` (the name in people's authenticator apps) turn on two-factor sign-in (default: off; needs migration `000009`; see [docs/two-factor.md](docs/two-factor.md))
 - **`Logger`**: Logger implementation (default: nil, no logging). Some security signals (OTP lockout, refresh-token reuse, sub-threshold failed logins) are logger-only — inject one in production.
 - **`Metrics`**: Counter sink (default: nil, no metrics); survives independently of log level, so it's the recommended basis for alerting. The library emits the `metrics.Counter*` constants — `authkit_login_success_total`, `authkit_login_failure_total`, `authkit_account_lockout_total`, `authkit_otp_failure_total`, `authkit_otp_lockout_total`, `authkit_refresh_token_reuse_total`, `authkit_refresh_token_retry_total`, `authkit_rate_limited_total`, `authkit_rate_limiter_error_total`, `authkit_best_effort_write_failure_total` — see the `metrics` package for the authoritative list.
-- **`RateLimiter`**: Optional throttle (`ratelimit.RateLimiter`) consulted by `Login`/`RefreshToken`/`OTPService.Generate` (default: nil, no limiting). The recommended place to enforce IP/global rate limiting — see "Rate Limiting" below.
+- **`RateLimiter`**: Optional throttle (`ratelimit.RateLimiter`) consulted by `Login`/`LoginByEmail`/`RefreshToken`/`OTPService.Generate`/`TwoFactorService.CompleteSecondFactor` (default: nil, no limiting). The recommended place to enforce IP/global rate limiting — see "Rate Limiting" below.
 - **`VerifyConnectivity`**: When `true`, `New` pings both DB handles and fails fast if either is unreachable (default: `false`, lazy connection). See "Health Checks".
 - **`RecordSignIns`**: When `true`, records every sign-in attempt on an existing account for `SignInHistoryService` (default: `false`; needs migration `000007`; see [docs/sign-in-history.md](docs/sign-in-history.md)).
 
@@ -1781,16 +1782,23 @@ keyID := id.String() // e.g. "0190bdf2-...": a varchar(36) value in the DB
 authkit-go/
 ├── model/                    # Data models, request/response structs, sentinel errors (public)
 ├── logger/                   # Logger interface + NopLogger (public)
+├── metrics/                  # Metrics interface, counter names + no-op default (public)
+├── ratelimit/                # RateLimiter interface (public)
+├── migrations/               # Numbered SQL migrations, embedded; see Migrations() (public)
 ├── internal/
 │   ├── repository/           # Database operations (CRUD) — not importable by consumers
 │   └── service/              # Business logic layer — not importable by consumers
 ├── config.go                 # Configuration structures (public)
+├── services.go               # The service interfaces AuthKit's accessors return (public)
+├── errors.go                 # Sentinel errors re-exported from model (public)
+├── keys.go                   # PEM parsing for signing keys (public)
+├── migrations.go             # Migrations(schema): the embedded SQL for your migration tool (public)
 └── main.go                   # Library entry point: New + AuthKit accessors (public)
 ```
 
-Only the root `authkit` package, `model`, and `logger` are part of the public
-import surface; `service` and `repository` live under `internal/` and are reached
-exclusively through `AuthKit`'s accessor methods (`AuthService()`, etc.).
+Only the root `authkit` package, `model`, `logger`, `metrics` and `ratelimit` are part
+of the public import surface; `service` and `repository` live under `internal/` and are
+reached exclusively through `AuthKit`'s accessor methods (`AuthService()`, etc.).
 
 ### Service Layer Pattern
 
@@ -1808,6 +1816,14 @@ tenantService := identity.TenantService()
 invitationService := identity.InvitationService()
 userService := identity.UserService()
 membershipService := identity.MembershipService()
+secretService := identity.SecretService()
+sessionService := identity.SessionService()                   // Config.SessionConfig
+installationAuthService := identity.InstallationAuthService() // Config.SessionConfig
+verifiedLoginService := identity.VerifiedLoginService()
+externalIdentityService := identity.ExternalIdentityService()
+signInHistoryService := identity.SignInHistoryService()       // Config.RecordSignIns
+passkeyService := identity.PasskeyService()
+twoFactorService := identity.TwoFactorService()               // Config.TwoFactorConfig
 ```
 
 ### Read-Write Connection Separation
@@ -1852,7 +1868,7 @@ Exported sentinels include `ErrInvalidCredentials`, `ErrAccountDisabled`,
 `ErrTokenRevoked`, `ErrInvalidRefreshToken`,
 `ErrRefreshTokenReuse`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrOTPRateLimited`,
 `ErrOTPSecretMissing`, `ErrInvalidAPIKey`, `ErrIncorrectPassword`,
-`ErrInvitationInvalid`, `ErrUserExists`, `ErrPasswordTooWeak`,
+`ErrInvitationInvalid`, `ErrUserExists`, `ErrTenantExists`, `ErrPasswordTooWeak`,
 `ErrSecretEncryptionKeyMissing`, `ErrRateLimited`, `ErrInvalidInput`,
 `ErrValueTooLong`, `ErrNotFound`, and `ErrInternal`, plus the session sentinels in
 [installation sessions](docs/installation-sessions.md) and `ErrIdentityLinkRequired`,
@@ -1895,7 +1911,7 @@ API key validation updates `last_used_at` asynchronously to avoid blocking:
 
 ```go
 // Validate returns immediately
-context, err := apiKeyService.Validate(ctx, apiKey)
+keyContext, err := apiKeyService.Validate(ctx, apiKey)
 // last_used_at updated in background goroutine
 ```
 
@@ -1942,7 +1958,8 @@ fan-out (see [SECURITY.md](SECURITY.md)). Plug in your own throttle via
 ```go
 // A token-bucket / Redis / in-memory limiter, adapted to the ratelimit.RateLimiter
 // interface. key is one of "login:<tenant>:<ip|email:...>" (Login),
-// "login:<ip|email:...>" (LoginByEmail — no tenant in the key), "refresh:<ip>",
+// "login:<ip|email:...>" (LoginByEmail — no tenant in the key),
+// "refresh:<ip|token:...>" (a digest of the token when there is no IP),
 // "otp:<email>:<purpose>" (no tenant), "second_factor:<userID>" (CompleteSecondFactor)
 // — bucket on it directly.
 type myLimiter struct{ /* ... */ }
@@ -2084,12 +2101,13 @@ This project is licensed under the Apache License, Version 2.0 - see the [LICENS
 - [x] Tenant Service (tenant management, settings, domain validation)
 - [x] Invitation Service (invitation management, validation, revocation)
 - [x] Account status-change audit trail (`user_status_changes` + `UserService.StatusHistory`)
-- [x] Rate Limiting (pluggable `Config.RateLimiter` consulted by Login/RefreshToken/OTP generation)
+- [x] Rate Limiting (pluggable `Config.RateLimiter` consulted by Login/LoginByEmail/RefreshToken/OTP generation/CompleteSecondFactor)
 - [x] Metrics hooks (`Config.Metrics`) and health checks (`AuthKit.Ping` / `Config.VerifyConnectivity`)
 - [x] Verified sign-in sessions and linked sign-in identities (OAuth/OIDC client protocol left to the app)
 - [x] Sign-in history (`Config.RecordSignIns` + `SignInHistoryService`)
+- [x] Asymmetric access-token signing with key rotation (`JWTConfig.SigningKey`, `VerificationKeys`, `JSONWebKeySet`)
+- [x] Passkeys (`PasskeyService`) and two-factor sign-in (`TwoFactorService`)
 - [ ] General audit logging beyond status changes (planned)
-- [ ] Key Rotation Support (planned)
 
 ## Changelog
 

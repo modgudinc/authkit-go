@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/modgudinc/authkit-go/model"
 )
 
@@ -64,6 +65,12 @@ func (r *Repository) CreateAPIKey(ctx context.Context, req InsertAPIKeyParams) e
 		now,
 	)
 	if err != nil {
+		// tenant_id or created_by names no row: the caller's error, as for
+		// AddMembership.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
+			return fmt.Errorf("tenant or creator not found: %w", model.ErrNotFound)
+		}
 		return fmt.Errorf("failed to create api key: %w", err)
 	}
 
@@ -72,12 +79,13 @@ func (r *Repository) CreateAPIKey(ctx context.Context, req InsertAPIKeyParams) e
 
 // ============================================================================
 // Get - Retrieves an API key by key_id within a tenant
-// Returns the full APIKey record including metadata.
+// Returns the APIKey record's metadata; the key hash stays in the database, as it is
+// the value Validate compares.
 // Scoped by tenant_id so a caller cannot read another tenant's key by id.
 // ============================================================================
 func (r *Repository) GetAPIKey(ctx context.Context, keyID, tenantID string) (*model.APIKey, error) {
 	query := `
-		SELECT key_id, key_hash, tenant_id, name, created_by, last_used_at, expires_at, created_at
+		SELECT key_id, tenant_id, name, created_by, last_used_at, expires_at, created_at
 		FROM {{schema}}.api_keys
 		WHERE key_id = $1
 		  AND tenant_id = $2
@@ -88,7 +96,6 @@ func (r *Repository) GetAPIKey(ctx context.Context, keyID, tenantID string) (*mo
 
 	err := r.ro.QueryRowContext(ctx, r.q(query), keyID, tenantID).Scan(
 		&apiKey.KeyID,
-		&apiKey.KeyHash,
 		&apiKey.TenantID,
 		&apiKey.Name,
 		&apiKey.CreatedBy,
@@ -164,18 +171,18 @@ func (r *Repository) ListAPIKeys(ctx context.Context, tenantID string, includeEx
 	var query string
 	if includeExpired {
 		query = `
-			SELECT key_id, key_hash, tenant_id, name, created_by, last_used_at, expires_at, created_at
+			SELECT key_id, tenant_id, name, created_by, last_used_at, expires_at, created_at
 			FROM {{schema}}.api_keys
 			WHERE tenant_id = $1
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC, key_id DESC
 		`
 	} else {
 		query = `
-			SELECT key_id, key_hash, tenant_id, name, created_by, last_used_at, expires_at, created_at
+			SELECT key_id, tenant_id, name, created_by, last_used_at, expires_at, created_at
 			FROM {{schema}}.api_keys
 			WHERE tenant_id = $1
 			  AND (expires_at IS NULL OR expires_at > $2)
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC, key_id DESC
 		`
 	}
 
@@ -202,7 +209,6 @@ func (r *Repository) ListAPIKeys(ctx context.Context, tenantID string, includeEx
 
 		err := rows.Scan(
 			&apiKey.KeyID,
-			&apiKey.KeyHash,
 			&apiKey.TenantID,
 			&apiKey.Name,
 			&apiKey.CreatedBy,

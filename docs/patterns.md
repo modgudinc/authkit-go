@@ -104,7 +104,8 @@ list, call `TenantService.ValidateDomainAccess` before creating the invitation.
 ## Rate Limiting
 
 The library does not rate-limit itself. Inject a `Config.RateLimiter` and it is
-consulted before `Login`, `RefreshToken`, and `OTPService.Generate`; a rejection
+consulted before `Login`, `LoginByEmail`, `RefreshToken`, `OTPService.Generate` and
+`TwoFactorService.CompleteSecondFactor`; a rejection
 surfaces as `authkit.ErrRateLimited` (HTTP 429). `ValidateJWT` is a local check and is
 **not** rate-limited, so handle 429 in the login/refresh/OTP handlers, not the JWT
 middleware.
@@ -135,8 +136,9 @@ case err != nil:
 ```
 
 The `key` passed to `Allow` is `login:<tenant>:<ip|email:...>` (`Login`),
-`login:<ip|email:...>` (`LoginByEmail`, no tenant), `refresh:<ip>`,
-`otp:<email>:<purpose>` (OTP is keyed by email + purpose, not tenant), or
+`login:<ip|email:...>` (`LoginByEmail`, no tenant), `refresh:<ip>` (or
+`refresh:token:<digest>` when no IP is supplied: the first 16 hex digits of the
+token's SHA-256), `otp:<email>:<purpose>` (OTP is keyed by email + purpose, not tenant), or
 `second_factor:<userID>` (`TwoFactorService.CompleteSecondFactor`) — bucket on it directly.
 
 ## Health Checks

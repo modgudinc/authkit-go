@@ -24,7 +24,7 @@ import (
 type authRepository interface {
 	GetByEmailFromPrimary(ctx context.Context, email string) (*model.User, error)
 	GetByIDFromPrimary(ctx context.Context, userID string) (*model.User, error)
-	Unlock(ctx context.Context, userID string) error
+	AutoUnlock(ctx context.Context, userID string) error
 	RegisterFailedLogin(ctx context.Context, userID string, maxAttempts int, lockDuration time.Duration) (int, bool, error)
 	UpdateLastLogin(ctx context.Context, userID string) error
 	SetPasswordAndBumpTokenVersion(ctx context.Context, userID, hashedPassword string) error
@@ -104,9 +104,11 @@ func NewAuthService(
 // returns the authenticated user. It applies the account-status gates (disabled /
 // locked, with auto-unlock when locked_until has elapsed) and the per-account
 // failed-login lockout exactly as before. Every failure is collapsed into
-// ErrInvalidCredentials (the specific reason is logged) and timing is equalized with
-// a dummy bcrypt compare on the not-found / disabled / locked paths, so an
-// unauthenticated caller cannot distinguish them (no account / state enumeration). It
+// ErrInvalidCredentials (the specific reason is logged) and a dummy bcrypt compare
+// runs on the not-found / disabled / locked paths, so the response does not say which
+// it was and the cost of the bcrypt compare, the dominant term, is the same on every
+// path (an existing account's failure also writes its failed-login count and its
+// sign-in event, which an unauthenticated caller could in principle measure). It
 // changes nothing on success: the caller calls passwordAccepted once no second factor
 // is needed. It records a refusal of an existing account in the sign-in history
 // (attempt describes the sign-in); the caller records the outcome after it. It
@@ -146,7 +148,7 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 	// Account locked gate (auto-unlock if locked_until has passed).
 	if user.IsLocked {
 		if user.LockedUntil != nil && time.Now().After(*user.LockedUntil) {
-			if err := s.repo.Unlock(ctx, user.ID); err != nil {
+			if err := s.repo.AutoUnlock(ctx, user.ID); err != nil {
 				s.logger.Error(ctx, "Failed to auto-unlock account", "error", err.Error())
 				incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "auto_unlock")
 				// Continue anyway - will try to authenticate.
@@ -203,18 +205,24 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 	return user, nil
 }
 
-// passwordAccepted records a password login that needs nothing more: it resets the
-// failed-login count (Unlock also clears the counter) and updates last_login. Both
-// are best-effort — a failure here does not fail the login. For a user with
-// two-factor on it runs only after the second factor, so the password alone does
-// not reset the count that wrong codes add to.
+// passwordAccepted records that the credentials were right: it resets the
+// failed-login count (AutoUnlock also clears the counter). Best-effort — a failure
+// here does not fail the login. For a user with two-factor on it runs only after the
+// second factor, so the password alone does not reset the count that wrong codes
+// add to. last_login is set by sessionOpened, once the workspace gate has passed.
 func (s *AuthService) passwordAccepted(ctx context.Context, user *model.User) {
 	if user.FailedLoginCount > 0 {
-		if err := s.repo.Unlock(ctx, user.ID); err != nil {
+		if err := s.repo.AutoUnlock(ctx, user.ID); err != nil {
 			s.logger.Warn(ctx, "Failed to reset failed login count", "error", err.Error())
 			incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "reset_failed_count")
 		}
 	}
+}
+
+// sessionOpened updates last_login once a sign-in has opened a session, so the
+// timestamp means a login that went through, not a right password into a workspace
+// the user is not a member of. Best-effort.
+func (s *AuthService) sessionOpened(ctx context.Context, user *model.User) {
 	if err := s.repo.UpdateLastLogin(ctx, user.ID); err != nil {
 		s.logger.Warn(ctx, "Failed to update last login timestamp", "error", err.Error())
 		incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "update_last_login")
@@ -294,6 +302,7 @@ func (s *AuthService) finishLogin(ctx context.Context, user *model.User, tenantI
 		return nil, nil, sanitizeError(ctx, s.logger, "generate tokens", err)
 	}
 
+	s.sessionOpened(ctx, user)
 	s.logger.Info(ctx, "User login successful", "user_id", user.ID, "email", maskEmail(user.Email), "tenant_id", tenantID)
 	incMetric(s.metrics, metrics.CounterLoginSuccess)
 	s.recordSignInSuccess(ctx, attempt, user.ID, tenantID, session)
@@ -396,6 +405,7 @@ func (s *AuthService) finishLoginByEmail(ctx context.Context, user *model.User, 
 		resp.TenantID = selected.TenantID
 	}
 
+	s.sessionOpened(ctx, user)
 	s.logger.Info(ctx, "User login-by-email successful", "user_id", user.ID, "workspace_selected", selected != nil)
 	incMetric(s.metrics, metrics.CounterLoginSuccess)
 	s.recordSignInSuccess(ctx, attempt, user.ID, resp.TenantID, session)
@@ -571,9 +581,14 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
 func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest) (*model.RefreshResponse, error) {
 	s.logger.Debug(ctx, "Refreshing tokens", "tenant_id", req.TenantID)
 
+	// Keyed by client IP when available, else by the token itself (a truncated
+	// digest, so the key never carries the token), so refreshes without an IP are
+	// throttled per session rather than all in one bucket.
 	rlKey := "refresh:"
-	if req.SessionInfo != nil {
+	if req.SessionInfo != nil && req.SessionInfo.IPAddress != "" {
 		rlKey += req.SessionInfo.IPAddress
+	} else {
+		rlKey += "token:" + rateLimitTokenKey(req.RefreshToken)
 	}
 	if err := checkRateLimit(ctx, s.rateLimiter, s.metrics, s.logger, rlKey); err != nil {
 		return nil, err
@@ -618,8 +633,10 @@ func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest
 // it must observe the latest writes rather than lagging a replica, which would fail
 // open):
 //  1. Validate JWT signature and expiration.
-//  2. Load the identity; reject on identity token_version mismatch (ErrTokenRevoked),
-//     disabled (ErrAccountDisabled), or locked (ErrAccountLocked, with auto-unlock).
+//  2. Load the identity; reject when disabled (ErrAccountDisabled) or locked
+//     (ErrAccountLocked, with auto-unlock), then on identity token_version mismatch
+//     (ErrTokenRevoked). The account gates come first because Disable also bumps
+//     token_version, and a disabled account's tokens should say so.
 //  3. Load the active membership for the token's tenant; reject when it is
 //     missing/suspended or its token_version no longer matches (ErrTokenRevoked).
 func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWTClaims, error) {
@@ -635,18 +652,13 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 		s.logger.Warn(ctx, "User not found for JWT", "user_id", claims.UserID, "error", err.Error())
 		return nil, fmt.Errorf("user not found: %w", model.ErrInvalidToken)
 	}
-	if user.TokenVersion != claims.TokenVersion {
-		s.logger.Warn(ctx, "Token version mismatch (identity)",
-			"user_id", claims.UserID, "token_version", claims.TokenVersion, "current_version", user.TokenVersion)
-		return nil, model.ErrTokenRevoked
-	}
 	if !user.IsEnabled {
 		s.logger.Warn(ctx, "Account disabled", "user_id", claims.UserID)
 		return nil, model.ErrAccountDisabled
 	}
 	if user.IsLocked {
 		if user.LockedUntil != nil && time.Now().After(*user.LockedUntil) {
-			if err := s.repo.Unlock(ctx, user.ID); err != nil {
+			if err := s.repo.AutoUnlock(ctx, user.ID); err != nil {
 				s.logger.Warn(ctx, "Failed to auto-unlock account", "error", err.Error())
 				return nil, model.ErrAccountLocked
 			}
@@ -655,6 +667,11 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 			s.logger.Warn(ctx, "Account locked", "user_id", claims.UserID)
 			return nil, model.ErrAccountLocked
 		}
+	}
+	if user.TokenVersion != claims.TokenVersion {
+		s.logger.Warn(ctx, "Token version mismatch (identity)",
+			"user_id", claims.UserID, "token_version", claims.TokenVersion, "current_version", user.TokenVersion)
+		return nil, model.ErrTokenRevoked
 	}
 
 	// --- Membership checks (the token is workspace-scoped) ---

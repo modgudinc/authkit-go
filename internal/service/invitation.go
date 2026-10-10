@@ -137,8 +137,8 @@ func (s *InvitationService) Create(ctx context.Context, req model.CreateInvitati
 		return nil, sanitizeError(ctx, s.logger, "create invitation", err)
 	}
 
-	// Retrieve created invitation
-	invitation, err := s.repo.GetInvitation(ctx, code)
+	// Retrieve the created invitation from the primary: a replica may not have it yet.
+	invitation, err := s.repo.GetInvitationFromPrimary(ctx, code)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to retrieve created invitation",
 			"code", maskCode(code),

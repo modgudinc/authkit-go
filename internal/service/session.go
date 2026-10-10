@@ -297,9 +297,16 @@ func (s *TokenService) refreshBoundPair(ctx context.Context, token, tenantID str
 		IPAddress: ip, UserAgent: agent, DeviceName: name, GracePeriod: s.refreshGrace,
 	})
 	if err != nil {
-		if errors.Is(err, model.ErrRefreshTokenReuse) {
+		var reuseErr *model.RefreshTokenReuseError
+		if errors.As(err, &reuseErr) {
 			incMetric(s.metrics, metrics.CounterRefreshReuse)
-			s.logger.Warn(ctx, "bound refresh token reuse detected; identity token version invalidated", "error", err)
+			// The same event name and level as the legacy path in RefreshTokenPair, so
+			// one alert catches both.
+			s.logger.Error(ctx, "SECURITY: bound refresh token reuse detected; identity token version invalidated",
+				"event", "refresh_token_reuse",
+				"user_id", reuseErr.UserID,
+				"family_id", reuseErr.FamilyID,
+			)
 		}
 		return nil, sanitizeError(ctx, s.logger, "rotate bound refresh token", err)
 	}

@@ -16,7 +16,7 @@ import (
 // DBConnection and the JWT/API-key secrets are required; the remaining fields
 // have sensible defaults. See each sub-struct for details.
 type Config struct {
-	SessionConfig  SessionConfig // Optional; disabled by default, requires migration 000002 when enabled.
+	SessionConfig  SessionConfig // Optional; disabled by default, requires migrations 000002 and 000003 when enabled.
 	DBConnection   DatabaseConnection
 	JWTConfig      JWTConfig
 	APIKeyConfig   APIKeyConfig
@@ -65,19 +65,31 @@ type Config struct {
 	RecordSignIns bool
 }
 
+// Aliases of the model package's configuration types, so a Config can be written
+// without importing model.
 type (
-	SessionMode   = model.SessionMode
+	// SessionMode is how installation sessions are enforced; see SessionConfig.
+	SessionMode = model.SessionMode
+	// SessionConfig turns on installation-bound sessions (docs/installation-sessions.md).
 	SessionConfig = model.SessionConfig
 
-	SigningKey      = model.SigningKey
+	// SigningKey is the private key JWTConfig.SigningKey signs access tokens with.
+	SigningKey = model.SigningKey
+	// VerificationKey is a public key JWTConfig.VerificationKeys accepts tokens from.
 	VerificationKey = model.VerificationKey
-	JSONWebKey      = model.JSONWebKey
-	JSONWebKeySet   = model.JSONWebKeySet
+	// JSONWebKey is one public key as a JSON Web Key.
+	JSONWebKey = model.JSONWebKey
+	// JSONWebKeySet is what AuthKit.JSONWebKeySet returns, to serve at a jwks_uri.
+	JSONWebKeySet = model.JSONWebKeySet
 )
 
+// The session modes, for SessionConfig.Mode.
 const (
+	// SessionDisabled is the default: no session tables, refresh tokens only.
 	SessionDisabled = model.SessionDisabled
+	// SessionOptional allows logins with and without an installation.
 	SessionOptional = model.SessionOptional
+	// SessionRequired refuses logins that bind no installation.
 	SessionRequired = model.SessionRequired
 )
 

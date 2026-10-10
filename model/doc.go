@@ -19,7 +19,7 @@
 //   - Values RETURNED by the services (e.g. *User from GetByID, *Tenant from
 //     TenantService.Get, *JWTClaims from ValidateJWT) are read-back snapshots. Treat them
 //     as read-only: mutating a returned struct (for example flipping User.IsLocked
-//     or editing User.Roles / User.TokenVersion) changes nothing server-side and
+//     or editing User.TokenVersion / Membership.Roles) changes nothing server-side and
 //     is not a supported way to perform an operation. Use the dedicated service
 //     methods, which take request structs and IDs, to make changes.
 //

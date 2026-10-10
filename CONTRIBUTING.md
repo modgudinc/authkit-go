@@ -11,9 +11,10 @@ make lint
 make test
 ```
 
-CI runs the unit and integration suites under the race detector and enforces coverage
-floors (unit ≥ 20%, integration ≥ 50%), so run `go test -race ./...` locally to catch
-races before pushing.
+`make test` and `make test-integration` run under the race detector, as CI does. CI
+enforces coverage floors (unit ≥ 20%, integration ≥ 50%). `make lint` needs
+[golangci-lint](https://golangci-lint.run/) v2 (CI pins v2.14.0; `.golangci.yml` is in
+the v2 format, which a v1 install cannot read).
 
 For database-backed changes, run the integration suite against local Postgres:
 

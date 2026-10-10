@@ -39,9 +39,15 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Defaults New applies to a zero JWTConfig.AccessExpiry, JWTConfig.RefreshExpiry
+// and OTPConfig.RateLimitPeriod.
 const (
-	DefaultAccessExpiry       = time.Minute * 15
-	DefaultRefreshExpiry      = time.Hour * 168
+	// DefaultAccessExpiry is how long an access token lives: 15 minutes.
+	DefaultAccessExpiry = time.Minute * 15
+	// DefaultRefreshExpiry is how long a refresh token lives: 7 days.
+	DefaultRefreshExpiry = time.Hour * 168
+	// DefaultOTPRateLimitPeriod is the built-in cooldown between two OTPs for the
+	// same email and purpose: one minute.
 	DefaultOTPRateLimitPeriod = time.Minute * 1
 
 	// MinSecretLength is the minimum length (in bytes) required for the JWT

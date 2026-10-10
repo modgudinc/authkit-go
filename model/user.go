@@ -71,7 +71,9 @@ type UserStatusChange struct {
 	// extend the audit trail.
 	ChangedBy *string `json:"changed_by,omitempty"`
 	// ChangedByType is the provenance of the change: "admin" (an explicit mutator)
-	// or "system" (the automatic failed-login lockout).
+	// or "system" (the automatic failed-login lockout, and the unlock the library
+	// performs itself when a lock has expired or a right password follows failed
+	// attempts).
 	ChangedByType string `json:"changed_by_type"`
 	// ChangedAt is when the transition was recorded.
 	ChangedAt time.Time `json:"changed_at"`

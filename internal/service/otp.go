@@ -82,8 +82,8 @@ func (s *OTPService) hashOTP(code string) string {
 //   - Returns error if rate limit is violated
 //   - Configurable rate limit duration (default: 1 minute)
 //
-// Note: One OTP per (tenant, email, purpose) at any time; generating a new one
-// for the same key replaces it and resets its failed-attempt counter.
+// Note: One OTP per (email, purpose) at any time, across tenants; generating a new
+// one for the same key replaces it and resets its failed-attempt counter.
 //
 // Returns:
 //   - Generated 6-digit OTP code (plaintext, for email sending)
@@ -101,8 +101,8 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 	}
 
 	// Optional caller-owned rate limiting (Config.RateLimiter), on top of the built-in
-	// per-(tenant,email,purpose) generation cooldown — lets callers bound OTP-email
-	// fan-out cost. Keyed by (tenant, email, purpose).
+	// per-(email, purpose) generation cooldown — lets callers bound OTP-email
+	// fan-out cost. Keyed by (email, purpose).
 	if err := checkRateLimit(ctx, s.rateLimiter, s.metrics, s.logger, "otp:"+email+":"+purpose); err != nil {
 		return nil, err
 	}
@@ -222,7 +222,8 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 //     MaxOTPValidationAttempts failures the code is invalidated and the caller
 //     must request a new one. This bounds online guessing of the short code.
 //
-// Note: Codes are scoped to (tenant, email, purpose).
+// Note: Codes are scoped to (email, purpose); the tenant in the request is
+// recorded with the code but is not part of the key.
 //
 // Returns:
 //   - nil if OTP is valid (and deletes it)

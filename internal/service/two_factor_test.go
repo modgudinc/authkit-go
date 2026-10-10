@@ -258,7 +258,9 @@ func TestPasswordLoginWithoutTwoFactorGoesOn(t *testing.T) {
 	if !errors.Is(err, model.ErrNoActiveMembership) {
 		t.Fatalf("err = %v, want ErrNoActiveMembership", err)
 	}
-	if !repo.unlockCalled || repo.updateLastLogin != 1 {
+	// The right password resets the failed count, but last_login waits for a
+	// session: this login stopped at the workspace gate.
+	if !repo.unlockCalled || repo.updateLastLogin != 0 {
 		t.Errorf("unlock %v, last login %d", repo.unlockCalled, repo.updateLastLogin)
 	}
 }

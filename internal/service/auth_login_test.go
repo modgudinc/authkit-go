@@ -61,7 +61,7 @@ func (f *fakeAuthRepository) GetByIDFromPrimary(ctx context.Context, userID stri
 	return f.user, nil
 }
 
-func (f *fakeAuthRepository) Unlock(ctx context.Context, userID string) error {
+func (f *fakeAuthRepository) AutoUnlock(ctx context.Context, userID string) error {
 	f.unlockCalled = true
 	if f.user != nil {
 		f.user.IsLocked = false

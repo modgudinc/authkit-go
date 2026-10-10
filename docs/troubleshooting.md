@@ -164,7 +164,7 @@ Branch on the exported sentinels with `errors.Is(err, authkit.Err…)` — never
 | `ErrInvalidCredentials`, `ErrInvalidToken`, `ErrTokenRevoked`, `ErrInvalidRefreshToken`, `ErrRefreshTokenReuse`, `ErrInvalidAPIKey`, `ErrInvalidOTP`, `ErrOTPLockedOut`, `ErrIncorrectPassword` | 401 |
 | `ErrAccountDisabled`, `ErrAccountLocked`, `ErrNoActiveMembership` | 403 |
 | `ErrNotFound` | 404 |
-| `ErrUserExists` | 409 |
+| `ErrUserExists`, `ErrTenantExists` | 409 |
 | `ErrRateLimited`, `ErrOTPRateLimited` | 429 |
 | `ErrInvalidInput`, `ErrValueTooLong`, `ErrPasswordTooWeak` | 400 |
 | `ErrSecretEncryptionKeyMissing`, `ErrOTPSecretMissing`, `ErrInternal`, anything else | 500 |

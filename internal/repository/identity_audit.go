@@ -192,8 +192,8 @@ func (r *Repository) CleanupStatusChanges(ctx context.Context, cutoff time.Time)
 // withUserStatusAudit runs a status-changing user UPDATE and its audit row(s) in
 // one transaction: it locks the target row (model.ErrNotFound if absent), calls
 // apply (which performs the UPDATE and returns the resulting snapshot), records any
-// transition attributed to actor, and commits. All of its callers are explicit
-// admin mutations, so they pass actorAdmin.
+// transition attributed to actor, and commits. Explicit admin mutations pass
+// actorAdmin; AutoUnlock passes actorSystem.
 func (r *Repository) withUserStatusAudit(ctx context.Context, userID string, actor statusChangeActor, apply func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error)) error {
 	tx, err := r.rw.BeginTx(ctx, nil)
 	if err != nil {

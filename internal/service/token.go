@@ -602,7 +602,9 @@ func (s *TokenService) RevokeRefreshToken(ctx context.Context, tokenString strin
 	}
 	if bound {
 		session, err := s.repo.SessionForRefresh(ctx, s.sessionConfig.Namespace, s.hashToken(tokenString))
-		if errors.Is(err, model.ErrInvalidRefreshToken) {
+		if errors.Is(err, model.ErrInvalidRefreshToken) || errors.Is(err, model.ErrSessionRevoked) {
+			// Logout is idempotent: an unknown token, or one whose session is already
+			// revoked or cleaned up, has nothing left to revoke.
 			return nil
 		}
 		if err != nil {
