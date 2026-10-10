@@ -60,6 +60,15 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   is still caught on the second of the two refreshes. Off by default. Migration
   `000006_refresh_token_replacement`, counter `authkit_refresh_token_retry_total`.
   Guide: [docs/refresh-tokens.md](docs/refresh-tokens.md).
+- Sign-in history: with `Config.RecordSignIns`, every sign-in attempt on an existing
+  account (password logins and `OpenSession`) is recorded with its method,
+  workspace, session, installation, IP address, user agent and device name, and the
+  reason for a refusal (`bad_password`, `no_password`, `account_disabled`,
+  `account_locked`, `no_membership`). `AuthKit.SignInHistoryService` lists a user's
+  attempts newest first and prunes old ones (`model.SignInEvent`). Recording is
+  best-effort; a failed write counts as `authkit_best_effort_write_failure_total`
+  with `op="record_sign_in"`. Off by default. Migration `000007_sign_in_events`.
+  Guide: [docs/sign-in-history.md](docs/sign-in-history.md).
 
 ### Security
 
@@ -97,6 +106,10 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   (map it to 500); only an unknown email is still `ErrInvalidCredentials`.
   `APIKeyService.Validate` did the same with `ErrInvalidAPIKey` and is fixed the same
   way.
+- A sign-in or refresh whose `SessionInfo.IPAddress` was not a bare address, such as
+  an `http.Request`'s `RemoteAddr` (`host:port`) or an `X-Forwarded-For` list, failed
+  with `ErrInternal` because PostgreSQL refused it. The host of a `host:port` is now
+  stored, and an address that does not parse is left out.
 
 ### Upgrade
 
@@ -110,13 +123,15 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   neither 000003 nor 000004 unless it uses `ExternalIdentityService` (000004).
 - Applications that set `JWTConfig.RefreshGracePeriod` must apply migration 000006
   first. It only adds a nullable column; code without a grace period never touches it.
+- Applications that set `Config.RecordSignIns` must apply migration 000007 first. It
+  only adds a table; code that does not record sign-ins never touches it.
 - Existing interfaces, request and response types are unchanged; the new calls are
-  on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`),
-  except `UserService.MarkEmailVerified`, which, like 0.20.1's `MembershipService`
-  additions, extends an interface authkit returns. `model.Session` gains
-  `SignInMethod`, `model.User` gains `EmailVerifiedAt`, and `JWTConfig` gains
-  `SigningKey`, `VerificationKeys` and `RefreshGracePeriod` (positional `JWTConfig`
-  literals need keyed fields).
+  on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`,
+  `AuthKit.SignInHistoryService`), except `UserService.MarkEmailVerified`, which,
+  like 0.20.1's `MembershipService` additions, extends an interface authkit returns.
+  `model.Session` gains `SignInMethod`, `model.User` gains `EmailVerifiedAt`,
+  `JWTConfig` gains `SigningKey`, `VerificationKeys` and `RefreshGracePeriod`, and
+  `Config` gains `RecordSignIns` (positional literals of either need keyed fields).
 
 ## [0.20.2] - 2026-09-07
 

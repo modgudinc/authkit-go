@@ -52,6 +52,13 @@ type Config struct {
 	// do itself (the per-account lockout is not enough — see SECURITY.md). Defaults
 	// to no limiting. See the RateLimiter interface for the key convention.
 	RateLimiter RateLimiter
+
+	// RecordSignIns, when true, records every sign-in attempt on an existing
+	// account (password logins and VerifiedLoginService.OpenSession, successful or
+	// refused) with its method, workspace, session, and the IP address, user agent
+	// and device name from SessionInfo. Read it with SignInHistoryService. Off by
+	// default. Needs migration 000007. See docs/sign-in-history.md.
+	RecordSignIns bool
 }
 
 type (

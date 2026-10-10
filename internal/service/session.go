@@ -246,19 +246,23 @@ func (s *TokenService) openBoundSession(ctx context.Context, user *model.User, i
 	return token, session, nil
 }
 
-func (s *TokenService) generateInstallationPair(ctx context.Context, user *model.User, membership *model.Membership, info *model.SessionInfo, binding *model.InstallationBinding) (*model.TokenPairResponse, error) {
+// generateInstallationPair opens a login's session and mints its first access
+// token. The session record is nil without an installation binding, when the
+// refresh token is a plain identity session.
+func (s *TokenService) generateInstallationPair(ctx context.Context, user *model.User, membership *model.Membership, info *model.SessionInfo, binding *model.InstallationBinding) (*model.TokenPairResponse, *model.Session, error) {
 	if binding == nil {
-		return s.GenerateTokenPair(ctx, user, membership, info)
+		pair, err := s.GenerateTokenPair(ctx, user, membership, info)
+		return pair, nil, err
 	}
 	refresh, session, err := s.createBoundSession(ctx, user, info, binding)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	access, expires, err := s.mintSessionAccess(user, membership, session)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return &model.TokenPairResponse{AccessToken: access, RefreshToken: refresh, ExpiresIn: expires}, nil
+	return &model.TokenPairResponse{AccessToken: access, RefreshToken: refresh, ExpiresIn: expires}, session, nil
 }
 
 func (s *TokenService) mintSessionAccess(user *model.User, membership *model.Membership, session *model.Session) (string, int64, error) {
