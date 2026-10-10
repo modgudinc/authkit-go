@@ -225,7 +225,9 @@ func (s *TokenService) openBoundSession(ctx context.Context, user *model.User, i
 	if err != nil {
 		return "", nil, sanitizeError(ctx, s.logger, "generate session ID", err)
 	}
-	now := time.Now()
+	// PostgreSQL keeps microseconds, so the session returned here matches the row
+	// that a later read returns.
+	now := time.Now().Truncate(time.Microsecond)
 	session := &model.Session{
 		ID: id.String(), UserID: user.ID, Namespace: s.sessionConfig.Namespace,
 		InstallationID: installationID, SignInMethod: method, TokenVersion: user.TokenVersion,
@@ -327,11 +329,7 @@ func (s *TokenService) refreshBoundPair(ctx context.Context, token, tenantID str
 
 // LoginWithInstallation authenticates with caller-verified enrollment.
 func (s *AuthService) LoginWithInstallation(ctx context.Context, req model.InstallationLoginRequest) (*model.InstallationLoginResponse, error) {
-	resp, err := s.login(ctx, req.LoginRequest, &req.Installation)
-	if err != nil {
-		return nil, err
-	}
-	session, err := s.tokenService.sessionForRefresh(ctx, resp.RefreshToken)
+	resp, session, err := s.login(ctx, req.LoginRequest, &req.Installation)
 	if err != nil {
 		return nil, err
 	}
@@ -339,11 +337,7 @@ func (s *AuthService) LoginWithInstallation(ctx context.Context, req model.Insta
 }
 
 func (s *AuthService) LoginByEmailWithInstallation(ctx context.Context, req model.InstallationLoginByEmailRequest) (*model.InstallationLoginResponse, error) {
-	resp, err := s.loginByEmail(ctx, req.LoginByEmailRequest, &req.Installation)
-	if err != nil {
-		return nil, err
-	}
-	session, err := s.tokenService.sessionForRefresh(ctx, resp.RefreshToken)
+	resp, session, err := s.loginByEmail(ctx, req.LoginByEmailRequest, &req.Installation)
 	if err != nil {
 		return nil, err
 	}
@@ -351,11 +345,9 @@ func (s *AuthService) LoginByEmailWithInstallation(ctx context.Context, req mode
 }
 
 func (s *AuthService) ValidateInstallationJWT(ctx context.Context, token string) (*model.InstallationClaims, error) {
-	claims, err := s.ValidateJWT(ctx, token)
-	if err != nil {
-		return nil, err
-	}
-	session, err := s.tokenService.sessionForClaims(ctx, claims)
+	// validateJWT has already checked the token's session; it returns it rather
+	// than this reading it again.
+	claims, session, err := s.validateJWT(ctx, token)
 	if err != nil {
 		return nil, err
 	}

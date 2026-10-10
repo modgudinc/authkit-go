@@ -720,7 +720,9 @@ if err != nil {
 ```
 
 **Password Change Features:**
-- Old password verification
+- Old password verification; a wrong old password counts toward the failed-login
+  lockout, as a wrong login password does, so a stolen access token cannot be used to
+  guess the current password without limit
 - New password strength validation
 - Automatic logout from all devices across all workspaces (identity token version increment)
 - All refresh tokens revoked
@@ -790,7 +792,9 @@ Key semantics:
 - **`RemoveGuarded` / `UpdateRolesGuarded`** are `Remove` / `UpdateRoles` plus a
   last-holder guard: they refuse (`ErrLastRoleHolder`, map to **409**) to remove or
   demote the tenant's **last active member holding a caller-named role** — e.g. a
-  workspace's last `Admin`. The check-and-mutate is atomic and serialized per tenant (a
+  workspace's last `Admin`. Only members whose accounts are enabled count: a disabled
+  or deleted user never keeps a workspace manageable (a locked one still counts, since a
+  lock lifts by itself), while `UserService.Disable` itself is not guarded. The check-and-mutate is atomic and serialized per tenant (a
   transaction-scoped advisory lock), so concurrent removals cannot race a workspace below
   one active holder of the role, even across replicas. The `requireRole` is opaque; pass
   `""` to disable the guard (equivalent to `Remove` / `UpdateRoles`).
@@ -831,7 +835,7 @@ A `model.Membership` carries `UserID`, `TenantID`, `Roles` (opaque strings), `St
 a per-membership token version. `Get`/`Remove` on a non-existent membership return
 `ErrNotFound`; `Add` for an unknown user or tenant returns `ErrNotFound` (the FK is
 enforced). The guarded mutations additionally return `ErrLastRoleHolder` (map to **409**)
-when the change would remove the tenant's last active holder of the required role.
+when the change would remove the tenant's last active, enabled holder of the required role.
 
 ## Tenant Service
 
@@ -1888,7 +1892,7 @@ valid but the identity has no active membership in the requested tenant (no row,
 suspended); `Login`/`LoginByEmail`/`MintWorkspaceToken`/`RefreshToken` return it.
 `ErrLastRoleHolder` maps to a **409** and is returned by
 `MembershipService.RemoveGuarded`/`UpdateRolesGuarded` when the change would leave the
-tenant with no active member holding the required role (e.g. the workspace's last Admin);
+tenant with no active, enabled member holding the required role (e.g. the workspace's last Admin);
 nothing is written when it is returned.
 `ValidateJWT` additionally returns `ErrTokenRevoked` when the membership `token_version`
 no longer matches or the active membership has been suspended/removed (the workspace's

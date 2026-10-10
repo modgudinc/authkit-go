@@ -286,16 +286,25 @@ func (r *Repository) withGuardedTx(ctx context.Context, tenantID, requireRole st
 }
 
 // hasActiveRoleHolder reports whether the tenant has at least one ACTIVE member whose
-// roles include role. It runs on the supplied querier — a *sql.Tx during a guarded
-// mutation, so it observes that transaction's own uncommitted change — and tests role
-// membership against the JSONB roles array with the @> containment operator.
+// roles include role and whose account is enabled, so a disabled (or deleted) user
+// never counts as the holder that keeps the tenant manageable. A locked account
+// still counts: a lock is usually the failed-login lockout and lifts by itself. It
+// runs on the supplied querier — a *sql.Tx during a guarded mutation, so it observes
+// that transaction's own uncommitted change — and tests role membership against the
+// JSONB roles array with the @> containment operator. UserService.Disable is an
+// account-level action and is not guarded: disabling a tenant's last enabled holder
+// is allowed, and the guard then refuses to remove or demote anyone else holding the
+// role.
 func (r *Repository) hasActiveRoleHolder(ctx context.Context, q rowQuerier, tenantID, role string) (bool, error) {
 	query := `
 		SELECT EXISTS (
-			SELECT 1 FROM {{schema}}.memberships
-			WHERE tenant_id = $1
-			  AND status = 'active'
-			  AND roles @> jsonb_build_array($2::text)
+			SELECT 1
+			FROM {{schema}}.memberships m
+			JOIN {{schema}}.users u ON u.id = m.user_id
+			WHERE m.tenant_id = $1
+			  AND m.status = 'active'
+			  AND m.roles @> jsonb_build_array($2::text)
+			  AND u.is_enabled
 		)
 	`
 	var exists bool

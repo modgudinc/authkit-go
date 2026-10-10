@@ -168,6 +168,9 @@ type AuthService interface {
 	LogoutAll(ctx context.Context, userID string) error
 	RefreshToken(ctx context.Context, req model.RefreshRequest) (*model.RefreshResponse, error)
 	ValidateJWT(ctx context.Context, token string) (*model.JWTClaims, error)
+	// ChangePassword sets a new password after checking the old one, and signs the
+	// identity out everywhere. A wrong old password counts toward the failed-login
+	// lockout.
 	ChangePassword(ctx context.Context, req model.ChangePasswordRequest) error
 }
 
@@ -180,9 +183,11 @@ type MembershipService interface {
 	Add(ctx context.Context, req model.AddMembershipRequest) error
 	Remove(ctx context.Context, userID, tenantID string) error
 	// RemoveGuarded is Remove but refuses (model.ErrLastRoleHolder) to remove the
-	// tenant's last active member holding requireRole. The check-and-revoke is atomic
-	// and serialized per tenant, so a workspace can never be raced below one active
-	// holder of the role (e.g. its last Admin). Passing "" disables the guard.
+	// tenant's last active member holding requireRole whose account is enabled (a
+	// disabled or deleted user does not count; a locked one does). The
+	// check-and-revoke is atomic and serialized per tenant, so a workspace can never
+	// be raced below one such holder of the role (e.g. its last Admin). Passing ""
+	// disables the guard. UserService.Disable is not guarded.
 	RemoveGuarded(ctx context.Context, userID, tenantID, requireRole string) error
 	UpdateRoles(ctx context.Context, userID, tenantID string, roles []string) error
 	// UpdateRolesGuarded is UpdateRoles with the same last-holder guard as

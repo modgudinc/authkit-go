@@ -430,6 +430,53 @@ func TestValidateJWTReadsUserFromPrimary(t *testing.T) {
 	}
 }
 
+// A wrong old password counts toward the failed-login lockout: someone holding a
+// stolen access token cannot guess the current password without limit.
+func TestChangePasswordCountsWrongOldPasswords(t *testing.T) {
+	user := makeUser(t, "Correct1!")
+	repo := &fakeAuthRepository{user: user}
+	svc := newTestAuthService(repo)
+	for i := 1; i <= MaxFailedLoginAttempts; i++ {
+		err := svc.ChangePassword(context.Background(), model.ChangePasswordRequest{
+			UserID: user.ID, OldPassword: "Wrong1!", NewPassword: "NewStrong1!",
+		})
+		if !errors.Is(err, model.ErrIncorrectPassword) {
+			t.Fatalf("attempt %d: expected ErrIncorrectPassword, got %v", i, err)
+		}
+		if user.FailedLoginCount != i {
+			t.Fatalf("attempt %d: failed count = %d", i, user.FailedLoginCount)
+		}
+	}
+	if !repo.lockCalled || !user.IsLocked {
+		t.Fatal("the account did not lock at the threshold")
+	}
+	// Locked, even the right old password is refused.
+	err := svc.ChangePassword(context.Background(), model.ChangePasswordRequest{
+		UserID: user.ID, OldPassword: "Correct1!", NewPassword: "NewStrong1!",
+	})
+	if !errors.Is(err, model.ErrAccountLocked) {
+		t.Fatalf("expected ErrAccountLocked, got %v", err)
+	}
+}
+
+// A passwordless account has no old password to guess, so a ChangePassword on it
+// does not count toward the lockout (as for password logins).
+func TestChangePasswordWithoutPasswordDoesNotCount(t *testing.T) {
+	user := makeUser(t, "Correct1!")
+	user.PasswordHash = ""
+	repo := &fakeAuthRepository{user: user}
+	svc := newTestAuthService(repo)
+	err := svc.ChangePassword(context.Background(), model.ChangePasswordRequest{
+		UserID: user.ID, OldPassword: "anything", NewPassword: "NewStrong1!",
+	})
+	if !errors.Is(err, model.ErrIncorrectPassword) {
+		t.Fatalf("expected ErrIncorrectPassword, got %v", err)
+	}
+	if user.FailedLoginCount != 0 {
+		t.Fatalf("failed count = %d, want 0", user.FailedLoginCount)
+	}
+}
+
 func TestChangePasswordRejectsDisabledOrLocked(t *testing.T) {
 	// A disabled or locked account must not be able to rotate its own password
 	// mid-freeze, even with the correct old password. The status gate runs before

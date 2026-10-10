@@ -210,6 +210,7 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 // here does not fail the login. For a user with two-factor on it runs only after the
 // second factor, so the password alone does not reset the count that wrong codes
 // add to. last_login is set by sessionOpened, once the workspace gate has passed.
+// ChangePassword calls it too, once the new password is in place.
 func (s *AuthService) passwordAccepted(ctx context.Context, user *model.User) {
 	if user.FailedLoginCount > 0 {
 		if err := s.repo.AutoUnlock(ctx, user.ID); err != nil {
@@ -245,12 +246,13 @@ func (s *AuthService) sessionOpened(ctx context.Context, user *model.User) {
 // who has it on gets a *model.SecondFactorRequiredError (ErrSecondFactorRequired)
 // after the password; TwoFactorService.CompleteSecondFactor finishes the login.
 func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error) {
-	return s.login(ctx, req, nil)
+	resp, _, err := s.login(ctx, req, nil)
+	return resp, err
 }
 
-func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding *model.InstallationBinding) (*model.LoginResponse, error) {
+func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding *model.InstallationBinding) (*model.LoginResponse, *model.Session, error) {
 	if err := s.tokenService.checkInstallation(binding); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	email := normalizeEmail(req.Email)
 
@@ -263,7 +265,7 @@ func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding
 		rlKey += "email:" + email
 	}
 	if err := checkRateLimit(ctx, s.rateLimiter, s.metrics, s.logger, rlKey); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	s.logger.Debug(ctx, "User login attempt", "email", maskEmail(email), "tenant_id", req.TenantID)
@@ -271,15 +273,14 @@ func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding
 	attempt := signIn{method: model.SignInMethodPassword, tenantID: req.TenantID, installation: binding, info: req.SessionInfo}
 	user, err := s.authenticateIdentity(ctx, email, req.Password, attempt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	pending := pendingLogin{Kind: pendingLoginTenant, TenantID: req.TenantID, SessionInfo: req.SessionInfo}
 	if err := s.requireSecondFactor(ctx, user, pending.bound(binding)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	s.passwordAccepted(ctx, user)
-	resp, _, err := s.finishLogin(ctx, user, req.TenantID, req.SessionInfo, binding, attempt)
-	return resp, err
+	return s.finishLogin(ctx, user, req.TenantID, req.SessionInfo, binding, attempt)
 }
 
 // finishLogin is the part of Login after the identity is authenticated: the
@@ -328,12 +329,13 @@ func (s *AuthService) finishLogin(ctx context.Context, user *model.User, tenantI
 // A storage failure is an error wrapping model.ErrInternal, as for Login. A user with
 // two-factor on gets ErrSecondFactorRequired after the password, as for Login.
 func (s *AuthService) LoginByEmail(ctx context.Context, req model.LoginByEmailRequest) (*model.LoginResponse, error) {
-	return s.loginByEmail(ctx, req, nil)
+	resp, _, err := s.loginByEmail(ctx, req, nil)
+	return resp, err
 }
 
-func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRequest, binding *model.InstallationBinding) (*model.LoginResponse, error) {
+func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRequest, binding *model.InstallationBinding) (*model.LoginResponse, *model.Session, error) {
 	if err := s.tokenService.checkInstallation(binding); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	email := normalizeEmail(req.Email)
 
@@ -344,7 +346,7 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 		rlKey += "email:" + email
 	}
 	if err := checkRateLimit(ctx, s.rateLimiter, s.metrics, s.logger, rlKey); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	s.logger.Debug(ctx, "User login-by-email attempt", "email", maskEmail(email))
@@ -352,15 +354,14 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 	attempt := signIn{method: model.SignInMethodPassword, tenantID: req.TenantID, installation: binding, info: req.SessionInfo}
 	user, err := s.authenticateIdentity(ctx, email, req.Password, attempt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	pending := pendingLogin{Kind: pendingLoginByEmail, TenantID: req.TenantID, SessionInfo: req.SessionInfo}
 	if err := s.requireSecondFactor(ctx, user, pending.bound(binding)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	s.passwordAccepted(ctx, user)
-	resp, _, err := s.finishLoginByEmail(ctx, user, req.TenantID, req.SessionInfo, binding, attempt)
-	return resp, err
+	return s.finishLoginByEmail(ctx, user, req.TenantID, req.SessionInfo, binding, attempt)
 }
 
 // finishLoginByEmail is the part of LoginByEmail after the identity is
@@ -640,38 +641,45 @@ func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest
 //  3. Load the active membership for the token's tenant; reject when it is
 //     missing/suspended or its token_version no longer matches (ErrTokenRevoked).
 func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWTClaims, error) {
+	claims, _, err := s.validateJWT(ctx, token)
+	return claims, err
+}
+
+// validateJWT is ValidateJWT that also returns the token's session (nil for a token
+// without one), so ValidateInstallationJWT does not read it a second time.
+func (s *AuthService) validateJWT(ctx context.Context, token string) (*model.JWTClaims, *model.Session, error) {
 	claims, err := s.jwtService.ValidateAccessToken(token)
 	if err != nil {
 		s.logger.Warn(ctx, "JWT validation failed", "error", err.Error())
-		return nil, err
+		return nil, nil, err
 	}
 
 	// --- Identity checks ---
 	user, err := s.repo.GetByIDFromPrimary(ctx, claims.UserID)
 	if err != nil {
 		s.logger.Warn(ctx, "User not found for JWT", "user_id", claims.UserID, "error", err.Error())
-		return nil, fmt.Errorf("user not found: %w", model.ErrInvalidToken)
+		return nil, nil, fmt.Errorf("user not found: %w", model.ErrInvalidToken)
 	}
 	if !user.IsEnabled {
 		s.logger.Warn(ctx, "Account disabled", "user_id", claims.UserID)
-		return nil, model.ErrAccountDisabled
+		return nil, nil, model.ErrAccountDisabled
 	}
 	if user.IsLocked {
 		if user.LockedUntil != nil && time.Now().After(*user.LockedUntil) {
 			if err := s.repo.AutoUnlock(ctx, user.ID); err != nil {
 				s.logger.Warn(ctx, "Failed to auto-unlock account", "error", err.Error())
-				return nil, model.ErrAccountLocked
+				return nil, nil, model.ErrAccountLocked
 			}
 			// Successfully unlocked, allow access.
 		} else {
 			s.logger.Warn(ctx, "Account locked", "user_id", claims.UserID)
-			return nil, model.ErrAccountLocked
+			return nil, nil, model.ErrAccountLocked
 		}
 	}
 	if user.TokenVersion != claims.TokenVersion {
 		s.logger.Warn(ctx, "Token version mismatch (identity)",
 			"user_id", claims.UserID, "token_version", claims.TokenVersion, "current_version", user.TokenVersion)
-		return nil, model.ErrTokenRevoked
+		return nil, nil, model.ErrTokenRevoked
 	}
 
 	// --- Membership checks (the token is workspace-scoped) ---
@@ -679,28 +687,29 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 	if err != nil {
 		if errors.Is(err, model.ErrNotFound) {
 			s.logger.Warn(ctx, "Membership not found for JWT", "user_id", claims.UserID, "tenant_id", claims.TenantID)
-			return nil, model.ErrTokenRevoked
+			return nil, nil, model.ErrTokenRevoked
 		}
-		return nil, sanitizeError(ctx, s.logger, "load membership", err)
+		return nil, nil, sanitizeError(ctx, s.logger, "load membership", err)
 	}
 	if !membership.IsActive() {
 		s.logger.Warn(ctx, "Membership not active for JWT", "user_id", claims.UserID, "tenant_id", claims.TenantID)
-		return nil, model.ErrTokenRevoked
+		return nil, nil, model.ErrTokenRevoked
 	}
 	if membership.TokenVersion != claims.MembershipTokenVersion {
 		s.logger.Warn(ctx, "Token version mismatch (membership)",
 			"user_id", claims.UserID, "tenant_id", claims.TenantID,
 			"token_version", claims.MembershipTokenVersion, "current_version", membership.TokenVersion)
-		return nil, model.ErrTokenRevoked
+		return nil, nil, model.ErrTokenRevoked
 	}
 
+	var session *model.Session
 	if s.tokenService != nil {
-		if _, err := s.tokenService.sessionForClaims(ctx, claims); err != nil {
-			return nil, err
+		if session, err = s.tokenService.sessionForClaims(ctx, claims); err != nil {
+			return nil, nil, err
 		}
 	}
 	s.logger.Debug(ctx, "JWT validated successfully", "user_id", claims.UserID, "tenant_id", claims.TenantID)
-	return claims, nil
+	return claims, session, nil
 }
 
 // ChangePassword changes a user's password and invalidates all sessions. It is
@@ -709,11 +718,14 @@ func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWT
 // Flow:
 //  1. Load the identity (from the primary).
 //  2. Reject if the account is disabled or locked (incident-response freeze).
-//  3. Verify the old password.
+//  3. Verify the old password. A wrong one counts toward the failed-login lockout, as
+//     a wrong login password does: the caller holds an access token, which may be
+//     stolen, and the old password is what stops it from taking the account over.
+//     At the threshold the account locks, which also cuts that token off.
 //  4. Validate new-password strength; hash it.
 //  5. Atomically update the password AND bump the identity token_version (invalidate
 //     every workspace's access tokens).
-//  6. Revoke all refresh tokens (logout everywhere).
+//  6. Revoke all refresh tokens (logout everywhere), then reset the failed count.
 func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswordRequest) error {
 	s.logger.Info(ctx, "Changing password", "user_id", req.UserID)
 
@@ -742,6 +754,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 	}
 	if err := s.passwordService.VerifyPassword(req.OldPassword, user.PasswordHash); err != nil {
 		s.logger.Warn(ctx, "Old password verification failed", "user_id", req.UserID)
+		s.countFailedAttempt(ctx, req.UserID, "old password")
 		return fmt.Errorf("incorrect old password: %w", model.ErrIncorrectPassword)
 	}
 
@@ -771,6 +784,8 @@ func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswo
 		return sanitizeError(ctx, s.logger, "revoke existing sessions", err)
 	}
 
+	// The right old password ends any run of wrong ones.
+	s.passwordAccepted(ctx, user)
 	s.logger.Info(ctx, "Password changed successfully", "user_id", req.UserID)
 	return nil
 }
