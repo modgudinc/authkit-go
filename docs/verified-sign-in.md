@@ -12,6 +12,9 @@ additive services let those sign-ins use authkit's sessions and users:
   plus the provider's stable user id, to one authkit user, and finds that user on
   the next sign-in.
 
+For passkeys, `PasskeyService` also stores the credentials; see
+[passkeys.md](passkeys.md).
+
 authkit does not implement OAuth or OIDC and is not an authorization server.
 Verify the provider's response with a client library such as
 `golang.org/x/oauth2` and `github.com/coreos/go-oidc/v3`, then pass the result here.

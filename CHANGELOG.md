@@ -69,6 +69,16 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   best-effort; a failed write counts as `authkit_best_effort_write_failure_total`
   with `op="record_sign_in"`. Off by default. Migration `000007_sign_in_events`.
   Guide: [docs/sign-in-history.md](docs/sign-in-history.md).
+- Passkeys: `AuthKit.PasskeyService` stores WebAuthn credentials (passkeys and
+  security keys) and gives each user a random 64-byte user handle per relying party
+  (`User`, `UserByHandle`), for the application's WebAuthn library to run the
+  ceremonies with. `Register` keeps the credential record (`model.Passkey`) and
+  refuses a credential ID already registered at the RP ID
+  (`ErrPasskeyAlreadyRegistered`). `RecordUse` writes a sign-in's counter and flags
+  back and refuses a signature counter that did not go up (`ErrPasskeyCloned`,
+  counter `authkit_webauthn_clone_warning_total`). `List`, `Rename` and `Remove`
+  manage a user's passkeys. Migration `000008_passkeys`. Guide, with go-webauthn:
+  [docs/passkeys.md](docs/passkeys.md).
 
 ### Security
 
@@ -125,9 +135,11 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   first. It only adds a nullable column; code without a grace period never touches it.
 - Applications that set `Config.RecordSignIns` must apply migration 000007 first. It
   only adds a table; code that does not record sign-ins never touches it.
+- Applications that use `PasskeyService` must apply migration 000008 first. It only
+  adds tables; other code never touches them.
 - Existing interfaces, request and response types are unchanged; the new calls are
   on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`,
-  `AuthKit.SignInHistoryService`), except `UserService.MarkEmailVerified`, which,
+  `AuthKit.SignInHistoryService`, `AuthKit.PasskeyService`), except `UserService.MarkEmailVerified`, which,
   like 0.20.1's `MembershipService` additions, extends an interface authkit returns.
   `model.Session` gains `SignInMethod`, `model.User` gains `EmailVerifiedAt`,
   `JWTConfig` gains `SigningKey`, `VerificationKeys` and `RefreshGracePeriod`, and

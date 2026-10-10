@@ -28,6 +28,8 @@ var publicSentinels = []error{
 	model.ErrIdentityLinkRequired,
 	model.ErrIdentityAlreadyLinked,
 	model.ErrEmailNotVerified,
+	model.ErrPasskeyAlreadyRegistered,
+	model.ErrPasskeyCloned,
 	model.ErrNotFound,
 	model.ErrInvalidCredentials,
 	model.ErrAccountDisabled,

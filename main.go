@@ -373,6 +373,14 @@ func (k *AuthKit) ExternalIdentityService() ExternalIdentityService {
 	return service.NewExternalIdentityService(&repo, k.logger, k.metrics)
 }
 
+// PasskeyService stores WebAuthn credentials (passkeys and security keys) and the
+// user handles they carry; the application runs the WebAuthn ceremonies. Requires
+// migration 000008; see docs/passkeys.md.
+func (k *AuthKit) PasskeyService() PasskeyService {
+	repo := k.repository()
+	return service.NewPasskeyService(&repo, k.logger, k.metrics)
+}
+
 // SessionService manages sessions scoped to the configured application namespace.
 // Callers must authorize session-management actions for the supplied user.
 func (k *AuthKit) SessionService() SessionService {
