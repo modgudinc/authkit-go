@@ -16,6 +16,7 @@ A Go library for identity and authentication management built on a **decoupled-i
 - **Email Verification State**: `User.EmailVerifiedAt`, set by `UserService.MarkEmailVerified` after a code or link proves the address; with `OTPService` and `OpenSession` it gives passwordless sign-in by emailed code
 - **Asymmetric Signing Keys**: Optional Ed25519, ECDSA P-256 or RSA access-token signing (any `crypto.Signer`, KMS keys included) with key ids, a published JSON Web Key Set, and rotation without logging anyone out
 - **Linked Sign-In Identities**: `ExternalIdentityService` maps a provider account (provider + subject) to one user, linking by verified email only under safe rules; bring your own OAuth/OIDC client
+- **Passkeys**: `PasskeyService` stores WebAuthn credentials and per-user handles for sign-in with passkeys and security keys, refusing a reused credential ID and a signature counter that goes backwards; bring your own WebAuthn library (go-webauthn)
 - **Sign-In History**: Optional record of every sign-in attempt on an account (method, workspace, session, IP address, user agent, and the reason for a refusal), read with `SignInHistoryService`
 - **Security-First**: Cryptographically secure random generation, one-way hashing, UUID v7 string identifiers
 - **Pluggable Rate Limiting**: Optional `Config.RateLimiter` hook for `Login`/`LoginByEmail`/`RefreshToken`/OTP generation
@@ -39,6 +40,7 @@ go get github.com/modgudinc/authkit-go
 - [Verified sign-in and linked identities (OAuth/OIDC, email links, device codes)](docs/verified-sign-in.md)
 - [Asymmetric signing keys, the key set, and key rotation](docs/signing-keys.md)
 - [Sign-in history](docs/sign-in-history.md)
+- [Passkeys (WebAuthn credentials)](docs/passkeys.md)
 
 ## Quick Start
 

@@ -34,6 +34,13 @@ Core tables:
   provider's account, keyed by `(provider, subject)`, to one user, with the email
   the provider last reported. Cascades on user delete. See
   [verified sign-in](verified-sign-in.md).
+- `sign_in_events` (optional migration 000007): One row per sign-in attempt on an
+  existing account when `Config.RecordSignIns` is set. Cascades on user delete. See
+  [sign-in history](sign-in-history.md).
+- `passkey_users` and `passkeys` (optional migration 000008): Each user's random
+  WebAuthn user handle per relying party ID, and the WebAuthn credentials (passkeys
+  and security keys) registered under it, keyed by `(rp_id, credential_id)`.
+  Cascade on user delete. See [passkeys](passkeys.md).
 - `api_keys`: Tenant-scoped API key hashes and metadata (`created_by` is a global user id).
 - `invitations`: Invitation codes, target email, roles, expiry, and usage limits.
 - `verification_codes`: OTPs stored as a keyed HMAC-SHA256 (`code_hash`), never in plaintext, plus purpose, failed-attempt count, expiry, and creation time; keyed by `(email, purpose)` globally (email is a global identity, so an OTP is identity-level, not tenant-scoped).

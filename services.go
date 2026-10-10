@@ -45,6 +45,29 @@ type ExternalIdentityService interface {
 	ListByUser(ctx context.Context, userID string) ([]*model.ExternalIdentity, error)
 }
 
+// PasskeyService stores WebAuthn credentials (passkeys and security keys) and the
+// user handle each user carries at a relying party. It does not run WebAuthn
+// ceremonies: the application verifies them with its own WebAuthn library and
+// stores and reads the results here, then opens the session with
+// VerifiedLoginService.OpenSession. The embedding application must authorize the
+// actor before passing a userID. Requires migration 000008; see docs/passkeys.md.
+type PasskeyService interface {
+	// User returns the user, their user handle at rpID (created on first use) and
+	// their passkeys there, for a registration or a sign-in that names the user.
+	User(ctx context.Context, userID, rpID string) (*model.PasskeyUser, error)
+	// UserByHandle is User for the user a discoverable sign-in's user handle names.
+	UserByHandle(ctx context.Context, rpID string, userHandle []byte) (*model.PasskeyUser, error)
+	// Register stores a passkey from a verified registration ceremony.
+	Register(ctx context.Context, req model.RegisterPasskeyRequest) (*model.Passkey, error)
+	// RecordUse writes back a verified sign-in's counter and flags. It returns
+	// ErrPasskeyCloned, and records nothing, when the counter did not go up.
+	RecordUse(ctx context.Context, req model.PasskeyUseRequest) error
+	// List returns a user's passkeys at rpID, for display.
+	List(ctx context.Context, userID, rpID string) ([]*model.Passkey, error)
+	Rename(ctx context.Context, userID, rpID string, credentialID []byte, name string) error
+	Remove(ctx context.Context, userID, rpID string, credentialID []byte) error
+}
+
 // SignInHistoryService reads the sign-in history recorded when
 // Config.RecordSignIns is set: one SignInEvent per attempt on an existing account,
 // successful or refused. It is identity-wide, covering every application that
@@ -297,6 +320,7 @@ var (
 	_ InstallationAuthService = (*service.AuthService)(nil)
 	_ VerifiedLoginService    = (*service.AuthService)(nil)
 	_ ExternalIdentityService = (*service.ExternalIdentityService)(nil)
+	_ PasskeyService          = (*service.PasskeyService)(nil)
 	_ SessionService          = (*service.SessionService)(nil)
 	_ SignInHistoryService    = (*service.SignInHistoryService)(nil)
 	_ APIKeyService           = (*service.APIKeyService)(nil)

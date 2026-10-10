@@ -73,4 +73,8 @@ const (
 	// has_password, provider_account_mismatch). A spike can mean someone is trying to take over
 	// accounts through a provider.
 	CounterIdentityLinkRefused = "authkit_identity_link_refused_total"
+	// CounterWebAuthnCloneWarning counts PasskeyService.RecordUse calls refused
+	// because the authenticator's signature counter did not go up (ErrPasskeyCloned):
+	// the passkey may have been copied to another authenticator.
+	CounterWebAuthnCloneWarning = "authkit_webauthn_clone_warning_total"
 )

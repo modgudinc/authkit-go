@@ -31,6 +31,20 @@ var (
 	ErrEmailNotVerified = errors.New("authkit: a verified email address is required")
 )
 
+// Sentinel errors for passkeys (PasskeyService).
+var (
+	// ErrPasskeyAlreadyRegistered is returned by PasskeyService.Register when a
+	// passkey with the same credential ID is already registered at the RP ID, to
+	// any user. WebAuthn requires the registration to fail. Map it to HTTP 409.
+	ErrPasskeyAlreadyRegistered = errors.New("authkit: passkey is already registered")
+
+	// ErrPasskeyCloned is returned by PasskeyService.RecordUse when the
+	// authenticator's signature counter did not go up since the passkey's last
+	// sign-in, a sign that the credential was copied to another authenticator.
+	// Nothing is recorded. Refuse the sign-in.
+	ErrPasskeyCloned = errors.New("authkit: passkey may be cloned")
+)
+
 // Sentinel errors returned by the library so callers can branch on outcome with
 // errors.Is instead of matching on error strings. They are defined in the model
 // (leaf) package so every layer can return them without an import cycle; the root
