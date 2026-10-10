@@ -12,6 +12,25 @@ A response is lost when a request times out after the server committed, when the
 crashes or is killed before it saves the new token, or when a command-line tool or hook
 is cut off by its own time limit.
 
+## Disabled and locked accounts
+
+A refresh for a disabled or locked account fails and consumes nothing, so the account's
+refresh tokens stay as they were. A lock, including the one the failed-login lockout
+sets, therefore only pauses them: they work again once it lifts, and someone who trips
+the lockout on purpose cannot sign the person out of their devices.
+`UserService.Disable` and `UserService.Lock` revoke the tokens themselves, so those do
+end every session.
+
+Without an installation session, the error matches both `ErrInvalidRefreshToken` and
+the account's own sentinel, `ErrAccountDisabled` or `ErrAccountLocked`. Check those
+first if you want the client to keep its refresh token through a lock (a 403 rather
+than a 401). A bound token (installation sessions) gets `ErrSessionRevoked`.
+
+A token that was already consumed is still reuse, whatever the account's state, and
+revokes its family. A bound token is checked against its session first, so its replay
+while the account is locked returns `ErrSessionRevoked`, and is caught as reuse once
+the lock lifts.
+
 ## The grace period
 
 `JWTConfig.RefreshGracePeriod` lets such a client retry:

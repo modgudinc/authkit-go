@@ -22,10 +22,10 @@ import (
 // timestamp updates so a detached goroutine can never hang on a stuck connection.
 const lastUsedUpdateTimeout = 5 * time.Second
 
-// cleanupTimeout bounds the compensating security cleanups in RefreshTokenPair
-// (family revoke on an inactive account, rotated-token revoke after an error). They
+// cleanupTimeout bounds the compensating security cleanups in RefreshTokenPair and
+// the session paths (a rotated token or session revoked after an issuance error). They
 // run on a context detached from the request's cancellation so a client disconnect
-// cannot leave a cut-off account's tokens or an orphaned rotated token in place.
+// cannot leave an orphaned rotated token or session in place.
 const cleanupTimeout = 5 * time.Second
 
 // cleanupContext returns a context detached from parent's cancellation (its values
@@ -343,7 +343,10 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 			"is_enabled", user.IsEnabled,
 			"is_locked", user.IsLocked,
 		)
-		return nil, fmt.Errorf("account is not active: %w", model.ErrInvalidRefreshToken)
+		if !user.IsEnabled {
+			return nil, inactiveAccountRefresh(model.ErrAccountDisabled)
+		}
+		return nil, inactiveAccountRefresh(model.ErrAccountLocked)
 	}
 	if session != nil && session.TokenVersion != user.TokenVersion {
 		return nil, model.ErrSessionRevoked
@@ -381,9 +384,10 @@ func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString str
 //
 // Flow:
 //  1. Verify an active membership in tenantID WITHOUT consuming the refresh token
-//  2. Atomically rotate the refresh token (consume old, store replacement; reuse-detecting)
-//  3. Re-check account standing
-//  4. Mint the workspace-scoped access token
+//  2. Atomically rotate the refresh token (consume old, store replacement; reuse-detecting).
+//     A disabled or locked account is refused there before anything is consumed, so
+//     its refresh tokens are left as they were and a lock only pauses them.
+//  3. Mint the workspace-scoped access token
 //
 // Example:
 //
@@ -480,14 +484,29 @@ func (s *TokenService) RefreshTokenPair(
 		// strict reuse detection — treat the counter as "possible theft", not
 		// "confirmed theft".
 		var reuseErr *model.RefreshTokenReuseError
-		if errors.As(err, &reuseErr) {
+		switch {
+		case errors.As(err, &reuseErr):
 			s.logger.Error(ctx, "SECURITY: refresh token reuse detected; token family revoked and all sessions invalidated",
 				"event", "refresh_token_reuse",
 				"user_id", reuseErr.UserID,
 				"family_id", reuseErr.FamilyID,
 			)
 			incMetric(s.metrics, metrics.CounterRefreshReuse)
-		} else {
+		case errors.Is(err, model.ErrAccountDisabled), errors.Is(err, model.ErrAccountLocked):
+			// The refresh path does not go through AuthService.ValidateJWT, so this is
+			// the gate that stops a disabled or locked account minting access tokens.
+			// The rotation refused it without consuming anything, so the account's
+			// refresh tokens are as they were: a lock pauses them, and a stolen one
+			// replayed later still trips reuse detection.
+			s.logger.Warn(ctx, "Refresh denied: account is not active",
+				"user_id", userID,
+				"error", err.Error(),
+			)
+			if errors.Is(err, model.ErrAccountDisabled) {
+				return nil, inactiveAccountRefresh(model.ErrAccountDisabled)
+			}
+			return nil, inactiveAccountRefresh(model.ErrAccountLocked)
+		default:
 			s.logger.Warn(ctx, "Failed to rotate refresh token", "error", err.Error())
 		}
 		// Preserve the underlying sentinel (model.ErrInvalidRefreshToken or
@@ -499,34 +518,7 @@ func (s *TokenService) RefreshTokenPair(
 		s.logRefreshRetry(ctx, user.ID)
 	}
 
-	// 3. Re-check account standing before minting a new access token.
-	// The refresh path does not go through AuthService.ValidateJWT, so without
-	// this gate a disabled or locked account could keep minting fresh access
-	// tokens for the entire lifetime of its refresh token. RotateRefreshToken
-	// has already persisted the replacement token inside its transaction, so on
-	// rejection we revoke the user's entire refresh-token family to ensure a
-	// cut-off account cannot continue refreshing.
-	if !user.IsEnabled || isUserLocked(user) {
-		// Detached cleanup: this family-revoke is a security action that must run even
-		// if the request context was cancelled.
-		cctx, ccancel := cleanupContext(ctx)
-		revokeErr := s.repo.DeleteByUserID(cctx, user.ID)
-		ccancel()
-		if revokeErr != nil {
-			s.logger.Warn(ctx, "Failed to revoke refresh tokens for inactive account during refresh",
-				"user_id", user.ID,
-				"error", revokeErr.Error(),
-			)
-		}
-		s.logger.Warn(ctx, "Refresh denied: account is not active",
-			"user_id", user.ID,
-			"is_enabled", user.IsEnabled,
-			"is_locked", user.IsLocked,
-		)
-		return nil, fmt.Errorf("account is not active: %w", model.ErrInvalidRefreshToken)
-	}
-
-	// 4. Mint the workspace-scoped access token for the membership verified in step 0.
+	// 3. Mint the workspace-scoped access token for the membership verified in step 0.
 	// We deliberately reuse that membership rather than re-loading it after the rotate:
 	// re-loading and finding it suspended would force a reject AFTER the old token was
 	// consumed, recreating the stranded-replacement problem step 0 avoids. If the
@@ -712,6 +704,14 @@ func (s *TokenService) hashToken(token string) string {
 	h := hmac.New(sha256.New, []byte(s.refreshTokenHMACSecret))
 	h.Write([]byte(token))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// inactiveAccountRefresh is the error for a refresh token whose account is disabled
+// or locked. It is ErrInvalidRefreshToken, as for any token that cannot be used, and
+// also matches reason (ErrAccountDisabled or ErrAccountLocked), so a client can tell a
+// lock, which lifts, from a token that is gone, and keep its token through the lock.
+func inactiveAccountRefresh(reason error) error {
+	return fmt.Errorf("%w: %w", model.ErrInvalidRefreshToken, reason)
 }
 
 // isUserLocked reports whether an account should be treated as locked right now,
