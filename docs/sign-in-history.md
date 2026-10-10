@@ -27,6 +27,7 @@ One row per attempt, from these calls:
 | Call | Method | Recorded |
 |---|---|---|
 | `Login`, `LoginByEmail` and their `WithInstallation` forms | `password` | Success, or a refusal of an existing account |
+| `TwoFactorService.CompleteSecondFactor` | `password` | The login's success, or a wrong code ([two-factor.md](two-factor.md)) |
 | `VerifiedLoginService.OpenSession` | The method the application passed (`google`, `email_link`, ...) | Success, or a refusal of the account |
 
 A refusal carries its reason:
@@ -38,6 +39,7 @@ A refusal carries its reason:
 | `account_disabled` | The account is disabled |
 | `account_locked` | The account is locked |
 | `no_membership` | The account checked out, but has no active membership in the workspace asked for |
+| `bad_second_factor` | The password was right, but the two-factor code was wrong or already used (it also counts toward the lockout); see [two-factor.md](two-factor.md) |
 
 The caller of `Login` still gets `ErrInvalidCredentials` for the first four, so
 nobody learns from the response whether an account exists or is locked; the reason is

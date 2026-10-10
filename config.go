@@ -23,6 +23,9 @@ type Config struct {
 	PasswordConfig PasswordConfig
 	OTPConfig      OTPConfig
 	SecretConfig   SecretConfig // Optional: Configuration for SecretService
+	// TwoFactorConfig is optional; it turns on two-factor sign-in (TwoFactorService)
+	// and requires migration 000009.
+	TwoFactorConfig TwoFactorConfig
 	// Logger is optional and defaults to a no-op that discards everything. NOTE
 	// that several security signals are logger-only: OTP lockouts, refresh-token
 	// reuse, and sub-threshold failed logins are emitted only via the logger and
@@ -47,7 +50,8 @@ type Config struct {
 	VerifyConnectivity bool
 
 	// RateLimiter is an optional pluggable throttle consulted by AuthService.Login,
-	// RefreshToken, and OTPService.Generate before they do work. It is the
+	// RefreshToken, OTPService.Generate, and TwoFactorService.CompleteSecondFactor
+	// before they do work. It is the
 	// recommended place to enforce the IP/global rate limiting the library does not
 	// do itself (the per-account lockout is not enough — see SECURITY.md). Defaults
 	// to no limiting. See the RateLimiter interface for the key convention.
@@ -156,4 +160,21 @@ type OTPConfig struct {
 // required if SecretService is used.
 type SecretConfig struct {
 	EncryptionKey string // Base64-encoded 32-byte AES-256 key for encrypting secrets
+}
+
+// TwoFactorConfig turns on two-factor sign-in with an authenticator app (TOTP)
+// and recovery codes. Two-factor is off while EncryptionKey is empty: then no
+// login asks for a second factor and TwoFactorService returns
+// ErrTwoFactorNotConfigured. Requires migration 000009. See docs/two-factor.md.
+type TwoFactorConfig struct {
+	// EncryptionKey is a base64-encoded 32-byte random key, used for nothing else
+	// (not SecretConfig.EncryptionKey). authkit derives from it the AES-256-GCM key
+	// that encrypts authenticator secrets and the HMAC key that recovery codes are
+	// stored under. Keep it as you keep your other keys: with a different key, users
+	// with two-factor on cannot finish a password login until it is turned off for
+	// them (TwoFactorService.Disable).
+	EncryptionKey string
+	// Issuer names your service in people's authenticator apps, such as "Acme".
+	// It is required with EncryptionKey and may not contain a colon.
+	Issuer string
 }

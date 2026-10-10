@@ -22,6 +22,13 @@ var (
 	ErrPasskeyCloned            = model.ErrPasskeyCloned
 )
 
+var (
+	ErrSecondFactorRequired    = model.ErrSecondFactorRequired
+	ErrInvalidSecondFactor     = model.ErrInvalidSecondFactor
+	ErrTwoFactorAlreadyEnabled = model.ErrTwoFactorAlreadyEnabled
+	ErrTwoFactorNotConfigured  = model.ErrTwoFactorNotConfigured
+)
+
 // Sentinel errors re-exported from the model package for convenience, so callers
 // can write errors.Is(err, authkit.ErrInvalidCredentials). These are the same
 // values the services return (model.Err*), so matching against either works.

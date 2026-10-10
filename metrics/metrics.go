@@ -35,7 +35,7 @@ const (
 	CounterLoginSuccess = "authkit_login_success_total"
 	// CounterLoginFailure counts failed AuthService.Login calls. Emitted with a
 	// "reason" label (not_found, account_disabled, account_locked, bad_password,
-	// no_password).
+	// no_password, no_membership, bad_second_factor).
 	CounterLoginFailure = "authkit_login_failure_total"
 	// CounterAccountLockout counts accounts auto-locked after too many failed logins.
 	CounterAccountLockout = "authkit_account_lockout_total"

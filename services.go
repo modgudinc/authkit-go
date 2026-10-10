@@ -68,6 +68,36 @@ type PasskeyService interface {
 	Remove(ctx context.Context, userID, rpID string, credentialID []byte) error
 }
 
+// TwoFactorService sets up two-factor sign-in with an authenticator app (TOTP)
+// and recovery codes, and finishes the password logins that then wait for a
+// second factor: Login, LoginByEmail and their installation variants return
+// ErrSecondFactorRequired, carrying a challenge, for a user who has it on. Sessions
+// opened with VerifiedLoginService.OpenSession are not affected. The embedding
+// application must authorize the actor before passing a userID. Requires
+// Config.TwoFactorConfig and migration 000009; see docs/two-factor.md.
+type TwoFactorService interface {
+	// EnrollTOTP makes a new authenticator secret for the user, not yet on, and
+	// returns it to show as a QR code.
+	EnrollTOTP(ctx context.Context, userID string) (*model.TOTPEnrollment, error)
+	// ConfirmTOTP turns two-factor on with a first code from the app and returns
+	// the user's recovery codes, which cannot be read back later.
+	ConfirmTOTP(ctx context.Context, userID, code string) ([]string, error)
+	// Verify checks a code or recovery code for a signed-in user with two-factor
+	// on, before a sensitive change. A wrong one counts toward the failed-login
+	// lockout.
+	Verify(ctx context.Context, userID, code string) error
+	// Disable turns two-factor off and deletes the user's secret and codes.
+	Disable(ctx context.Context, userID string) error
+	// RegenerateRecoveryCodes replaces the user's recovery codes.
+	RegenerateRecoveryCodes(ctx context.Context, userID string) ([]string, error)
+	// Status reports whether two-factor is on and how many recovery codes are left.
+	Status(ctx context.Context, userID string) (*model.TwoFactorStatus, error)
+	// CompleteSecondFactor finishes a login that returned ErrSecondFactorRequired.
+	CompleteSecondFactor(ctx context.Context, req model.CompleteSecondFactorRequest) (*model.InstallationLoginResponse, error)
+	// CleanupExpired deletes logins that expired waiting for a code.
+	CleanupExpired(ctx context.Context) (int64, error)
+}
+
 // SignInHistoryService reads the sign-in history recorded when
 // Config.RecordSignIns is set: one SignInEvent per attempt on an existing account,
 // successful or refused. It is identity-wide, covering every application that
@@ -122,7 +152,8 @@ type APIKeyService interface {
 // these methods. See SECURITY.md ("Caller-Owned Controls").
 type AuthService interface {
 	// Login authenticates into a known workspace (req.TenantID) and returns a
-	// workspace-scoped access token + identity-session refresh token.
+	// workspace-scoped access token + identity-session refresh token. A user with
+	// two-factor on gets ErrSecondFactorRequired instead (TwoFactorService).
 	Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error)
 	// LoginByEmail authenticates the identity without a known workspace: it opens the
 	// session and either mints a token (when the workspace is given or the identity
@@ -322,6 +353,7 @@ var (
 	_ ExternalIdentityService = (*service.ExternalIdentityService)(nil)
 	_ PasskeyService          = (*service.PasskeyService)(nil)
 	_ SessionService          = (*service.SessionService)(nil)
+	_ TwoFactorService        = (*service.TwoFactorService)(nil)
 	_ SignInHistoryService    = (*service.SignInHistoryService)(nil)
 	_ APIKeyService           = (*service.APIKeyService)(nil)
 	_ AuthService             = (*service.AuthService)(nil)

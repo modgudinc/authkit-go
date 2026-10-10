@@ -16,8 +16,8 @@ package ratelimit
 import "context"
 
 // RateLimiter decides whether a rate-sensitive operation may proceed. The library
-// calls Allow before AuthService.Login, AuthService.RefreshToken, and
-// OTPService.Generate.
+// calls Allow before AuthService.Login, AuthService.RefreshToken,
+// OTPService.Generate, and TwoFactorService.CompleteSecondFactor.
 //
 // key is a stable string the library derives from the operation and the most
 // security-relevant identifier available, so an implementation can bucket on it
@@ -26,6 +26,7 @@ import "context"
 //   - "login:<tenantID>:<ipAddress>"      — or "login:<tenantID>:email:<email>" when no IP is supplied
 //   - "refresh:<ipAddress>"               — or "refresh:" when no IP is supplied
 //   - "otp:<tenantID>:<email>:<purpose>"
+//   - "second_factor:<userID>"            — a code finishing a password login
 //
 // Return (true, nil) to allow and (false, nil) to reject — a rejection surfaces to
 // the caller as authkit.ErrRateLimited. A non-nil error is treated as a limiter

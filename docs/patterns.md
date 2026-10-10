@@ -135,8 +135,9 @@ case err != nil:
 ```
 
 The `key` passed to `Allow` is `login:<tenant>:<ip|email:...>` (`Login`),
-`login:<ip|email:...>` (`LoginByEmail`, no tenant), `refresh:<ip>`, or
-`otp:<email>:<purpose>` (OTP is keyed by email + purpose, not tenant) — bucket on it directly.
+`login:<ip|email:...>` (`LoginByEmail`, no tenant), `refresh:<ip>`,
+`otp:<email>:<purpose>` (OTP is keyed by email + purpose, not tenant), or
+`second_factor:<userID>` (`TwoFactorService.CompleteSecondFactor`) — bucket on it directly.
 
 ## Health Checks
 

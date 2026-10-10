@@ -54,6 +54,10 @@ const (
 	// SignInFailureNoMembership: the account checked out but has no active
 	// membership in the workspace the sign-in asked for.
 	SignInFailureNoMembership = "no_membership"
+	// SignInFailureBadSecondFactor: the password was right but the two-factor code
+	// or recovery code was wrong or already used. It also counts toward the
+	// failed-login lockout.
+	SignInFailureBadSecondFactor = "bad_second_factor"
 )
 
 // SignInEvent is one sign-in attempt on an existing account, recorded when

@@ -39,6 +39,8 @@ var shippedMigrations = map[string]string{ //nolint:gosec // G101 false positive
 	"000007_sign_in_events.up.sql":              "9f19e073fba1f093c34820e874677091ec5f5122c4ae0042f788d9ec14ec9032",
 	"000008_passkeys.down.sql":                  "43e05d481879455a97683d90be7185c7797ae374b4f73b51217d4fd010473cf6",
 	"000008_passkeys.up.sql":                    "bc813d20c9abef6af6da66290c68c6f08686a92e0cf2127249d9885680ce0469",
+	"000009_two_factor.down.sql":                "f6054e14b9056737b0ade5aae8e5d1fb86fc6d651670cb2e92266255cea25d37",
+	"000009_two_factor.up.sql":                  "cd38513796d568caaeaa5e7d2286ca6ab68537383a9c0d6fdd1a8d2111a19eda",
 }
 
 func shippedNames(t *testing.T) []string {

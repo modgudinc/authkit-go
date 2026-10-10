@@ -51,6 +51,10 @@ type AuthService struct {
 	// signIns records sign-in history (WithSignInHistory); nil when it is off.
 	signIns         signInRecorder
 	signInNamespace string
+	// twoFactorStore and twoFactorKeys make password logins of users with two-factor
+	// on wait for a second factor (WithTwoFactor); nil when it is off.
+	twoFactorStore twoFactorStore
+	twoFactorKeys  *TwoFactorKeys
 }
 
 const (
@@ -102,9 +106,9 @@ func NewAuthService(
 // failed-login lockout exactly as before. Every failure is collapsed into
 // ErrInvalidCredentials (the specific reason is logged) and timing is equalized with
 // a dummy bcrypt compare on the not-found / disabled / locked paths, so an
-// unauthenticated caller cannot distinguish them (no account / state enumeration). On
-// success it resets the failed-login count (if any) and updates last_login
-// (best-effort). It records a refusal of an existing account in the sign-in history
+// unauthenticated caller cannot distinguish them (no account / state enumeration). It
+// changes nothing on success: the caller calls passwordAccepted once no second factor
+// is needed. It records a refusal of an existing account in the sign-in history
 // (attempt describes the sign-in); the caller records the outcome after it. It
 // does NOT check workspace membership — that is the caller's gate.
 func (s *AuthService) authenticateIdentity(ctx context.Context, email, password string, attempt signIn) (*model.User, error) {
@@ -196,8 +200,15 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 		return nil, model.ErrInvalidCredentials
 	}
 
-	// Success: reset failed-login count (Unlock also clears the counter) and update
-	// last_login. Both are best-effort — a failure here does not fail the login.
+	return user, nil
+}
+
+// passwordAccepted records a password login that needs nothing more: it resets the
+// failed-login count (Unlock also clears the counter) and updates last_login. Both
+// are best-effort — a failure here does not fail the login. For a user with
+// two-factor on it runs only after the second factor, so the password alone does
+// not reset the count that wrong codes add to.
+func (s *AuthService) passwordAccepted(ctx context.Context, user *model.User) {
 	if user.FailedLoginCount > 0 {
 		if err := s.repo.Unlock(ctx, user.ID); err != nil {
 			s.logger.Warn(ctx, "Failed to reset failed login count", "error", err.Error())
@@ -208,8 +219,6 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 		s.logger.Warn(ctx, "Failed to update last login timestamp", "error", err.Error())
 		incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "update_last_login")
 	}
-
-	return user, nil
 }
 
 // Login authenticates a user into a known workspace (req.TenantID) with email and
@@ -224,7 +233,9 @@ func (s *AuthService) authenticateIdentity(ctx context.Context, email, password 
 // Returns model.ErrInvalidCredentials on auth failure and model.ErrNoActiveMembership
 // when the credentials are valid but the user has no active membership in req.TenantID.
 // A storage failure, such as an unreachable database, is an error wrapping
-// model.ErrInternal, never ErrInvalidCredentials.
+// model.ErrInternal, never ErrInvalidCredentials. With two-factor configured, a user
+// who has it on gets a *model.SecondFactorRequiredError (ErrSecondFactorRequired)
+// after the password; TwoFactorService.CompleteSecondFactor finishes the login.
 func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error) {
 	return s.login(ctx, req, nil)
 }
@@ -254,27 +265,38 @@ func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding
 	if err != nil {
 		return nil, err
 	}
+	pending := pendingLogin{Kind: pendingLoginTenant, TenantID: req.TenantID, SessionInfo: req.SessionInfo}
+	if err := s.requireSecondFactor(ctx, user, pending.bound(binding)); err != nil {
+		return nil, err
+	}
+	s.passwordAccepted(ctx, user)
+	resp, _, err := s.finishLogin(ctx, user, req.TenantID, req.SessionInfo, binding, attempt)
+	return resp, err
+}
 
-	// Workspace gate: the identity must have an ACTIVE membership in req.TenantID.
-	membership, err := s.activeMembership(ctx, user.ID, req.TenantID)
+// finishLogin is the part of Login after the identity is authenticated: the
+// workspace gate, then the session and the workspace-scoped access token.
+func (s *AuthService) finishLogin(ctx context.Context, user *model.User, tenantID string, info *model.SessionInfo, binding *model.InstallationBinding, attempt signIn) (*model.LoginResponse, *model.Session, error) {
+	// Workspace gate: the identity must have an ACTIVE membership in tenantID.
+	membership, err := s.activeMembership(ctx, user.ID, tenantID)
 	if err != nil {
 		if errors.Is(err, model.ErrNoActiveMembership) {
 			incMetric(s.metrics, metrics.CounterLoginFailure, "reason", "no_membership")
 			s.recordSignInFailure(ctx, attempt, user.ID, model.SignInFailureNoMembership)
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Mint the workspace-scoped access token + open the identity session.
-	tokenPair, session, err := s.tokenService.generateInstallationPair(ctx, user, membership, req.SessionInfo, binding)
+	tokenPair, session, err := s.tokenService.generateInstallationPair(ctx, user, membership, info, binding)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to generate token pair", "error", err.Error())
-		return nil, sanitizeError(ctx, s.logger, "generate tokens", err)
+		return nil, nil, sanitizeError(ctx, s.logger, "generate tokens", err)
 	}
 
-	s.logger.Info(ctx, "User login successful", "user_id", user.ID, "email", maskEmail(email), "tenant_id", req.TenantID)
+	s.logger.Info(ctx, "User login successful", "user_id", user.ID, "email", maskEmail(user.Email), "tenant_id", tenantID)
 	incMetric(s.metrics, metrics.CounterLoginSuccess)
-	s.recordSignInSuccess(ctx, attempt, user.ID, req.TenantID, session)
+	s.recordSignInSuccess(ctx, attempt, user.ID, tenantID, session)
 
 	return &model.LoginResponse{
 		AccessToken:  tokenPair.AccessToken,
@@ -282,8 +304,8 @@ func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding
 		ExpiresIn:    tokenPair.ExpiresIn,
 		User:         user,
 		Memberships:  s.membershipList(ctx, user.ID, membership),
-		TenantID:     req.TenantID,
-	}, nil
+		TenantID:     tenantID,
+	}, session, nil
 }
 
 // LoginByEmail authenticates the GLOBAL identity by email+password without a known
@@ -294,7 +316,8 @@ func (s *AuthService) login(ctx context.Context, req model.LoginRequest, binding
 //
 // Returns model.ErrInvalidCredentials on auth failure, and model.ErrNoActiveMembership
 // when req.TenantID is given but is not one of the identity's active memberships.
-// A storage failure is an error wrapping model.ErrInternal, as for Login.
+// A storage failure is an error wrapping model.ErrInternal, as for Login. A user with
+// two-factor on gets ErrSecondFactorRequired after the password, as for Login.
 func (s *AuthService) LoginByEmail(ctx context.Context, req model.LoginByEmailRequest) (*model.LoginResponse, error) {
 	return s.loginByEmail(ctx, req, nil)
 }
@@ -322,28 +345,40 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 	if err != nil {
 		return nil, err
 	}
+	pending := pendingLogin{Kind: pendingLoginByEmail, TenantID: req.TenantID, SessionInfo: req.SessionInfo}
+	if err := s.requireSecondFactor(ctx, user, pending.bound(binding)); err != nil {
+		return nil, err
+	}
+	s.passwordAccepted(ctx, user)
+	resp, _, err := s.finishLoginByEmail(ctx, user, req.TenantID, req.SessionInfo, binding, attempt)
+	return resp, err
+}
 
+// finishLoginByEmail is the part of LoginByEmail after the identity is
+// authenticated: workspace selection, the session, and the access token when a
+// workspace is selected.
+func (s *AuthService) finishLoginByEmail(ctx context.Context, user *model.User, tenantID string, info *model.SessionInfo, binding *model.InstallationBinding, attempt signIn) (*model.LoginResponse, *model.Session, error) {
 	// Determine the active selection BEFORE opening the session so an
 	// explicit-but-unauthorized workspace is rejected without minting a (then-orphaned)
 	// refresh token.
-	memberships, selected, err := s.selectWorkspace(ctx, user.ID, req.TenantID)
+	memberships, selected, err := s.selectWorkspace(ctx, user.ID, tenantID)
 	if err != nil {
 		if reason := signInFailureReason(err); reason != "" {
 			s.recordSignInFailure(ctx, attempt, user.ID, reason)
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Open the identity session (refresh token) regardless of workspace selection.
 	var refreshToken string
 	var session *model.Session
 	if binding == nil {
-		refreshToken, err = s.tokenService.CreateIdentitySession(ctx, user.ID, req.SessionInfo)
+		refreshToken, err = s.tokenService.CreateIdentitySession(ctx, user.ID, info)
 	} else {
-		refreshToken, session, err = s.tokenService.createBoundSession(ctx, user, req.SessionInfo, binding)
+		refreshToken, session, err = s.tokenService.createBoundSession(ctx, user, info, binding)
 	}
 	if err != nil {
-		return nil, sanitizeError(ctx, s.logger, "open identity session", err)
+		return nil, nil, sanitizeError(ctx, s.logger, "open identity session", err)
 	}
 
 	resp := &model.LoginResponse{
@@ -354,7 +389,7 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 	if selected != nil {
 		accessToken, expiresIn, err := s.tokenService.mintSessionAccess(user, selected, session)
 		if err != nil {
-			return nil, sanitizeError(ctx, s.logger, "mint access token", err)
+			return nil, nil, sanitizeError(ctx, s.logger, "mint access token", err)
 		}
 		resp.AccessToken = accessToken
 		resp.ExpiresIn = expiresIn
@@ -364,7 +399,7 @@ func (s *AuthService) loginByEmail(ctx context.Context, req model.LoginByEmailRe
 	s.logger.Info(ctx, "User login-by-email successful", "user_id", user.ID, "workspace_selected", selected != nil)
 	incMetric(s.metrics, metrics.CounterLoginSuccess)
 	s.recordSignInSuccess(ctx, attempt, user.ID, resp.TenantID, session)
-	return resp, nil
+	return resp, session, nil
 }
 
 // selectWorkspace loads the identity's memberships and picks the workspace a login
