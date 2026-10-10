@@ -41,7 +41,7 @@ func NewTenantService(repo *repository.Repository, logger logger.Logger) *Tenant
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
-//   - tenantID: Tenant identifier (primary email domain)
+//   - tenantID: Tenant identifier (the tenant_id chosen at creation)
 //
 // Returns the tenant or error if not found
 func (s *TenantService) Get(ctx context.Context, tenantID string) (*model.Tenant, error) {
@@ -115,11 +115,22 @@ func (s *TenantService) Create(ctx context.Context, req model.CreateTenantReques
 		"allowed_domains", strings.Join(req.AllowedDomains, ","),
 	)
 
+	// The id is the primary key the caller chooses and the name is what people see;
+	// neither may be blank.
+	req.TenantID = strings.TrimSpace(req.TenantID)
+	req.Name = strings.TrimSpace(req.Name)
+	if req.TenantID == "" {
+		return nil, fmt.Errorf("tenant_id is required: %w", model.ErrInvalidInput)
+	}
+	if req.Name == "" {
+		return nil, fmt.Errorf("name is required: %w", model.ErrInvalidInput)
+	}
+
 	// A tenant must have at least one allowed domain (the schema enforces this with
 	// a NOT NULL + non-empty CHECK; reject up front with a clear error instead of
 	// surfacing a raw constraint violation).
 	if len(req.AllowedDomains) == 0 {
-		return nil, fmt.Errorf("at least one allowed_domain is required")
+		return nil, fmt.Errorf("at least one allowed_domain is required: %w", model.ErrInvalidInput)
 	}
 
 	// Validate and normalize all allowed_domains. Domains are lowercased on write
@@ -129,7 +140,7 @@ func (s *TenantService) Create(ctx context.Context, req model.CreateTenantReques
 	for i, domain := range req.AllowedDomains {
 		normalized := strings.ToLower(strings.TrimSpace(domain))
 		if err := s.validateDomain(normalized); err != nil {
-			return nil, fmt.Errorf("invalid allowed_domain '%s': %w", domain, err)
+			return nil, fmt.Errorf("invalid allowed_domain '%s': %s: %w", domain, err.Error(), model.ErrInvalidInput)
 		}
 		req.AllowedDomains[i] = normalized
 	}
@@ -144,8 +155,8 @@ func (s *TenantService) Create(ctx context.Context, req model.CreateTenantReques
 		return nil, sanitizeError(ctx, s.logger, "create tenant", err)
 	}
 
-	// Retrieve the created tenant
-	tenant, err := s.repo.GetTenant(ctx, req.TenantID)
+	// Retrieve the created tenant from the primary: a replica may not have it yet.
+	tenant, err := s.repo.GetTenantFromPrimary(ctx, req.TenantID)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to retrieve created tenant",
 			"tenant_id", req.TenantID,
@@ -417,7 +428,7 @@ func (s *TenantService) ValidateDomainAccess(ctx context.Context, email, tenantI
 	// Extract domain from email
 	domain := s.extractDomain(email)
 	if domain == "" {
-		return fmt.Errorf("invalid email format")
+		return fmt.Errorf("invalid email format: %w", model.ErrInvalidInput)
 	}
 
 	// Get tenant
@@ -433,7 +444,7 @@ func (s *TenantService) ValidateDomainAccess(ctx context.Context, email, tenantI
 		}
 	}
 
-	return fmt.Errorf("email domain '%s' is not allowed for tenant '%s'", domain, tenantID)
+	return fmt.Errorf("email domain '%s' is not allowed for tenant '%s': %w", domain, tenantID, model.ErrInvalidInput)
 }
 
 // ============================================================================

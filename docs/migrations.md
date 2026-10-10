@@ -17,6 +17,7 @@ instead of copying SQL out of the repository.
 | `000007_sign_in_events` | `sign_in_events` | `Config.RecordSignIns` ([sign-in-history.md](sign-in-history.md)) |
 | `000008_passkeys` | `passkey_users`, `passkeys` | `PasskeyService` ([passkeys.md](passkeys.md)) |
 | `000009_two_factor` | `totp_factors`, `recovery_codes`, `second_factor_challenges` | `Config.TwoFactorConfig` ([two-factor.md](two-factor.md)) |
+| `000010_sessions_grants` | Grants on `sessions` for the optional `authkit_rw` and `authkit_ro` roles, which `000002` left out | Deployments that connect as those roles (harmless otherwise) |
 
 Each has an `.up.sql` and a `.down.sql`. With a migration tool, apply them all, in
 order. The ones a feature needs only add tables and a column that stay empty when
@@ -88,7 +89,9 @@ when a release needs one. A test pins every file's checksum, so an edit fails CI
 
 `000001` is frozen as released in v0.20.2. Before v0.20.2 it was edited in place
 across `0.x` releases; a database created from an earlier version follows the
-upgrade notes in [docs/releases](releases/) to reach the v0.20.2 schema first.
+upgrade notes in [docs/releases](releases/) to reach the v0.20.2 schema first. Its
+header still says to copy the file and replace `authkit` by hand for a custom schema;
+`Migrations(schema)` does that now, and the header stays because the file is frozen.
 
 ## Moving from SQL applied by hand
 

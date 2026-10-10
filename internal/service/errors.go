@@ -5,8 +5,11 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/modgudinc/authkit-go/logger"
@@ -52,6 +55,7 @@ var publicSentinels = []error{
 	model.ErrIncorrectPassword,
 	model.ErrInvitationInvalid,
 	model.ErrUserExists,
+	model.ErrTenantExists,
 	model.ErrPasswordTooWeak,
 	model.ErrSecretEncryptionKeyMissing,
 	model.ErrRateLimited,
@@ -122,14 +126,33 @@ func checkRateLimit(ctx context.Context, rl ratelimit.RateLimiter, m metrics.Met
 	allowed, err := rl.Allow(ctx, key)
 	if err != nil {
 		if log != nil {
-			log.Warn(ctx, "rate limiter error; allowing (fail open)", "key", key, "error", err.Error())
+			log.Warn(ctx, "rate limiter error; allowing (fail open)", "key", rateLimitKind(key), "error", err.Error())
 		}
 		incMetric(m, metrics.CounterRateLimiterError)
 		return nil
 	}
 	if !allowed {
-		incMetric(m, metrics.CounterRateLimited, "key", key)
+		incMetric(m, metrics.CounterRateLimited, "key", rateLimitKind(key))
 		return model.ErrRateLimited
 	}
 	return nil
+}
+
+// rateLimitKind is the operation a rate-limit key is for: the text before its first
+// colon ("login", "refresh", "otp", "second_factor"). The rest of a key can hold an
+// email address or an IP address, which belongs in neither a log line nor a metric
+// label (SECURITY.md), and would give the label unbounded cardinality.
+func rateLimitKind(key string) string {
+	if i := strings.IndexByte(key, ':'); i >= 0 {
+		return key[:i]
+	}
+	return key
+}
+
+// rateLimitTokenKey derives the part of a rate-limit key that stands for a token:
+// the first 16 hex digits of its SHA-256, which identifies the token to a limiter
+// without carrying it.
+func rateLimitTokenKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:8])
 }

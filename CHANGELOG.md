@@ -94,8 +94,36 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   and `ErrTwoFactorNotConfigured`; failure reason `bad_second_factor`; rate-limit key
   `second_factor:<userID>`. `OpenSession` is unaffected. Off by default. Migration
   `000009_two_factor`. Guide: [docs/two-factor.md](docs/two-factor.md).
+- `ErrTenantExists`, returned by `TenantService.Create` for a `tenant_id` that is
+  taken (it was `ErrInternal`).
+- Migration `000010_sessions_grants` grants the `sessions` table to the optional
+  `authkit_rw` and `authkit_ro` roles, which `000002` left out, so a deployment that
+  connects as those roles can use installation sessions. It does nothing without the
+  roles. An integration test now checks every table against both roles after every
+  migration.
 
 ### Security
+
+- A refresh with no `SessionInfo.IPAddress` was rate-limited under the single key
+  `refresh:`, so with a `Config.RateLimiter` a few refreshes by anyone exhausted the
+  bucket for every session. Such a refresh is now keyed `refresh:token:<digest>`, a
+  truncated SHA-256 of the token, so it is throttled per token.
+- Rate-limit keys hold email and IP addresses, and `authkit_rate_limited_total`
+  carried the whole key as its `key` label, as did the log line for a limiter error.
+  Both now carry only the operation (`login`, `refresh`, `otp`, `second_factor`).
+- `InvitationService.Revoke`, `Delete` and `IncrementUseCount` put the invitation
+  code, a credential, in their error messages, which the service then logged. The
+  messages no longer carry it.
+- `APIKeyService.Get` and `List` returned each key's HMAC in `APIKey.KeyHash`
+  (hidden from JSON, visible to Go callers). The field is now empty; the hash stays
+  in the database for `Validate`.
+- The failed-login lockout rewrote `locked_until` on an account that was already
+  locked, so an administrator's indefinite or longer lock was shortened to the
+  lockout duration by failed attempts (reachable through `TwoFactorService.Verify`).
+  A lock still in force is now kept.
+- A bound-session refresh-token reuse was logged at Warn without the
+  `event=refresh_token_reuse` field the legacy path logs at Error; both now log the
+  same.
 
 - Password login for a user without a password fails like a wrong password (dummy
   bcrypt comparison, `ErrInvalidCredentials`) and does not count toward the
@@ -116,6 +144,25 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Changed
 
+- `User.LastLoginAt` is set when a login opens a session, after the workspace gate;
+  a right password into a workspace the user is not a member of no longer updates it
+  (the failed-login count is still reset by the right password).
+- `ValidateJWT` checks the account before the token version, so a token of a
+  disabled account returns `ErrAccountDisabled` as documented; `UserService.Disable`
+  also bumps the token version, which made it `ErrTokenRevoked`. Once re-enabled,
+  the old tokens are `ErrTokenRevoked` as before.
+- `UserService.Create` refuses a malformed email (`ErrInvalidInput`); it stored any
+  string. `TenantService.Create` refuses a blank `TenantID` or `Name`, and its
+  domain errors wrap `ErrInvalidInput`, as do `ValidateDomainAccess`'s; they were
+  bare strings. `isValidEmail` now also refuses a second `@` in the local part, as
+  its doc said.
+- `PasswordService.VerifyPassword` returns `ErrIncorrectPassword` for a wrong
+  password (it was a bare string); a malformed hash is still a distinct error.
+- `UserService.List` and `APIKeyService.List` order by id after `created_at`, so
+  rows created in the same instant page without gaps or repeats.
+- The unlock the library performs itself (an expired lock on sign-in or token
+  validation, a right password after failed attempts) is audited with
+  `ChangedByType` `"system"`; it said `"admin"`.
 - Migrations are frozen once released: `000001` stays as released in v0.20.2, and
   schema changes arrive as new numbered migrations. A test pins every migration's
   checksum.
@@ -128,6 +175,22 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Fixed
 
+- `APIKeyService.Create` and `InvitationService.Create` with an unknown tenant or
+  creator returned `ErrInternal`; they return `ErrNotFound`, as `MembershipService.Add`
+  does. `TenantService.Create` with a taken id returns `ErrTenantExists`.
+- `TenantService.Create` and `InvitationService.Create` read the row they had just
+  written from the read-only handle, so with a lagging replica they could return
+  `ErrNotFound` for a tenant or invitation that exists. They read it from the primary.
+- `SessionService.Revoke` and `RevokeInstallation` for an unknown user returned
+  `ErrInternal` and logged an internal error; they return `ErrNotFound`.
+- `Logout` with a bound session's refresh token failed with `ErrSessionRevoked` once
+  `SessionService.CleanupExpired` had deleted the session. Logout is idempotent: it
+  succeeds, as for an unknown token.
+- Documentation: the `ratelimit` package and SECURITY.md described the OTP key with a
+  tenant segment it does not have and left out `LoginByEmail`'s form; README's
+  architecture tree and service list, roadmap, `Authorization` header and
+  `APIKeyService.Validate` samples, and the lists of calls the rate limiter guards,
+  are brought up to date; v0.20.0's release notes link to the repository again.
 - `Login` and `LoginByEmail` reported any failure to read the user, such as an
   unreachable database or a missing migration, as `ErrInvalidCredentials`, so an
   outage looked like wrong passwords. They now return an error wrapping `ErrInternal`
@@ -158,6 +221,8 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 - Applications that set `Config.TwoFactorConfig` must apply migration 000009 first:
   with it set, every password login reads the new tables. It only adds tables; code
   without two-factor never touches them.
+- Applications that connect as the `authkit_rw` or `authkit_ro` role and use
+  installation sessions should apply migration 000010; it only grants.
 - Existing interfaces, request and response types are unchanged; the new calls are
   on new interfaces (`AuthKit.VerifiedLoginService`, `AuthKit.ExternalIdentityService`,
   `AuthKit.SignInHistoryService`, `AuthKit.PasskeyService`, `AuthKit.TwoFactorService`), except `UserService.MarkEmailVerified`, which,
@@ -165,7 +230,8 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   `model.Session` gains `SignInMethod`, `model.User` gains `EmailVerifiedAt`,
   `JWTConfig` gains `SigningKey`, `VerificationKeys` and `RefreshGracePeriod`, and
   `Config` gains `RecordSignIns` and `TwoFactorConfig` (positional literals of either
-  need keyed fields).
+  need keyed fields). Callers that read `APIKey.KeyHash` from `Get` or `List` now get
+  an empty string.
 
 ## [0.20.2] - 2026-09-07
 

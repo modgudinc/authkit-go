@@ -14,7 +14,7 @@ it names your schema in place of `authkit` ([migrations.md](migrations.md)).
 ```go
 config.SessionConfig = authkit.SessionConfig{
     Mode:             authkit.SessionRequired,
-    Namespace:        "hugin",
+    Namespace:        "desktop",
     AbsoluteLifetime: 30 * 24 * time.Hour,
 }
 kit, err := authkit.New(config)

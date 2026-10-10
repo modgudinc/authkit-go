@@ -78,7 +78,11 @@ func (r *Repository) ListSessions(ctx context.Context, namespace, userID string,
 // All bound-session mutations lock user -> session -> refresh rows. Identity
 // status changes already lock the user first; this avoids inversions with them.
 func (r *Repository) lockSessionUser(ctx context.Context, tx *sql.Tx, userID string) (*model.User, error) {
-	return scanUser(tx.QueryRowContext(ctx, r.q("SELECT "+userColumns+" FROM {{schema}}.users WHERE id=$1 FOR UPDATE"), userID))
+	u, err := scanUser(tx.QueryRowContext(ctx, r.q("SELECT "+userColumns+" FROM {{schema}}.users WHERE id=$1 FOR UPDATE"), userID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("user not found: %w", model.ErrNotFound)
+	}
+	return u, err
 }
 
 func sessionAccountActive(u *model.User) bool {

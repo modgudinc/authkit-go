@@ -115,7 +115,7 @@ func (s *PasswordService) VerifyPassword(password, hash string) error {
 	if err != nil {
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
 			s.logger.Warn(context.Background(), "Password verification failed: incorrect password")
-			return fmt.Errorf("incorrect password")
+			return model.ErrIncorrectPassword
 		}
 
 		s.logger.Error(context.Background(), "Password verification error", "error", err.Error())

@@ -74,6 +74,9 @@ func clampPagination(limit, offset int) (int, int) {
 // MembershipService.Add.
 func (s *UserService) Create(ctx context.Context, req model.CreateUserRequest) (string, error) {
 	req.Email = normalizeEmail(req.Email)
+	if !isValidEmail(req.Email) {
+		return "", fmt.Errorf("create user: invalid email: %w", model.ErrInvalidInput)
+	}
 	id, err := s.repo.Create(ctx, req)
 	return id, sanitizeError(ctx, s.logger, "create user", err)
 }

@@ -22,9 +22,9 @@ type Secret struct {
 // SaveSecretRequest contains the data needed to save a secret
 type SaveSecretRequest struct {
 	TenantID   string // Tenant identifier
-	Key        string // Secret key/name (e.g., "cursor", "claude", "github")
+	Key        string // Secret key/name (e.g., "github", "slack", "stripe")
 	PlainValue string // Plaintext value (will be encrypted by service)
-	CreatedBy  string // User UUID who created/updated the secret (FK to users.id)
+	CreatedBy  string // User UUID who created the secret (FK to users.id); an update keeps the original creator
 }
 
 // SaveSecretResponse is returned after saving a secret

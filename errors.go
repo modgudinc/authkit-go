@@ -5,23 +5,27 @@ package authkit
 
 import "github.com/modgudinc/authkit-go/model"
 
+// Installation-session sentinels (docs/installation-sessions.md).
 var (
 	ErrSessionDisabled = model.ErrSessionDisabled
 	ErrSessionRequired = model.ErrSessionRequired
 	ErrSessionRevoked  = model.ErrSessionRevoked
 )
 
+// External-identity sentinels (docs/verified-sign-in.md).
 var (
 	ErrIdentityLinkRequired  = model.ErrIdentityLinkRequired
 	ErrIdentityAlreadyLinked = model.ErrIdentityAlreadyLinked
 	ErrEmailNotVerified      = model.ErrEmailNotVerified
 )
 
+// Passkey sentinels (docs/passkeys.md).
 var (
 	ErrPasskeyAlreadyRegistered = model.ErrPasskeyAlreadyRegistered
 	ErrPasskeyCloned            = model.ErrPasskeyCloned
 )
 
+// Two-factor sentinels (docs/two-factor.md).
 var (
 	ErrSecondFactorRequired    = model.ErrSecondFactorRequired
 	ErrInvalidSecondFactor     = model.ErrInvalidSecondFactor
@@ -51,6 +55,7 @@ var (
 	ErrIncorrectPassword          = model.ErrIncorrectPassword
 	ErrInvitationInvalid          = model.ErrInvitationInvalid
 	ErrUserExists                 = model.ErrUserExists
+	ErrTenantExists               = model.ErrTenantExists
 	ErrPasswordTooWeak            = model.ErrPasswordTooWeak
 	ErrSecretEncryptionKeyMissing = model.ErrSecretEncryptionKeyMissing
 	ErrRateLimited                = model.ErrRateLimited

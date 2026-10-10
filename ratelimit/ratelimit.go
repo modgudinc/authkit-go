@@ -23,10 +23,17 @@ import "context"
 // security-relevant identifier available, so an implementation can bucket on it
 // directly (most limiters hash the key). The formats are:
 //
-//   - "login:<tenantID>:<ipAddress>"      — or "login:<tenantID>:email:<email>" when no IP is supplied
-//   - "refresh:<ipAddress>"               — or "refresh:" when no IP is supplied
-//   - "otp:<tenantID>:<email>:<purpose>"
+//   - "login:<tenantID>:<ipAddress>"      — Login; "login:<tenantID>:email:<email>" when no IP is supplied
+//   - "login:<ipAddress>"                 — LoginByEmail (no tenant); "login:email:<email>" when no IP is supplied
+//   - "refresh:<ipAddress>"               — or "refresh:token:<digest>" when no IP is supplied, where
+//     <digest> is the first 16 hex digits of the refresh token's SHA-256, so refreshes
+//     without an IP are throttled per token rather than together
+//   - "otp:<email>:<purpose>"             — no tenant: one OTP exists per (email, purpose)
 //   - "second_factor:<userID>"            — a code finishing a password login
+//
+// The library never logs a key or puts one in a metric label: authkit_rate_limited_total
+// carries only the part before the first colon (the operation), because the rest can be
+// an email address or an IP address.
 //
 // Return (true, nil) to allow and (false, nil) to reject — a rejection surfaces to
 // the caller as authkit.ErrRateLimited. A non-nil error is treated as a limiter

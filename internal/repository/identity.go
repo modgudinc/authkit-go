@@ -291,7 +291,7 @@ func (r *Repository) Exists(ctx context.Context, email string) (bool, error) {
 func (r *Repository) List(ctx context.Context, limit, offset int) ([]*model.User, error) {
 	query := `SELECT ` + userColumns + `
 		FROM {{schema}}.users
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT $1 OFFSET $2`
 
 	rows, err := r.ro.QueryContext(ctx, r.q(query), limit, offset)
@@ -381,7 +381,13 @@ func (r *Repository) RegisterFailedLogin(ctx context.Context, userID string, max
 			last_failed_login = $1,
 			updated_at = $1,
 			is_locked = CASE WHEN $2 > 0 AND failed_login_count + 1 >= $2 THEN true ELSE is_locked END,
-			locked_until = CASE WHEN $2 > 0 AND failed_login_count + 1 >= $2 THEN $3 ELSE locked_until END
+			locked_until = CASE
+				-- A lock that is still in force stays as it is: an admin's indefinite
+				-- (NULL) or longer lock is never shortened to the lockout duration.
+				WHEN is_locked AND (locked_until IS NULL OR locked_until > $1) THEN locked_until
+				WHEN $2 > 0 AND failed_login_count + 1 >= $2 THEN $3
+				ELSE locked_until
+			END
 		WHERE id = $4
 		RETURNING failed_login_count, is_locked
 	`), now, maxAttempts, lockedUntil, userID).Scan(&count, &locked)
@@ -393,12 +399,14 @@ func (r *Repository) RegisterFailedLogin(ctx context.Context, userID string, max
 	current.FailedLoginCount = count
 	current.LastFailedLogin = &now
 	current.IsLocked = locked
-	if locked && !old.IsLocked {
+	// The snapshot mirrors the CASE above: a lock still in force kept its until.
+	lockInForce := old.IsLocked && (old.LockedUntil == nil || old.LockedUntil.After(now))
+	if locked && !lockInForce {
 		current.LockedUntil = &lockedUntil
 	}
-	// The automatic failed-login lockout is the only system-attributed status
-	// change; every explicit admin mutation goes through withUserStatusAudit with
-	// actorAdmin.
+	// The automatic failed-login lockout and AutoUnlock are the system-attributed
+	// status changes; every explicit admin mutation goes through withUserStatusAudit
+	// with actorAdmin.
 	if err := r.recordStatusChange(ctx, tx, userID, old, current, actorSystem); err != nil {
 		return 0, false, err
 	}
@@ -644,10 +652,22 @@ func (r *Repository) Lock(ctx context.Context, userID string, lockedUntil *time.
 }
 
 // ============================================================================
-// Unlock - Unlocks a user account and resets the failed-login count.
+// Unlock - Unlocks a user account and resets the failed-login count, as an admin
+// action. AutoUnlock is the same change made by the library itself.
 // ============================================================================
 func (r *Repository) Unlock(ctx context.Context, userID string) error {
-	return r.withUserStatusAudit(ctx, userID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+	return r.unlock(ctx, userID, actorAdmin)
+}
+
+// AutoUnlock unlocks a user account and resets the failed-login count on the
+// library's own initiative: a lock whose locked_until has passed, or a right
+// password after failed attempts. The audit row says the system did it.
+func (r *Repository) AutoUnlock(ctx context.Context, userID string) error {
+	return r.unlock(ctx, userID, actorSystem)
+}
+
+func (r *Repository) unlock(ctx context.Context, userID string, actor statusChangeActor) error {
+	return r.withUserStatusAudit(ctx, userID, actor, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users SET is_locked = false, locked_until = NULL, failed_login_count = 0, updated_at = $1 WHERE id = $2
 		`), time.Now(), userID); err != nil {

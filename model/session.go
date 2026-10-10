@@ -31,11 +31,16 @@ type InstallationBinding struct {
 	InstallationID string
 }
 
+// InstallationLoginRequest is the input to InstallationAuthService.LoginWithInstallation:
+// a Login bound to the installation it is made from.
 type InstallationLoginRequest struct {
 	LoginRequest
 	Installation InstallationBinding
 }
 
+// InstallationLoginByEmailRequest is the input to
+// InstallationAuthService.LoginByEmailWithInstallation: a LoginByEmail bound to the
+// installation it is made from.
 type InstallationLoginByEmailRequest struct {
 	LoginByEmailRequest
 	Installation InstallationBinding

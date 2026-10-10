@@ -5,10 +5,17 @@ package model
 
 import "errors"
 
+// Sentinel errors for installation sessions (SessionService, InstallationAuthService).
 var (
+	// ErrSessionDisabled is returned by the session calls when SessionConfig.Mode is
+	// SessionDisabled.
 	ErrSessionDisabled = errors.New("installation sessions are disabled")
+	// ErrSessionRequired is returned by a login that binds no installation when
+	// SessionConfig.Mode is SessionRequired.
 	ErrSessionRequired = errors.New("installation-bound session required")
-	ErrSessionRevoked  = errors.New("installation session revoked or expired")
+	// ErrSessionRevoked is returned when a token's session has been revoked, has
+	// expired, or was cleaned up.
+	ErrSessionRevoked = errors.New("installation session revoked or expired")
 )
 
 // Sentinel errors for external identities (ExternalIdentityService).
@@ -161,6 +168,10 @@ var (
 	// invitation for an email that already has an identity is NOT an error: the
 	// existing identity is reused and granted the invited membership.)
 	ErrUserExists = errors.New("authkit: user already exists")
+
+	// ErrTenantExists is returned by TenantService.Create when a tenant with the
+	// same tenant_id already exists.
+	ErrTenantExists = errors.New("authkit: tenant already exists")
 
 	// ErrPasswordTooWeak is returned (wrapped) when a password fails the strength
 	// policy — too short, too long (bcrypt caps input at 72 bytes), or missing a
