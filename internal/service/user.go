@@ -178,10 +178,13 @@ func (s *UserService) Unlock(ctx context.Context, userID string) error {
 // Password Management
 // ============================================================================
 
-// SetPassword sets the (already-hashed) password for a user and revokes the user's
-// refresh tokens (a password change should end existing sessions).
+// SetPassword sets the (already-hashed) password for a user, a reset or a first
+// password, and ends their existing sessions, as ChangePassword does: it bumps the
+// identity token_version in the same update, so access tokens issued before stop
+// validating and a login waiting for its second factor cannot finish, then revokes
+// the user's refresh tokens.
 func (s *UserService) SetPassword(ctx context.Context, userID, hashedPassword string) error {
-	if err := s.repo.SetPassword(ctx, userID, hashedPassword); err != nil {
+	if err := s.repo.SetPasswordAndBumpTokenVersion(ctx, userID, hashedPassword); err != nil {
 		return sanitizeError(ctx, s.logger, "set password", err)
 	}
 	return sanitizeError(ctx, s.logger, "set password", s.revokeRefreshTokens(ctx, userID, "set_password"))

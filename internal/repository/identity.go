@@ -525,28 +525,13 @@ func (r *Repository) Update(ctx context.Context, userID string, req model.Update
 }
 
 // ============================================================================
-// SetPassword - Sets the password hash for a user.
-// ============================================================================
-func (r *Repository) SetPassword(ctx context.Context, userID, hashedPassword string) error {
-	query := `
-		UPDATE {{schema}}.users
-		SET password_hash = $1, updated_at = $2
-		WHERE id = $3
-	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), hashedPassword, time.Now(), userID)
-	if err != nil {
-		return fmt.Errorf("failed to set password: %w", err)
-	}
-	return rowsAffectedOrNotFound(result)
-}
-
-// ============================================================================
 // SetPasswordAndBumpTokenVersion - Sets the password hash AND increments
-// token_version in a single UPDATE. Used by ChangePassword so the password change
-// and the access-token invalidation (token_version) are applied atomically: they can
-// never be left half-applied (password changed but old JWTs still valid, or vice
-// versa). Refresh-token revocation remains a separate step. token_version is the
-// IDENTITY version, so this invalidates every workspace's access tokens.
+// token_version in a single UPDATE. Used by ChangePassword and UserService.SetPassword
+// so the password change and the access-token invalidation (token_version) are
+// applied atomically: they can never be left half-applied (password changed but old
+// JWTs still valid, or vice versa). Refresh-token revocation remains a separate step.
+// token_version is the IDENTITY version, so this invalidates every workspace's access
+// tokens.
 // ============================================================================
 func (r *Repository) SetPasswordAndBumpTokenVersion(ctx context.Context, userID, hashedPassword string) error {
 	query := `

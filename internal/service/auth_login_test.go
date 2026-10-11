@@ -24,6 +24,9 @@ const testTenantID = "acme.test"
 type fakeAuthRepository struct {
 	user       *model.User
 	membership *model.Membership
+	// listed, when set, is what ListMembershipsByUser returns: a lagging replica's
+	// copy, where membership is the primary's.
+	listed []*model.Membership
 
 	getByEmailErr    error
 	getByIDErr       error
@@ -122,6 +125,9 @@ func (f *fakeAuthRepository) GetMembershipFromPrimary(ctx context.Context, userI
 }
 
 func (f *fakeAuthRepository) ListMembershipsByUser(ctx context.Context, userID string) ([]*model.Membership, error) {
+	if f.listed != nil {
+		return f.listed, nil
+	}
 	if f.membership == nil {
 		return nil, nil
 	}
@@ -573,5 +579,63 @@ func TestLoginRateLimiterFailsOpen(t *testing.T) {
 	}
 	if !errors.Is(err, model.ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials (proceeded past the limiter), got %v", err)
+	}
+}
+
+// A failure to read the user is a storage fault, not a bad token: it must not sign
+// the person out. Only a user that no longer exists makes the token invalid.
+func TestValidateJWTStorageFailureIsInternal(t *testing.T) {
+	user := makeUser(t, "Correct1!")
+	membership := makeMembership(user.ID)
+	repo := &fakeAuthRepository{user: user, membership: membership}
+	svc := newTestAuthService(repo)
+	token, err := svc.jwtService.GenerateAccessToken(user, membership)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+
+	repo.getByIDErr = errors.New("connection refused")
+	_, err = svc.ValidateJWT(context.Background(), token)
+	if !errors.Is(err, model.ErrInternal) || errors.Is(err, model.ErrInvalidToken) {
+		t.Fatalf("storage failure: got %v, want ErrInternal and not ErrInvalidToken", err)
+	}
+
+	repo.getByIDErr = errors.Join(errors.New("user not found"), model.ErrNotFound)
+	if _, err := svc.ValidateJWT(context.Background(), token); !errors.Is(err, model.ErrInvalidToken) {
+		t.Fatalf("deleted user: got %v, want ErrInvalidToken", err)
+	}
+}
+
+// The only active workspace a login picks itself is read from the primary: the
+// replica's list may carry an old membership token_version, or a membership just
+// suspended.
+func TestSelectWorkspaceReadsThePickFromPrimary(t *testing.T) {
+	ctx := context.Background()
+	user := makeUser(t, "Correct1!")
+	primary := makeMembership(user.ID)
+	primary.TokenVersion = 3
+	stale := *primary
+	stale.TokenVersion = 1
+	repo := &fakeAuthRepository{user: user, membership: primary, listed: []*model.Membership{&stale}}
+	svc := newTestAuthService(repo)
+
+	_, selected, err := svc.selectWorkspace(ctx, user.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected == nil || selected.TokenVersion != 3 {
+		t.Fatalf("selected %+v, want the primary's membership (token_version 3)", selected)
+	}
+
+	// Suspended on the primary, still active on the replica: nothing is picked.
+	primary.Status = model.MembershipSuspended
+	if _, selected, err := svc.selectWorkspace(ctx, user.ID, ""); err != nil || selected != nil {
+		t.Fatalf("suspended membership: selected %+v, err %v; want none", selected, err)
+	}
+
+	// A storage failure on the primary read fails the login.
+	repo.getMembershipErr = errors.New("connection refused")
+	if _, _, err := svc.selectWorkspace(ctx, user.ID, ""); !errors.Is(err, model.ErrInternal) {
+		t.Fatalf("primary read failure: got %v, want ErrInternal", err)
 	}
 }

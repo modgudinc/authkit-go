@@ -210,7 +210,9 @@ applies. To ask for the code before `OpenSession` too, for an emailed code say, 
 
 `Verify` checks a code, or spends a recovery code, for someone already signed in:
 before turning two-factor off, changing the email or password, or anything else you
-want to protect from a borrowed laptop. A wrong code counts toward the lockout. It
+want to protect from a borrowed laptop. A wrong code counts toward the lockout, and a
+locked or disabled account gets `ErrAccountLocked` or `ErrAccountDisabled` before any
+code is checked, so the lockout stops guessing here as it does at sign-in. It
 returns `ErrNotFound` when the person has two-factor off.
 
 ```go
@@ -287,7 +289,7 @@ A password step that is waiting for its code records nothing.
 | `ErrSecondFactorRequired` | A password login of a person with two-factor on; the error is a `*model.SecondFactorRequiredError` with the challenge | Your choice; the example answers 200 |
 | `ErrInvalidSecondFactor` | A wrong, reused or out-of-date code, or a recovery code already spent; the challenge stays usable | 401 |
 | `ErrInvalidCredentials` | `CompleteSecondFactor` with an unknown, expired or finished challenge | 401 |
-| `ErrAccountLocked`, `ErrAccountDisabled` | `CompleteSecondFactor` for an account locked or disabled since the password step | 403 |
+| `ErrAccountLocked`, `ErrAccountDisabled` | `CompleteSecondFactor` for an account locked or disabled since the password step; `Verify` for a locked or disabled account | 403 |
 | `ErrTwoFactorAlreadyEnabled` | `EnrollTOTP` or `ConfirmTOTP` when two-factor is already on | 409 |
 | `ErrTwoFactorNotConfigured` | Any `TwoFactorService` call without `Config.TwoFactorConfig` | 500 |
 | `ErrNotFound` | `ConfirmTOTP` with nothing enrolled; `Verify`, `Disable` or `RegenerateRecoveryCodes` with two-factor off; an unknown user | 404 |

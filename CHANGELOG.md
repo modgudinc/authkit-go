@@ -162,6 +162,15 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   `ValidateRefreshToken` alike, still matches `ErrInvalidRefreshToken` and now also
   `ErrAccountDisabled` or `ErrAccountLocked`
   ([docs/refresh-tokens.md](docs/refresh-tokens.md#disabled-and-locked-accounts)).
+- `UserService.SetPassword` (a reset, or a first password) did not bump the
+  identity `token_version`, so access tokens issued before it kept validating until
+  they expired, and a password login waiting for its second factor could still
+  finish with the old password. It now sets the password and bumps the version in
+  one update, as `ChangePassword` does, before revoking the refresh tokens.
+- `TwoFactorService.Verify` checked codes on a locked or disabled account, so the
+  lockout that wrong codes trip did not stop further guesses, and a right code was
+  accepted while the account was locked. It now returns `ErrAccountLocked` or
+  `ErrAccountDisabled` before checking any code.
 
 ### Changed
 
@@ -226,6 +235,16 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   an `http.Request`'s `RemoteAddr` (`host:port`) or an `X-Forwarded-For` list, failed
   with `ErrInternal` because PostgreSQL refused it. The host of a `host:port` is now
   stored, and an address that does not parse is left out.
+- `ValidateJWT` reported any failure to read the user, such as an unreachable
+  database or a cancelled query, as `ErrInvalidToken`, so an outage signed people
+  out. It now returns an error wrapping `ErrInternal` (map it to 500); only a user
+  that no longer exists is still `ErrInvalidToken`.
+- `LoginByEmail` and `VerifiedLoginService.OpenSession`, picking the only active
+  workspace themselves, used the membership as the read replica had it. With a
+  lagging replica, a role change could make the access token they returned fail
+  `ValidateJWT` at once, or a just-revoked membership could still be picked. The
+  picked membership is now read again from the primary; when it is no longer active,
+  nothing is picked and the caller chooses.
 
 ### Upgrade
 
