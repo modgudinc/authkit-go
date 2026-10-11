@@ -227,3 +227,46 @@ func TestGuardedRemovalConcurrentKeepsOneAdmin(t *testing.T) {
 		t.Fatalf("surviving active admins = %d, want exactly 1", got)
 	}
 }
+
+// TestGuardCountsOnlyEnabledHolders: a disabled (or deleted) admin does not keep a
+// tenant manageable, so the guard refuses to remove or demote the last admin whose
+// account is enabled. A locked admin still counts: a lock lifts by itself.
+func TestGuardCountsOnlyEnabledHolders(t *testing.T) {
+	ctx, ms, repo := setupGuardedMembership(t)
+	const tenant = "guard-enabled.test"
+	seedTenant(t, ctx, repo, tenant)
+	alice := grantRole(t, ctx, ms, repo, tenant, "alice@guard-enabled.test", roleAdmin)
+	bob := grantRole(t, ctx, ms, repo, tenant, "bob@guard-enabled.test", roleAdmin)
+
+	if err := repo.Disable(ctx, alice); err != nil {
+		t.Fatalf("disable alice: %v", err)
+	}
+	if err := ms.RemoveGuarded(ctx, bob, tenant, roleAdmin); !errors.Is(err, model.ErrLastRoleHolder) {
+		t.Fatalf("remove bob with alice disabled: expected ErrLastRoleHolder, got %v", err)
+	}
+	if err := ms.UpdateRolesGuarded(ctx, bob, tenant, []string{"Member"}, roleAdmin); !errors.Is(err, model.ErrLastRoleHolder) {
+		t.Fatalf("demote bob with alice disabled: expected ErrLastRoleHolder, got %v", err)
+	}
+
+	// Soft-deleted is disabled too.
+	if err := repo.Enable(ctx, alice); err != nil {
+		t.Fatalf("enable alice: %v", err)
+	}
+	if err := repo.Delete(ctx, alice); err != nil {
+		t.Fatalf("delete alice: %v", err)
+	}
+	if err := ms.RemoveGuarded(ctx, bob, tenant, roleAdmin); !errors.Is(err, model.ErrLastRoleHolder) {
+		t.Fatalf("remove bob with alice deleted: expected ErrLastRoleHolder, got %v", err)
+	}
+
+	// Locked counts: alice is enabled again and locked, so bob may go.
+	if err := repo.Enable(ctx, alice); err != nil {
+		t.Fatalf("enable alice: %v", err)
+	}
+	if err := repo.Lock(ctx, alice, nil); err != nil {
+		t.Fatalf("lock alice: %v", err)
+	}
+	if err := ms.RemoveGuarded(ctx, bob, tenant, roleAdmin); err != nil {
+		t.Fatalf("remove bob with alice locked: %v", err)
+	}
+}

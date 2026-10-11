@@ -117,6 +117,15 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `APIKeyService.Get` and `List` returned each key's HMAC in `APIKey.KeyHash`
   (hidden from JSON, visible to Go callers). The field is now empty; the hash stays
   in the database for `Validate`.
+- A wrong old password in `AuthService.ChangePassword` was not counted anywhere, so
+  someone holding a stolen access token could guess the current password without
+  limit and then take the account over. It now counts toward the failed-login
+  lockout, as a wrong login password or two-factor code does; at the threshold the
+  account locks, which also cuts the token off. A successful change resets the count.
+- `MembershipService.RemoveGuarded` and `UpdateRolesGuarded` counted a disabled or
+  deleted user as the holder that kept a tenant manageable, so a tenant could be left
+  with no admin who can sign in. Only members whose accounts are enabled count now; a
+  locked account still counts, since a lock lifts by itself.
 - The failed-login lockout rewrote `locked_until` on an account that was already
   locked, so an administrator's indefinite or longer lock was shortened to the
   lockout duration by failed attempts (reachable through `TwoFactorService.Verify`).
@@ -160,6 +169,10 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   password (it was a bare string); a malformed hash is still a distinct error.
 - `UserService.List` and `APIKeyService.List` order by id after `created_at`, so
   rows created in the same instant page without gaps or repeats.
+- `ValidateInstallationJWT`, `LoginWithInstallation` and
+  `LoginByEmailWithInstallation` read the session once instead of twice. The session
+  a login returns is the one it stored, timestamps truncated to microseconds as
+  PostgreSQL keeps them, so it compares equal to `SessionService.Get`'s.
 - The unlock the library performs itself (an expired lock on sign-in or token
   validation, a right password after failed attempts) is audited with
   `ChangedByType` `"system"`; it said `"admin"`.

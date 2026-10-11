@@ -287,16 +287,23 @@ func (s *AuthService) verifySecondFactor(ctx context.Context, userID, code strin
 // lockout, as a wrong password does. The count is reset only when a whole sign-in
 // succeeds, so knowing the password does not buy more guesses at the code.
 func (s *AuthService) secondFactorFailed(ctx context.Context, userID string) {
+	s.countFailedAttempt(ctx, userID, "second factor")
+}
+
+// countFailedAttempt adds a wrong secret (a second factor, or ChangePassword's old
+// password) to the account's failed-login count, locking it at the threshold as a
+// wrong login password does. Best-effort: a failed write is logged and counted.
+func (s *AuthService) countFailedAttempt(ctx context.Context, userID, what string) {
 	count, locked, err := s.repo.RegisterFailedLogin(ctx, userID, MaxFailedLoginAttempts, LockDuration)
 	switch {
 	case err != nil:
-		s.logger.Error(ctx, "Failed to record failed second factor", "error", err.Error())
+		s.logger.Error(ctx, "Failed to record failed "+what, "error", err.Error())
 		incMetric(s.metrics, metrics.CounterBestEffortWriteFailure, "op", "register_failed_login")
 	case locked:
 		s.logger.Warn(ctx, "Account locked after max failed attempts", "user_id", userID, "failed_attempts", count)
 		incMetric(s.metrics, metrics.CounterAccountLockout)
 	default:
-		s.logger.Info(ctx, "Failed second factor recorded", "user_id", userID, "failed_attempts", count)
+		s.logger.Info(ctx, "Failed "+what+" recorded", "user_id", userID, "failed_attempts", count)
 	}
 }
 

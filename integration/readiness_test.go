@@ -472,3 +472,95 @@ func TestLogoutAfterSessionCleanupSucceeds(t *testing.T) {
 		t.Fatalf("second logout: %v", err)
 	}
 }
+
+// A wrong old password in ChangePassword counts toward the failed-login lockout, the
+// right one resets the count, and at the threshold the lock also cuts off the access
+// token that was used.
+func TestChangePasswordGuessesLockTheAccount(t *testing.T) {
+	ctx := context.Background()
+	_, _, k, userID := readinessFixture(t, authkit.SessionDisabled, nil, nil)
+	auth := k.AuthService()
+	failedCount := func() int {
+		t.Helper()
+		user, err := k.UserService().GetByID(ctx, userID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return user.FailedLoginCount
+	}
+	change := func(old, new string) error {
+		return auth.ChangePassword(ctx, model.ChangePasswordRequest{UserID: userID, OldPassword: old, NewPassword: new})
+	}
+
+	for range 4 {
+		requireError(t, change("WrongPass1!", "NewValidPass1!"), authkit.ErrIncorrectPassword)
+	}
+	if n := failedCount(); n != 4 {
+		t.Fatalf("failed count after four wrong old passwords = %d", n)
+	}
+	if err := change("ValidPass1!", "NewValidPass1!"); err != nil {
+		t.Fatalf("change with the right old password: %v", err)
+	}
+	if n := failedCount(); n != 0 {
+		t.Fatalf("failed count after a successful change = %d", n)
+	}
+
+	resp, err := auth.Login(ctx, model.LoginRequest{Email: "admin@ready.test", Password: "NewValidPass1!", TenantID: "ready.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		requireError(t, change("WrongPass1!", "OtherValidPass1!"), authkit.ErrIncorrectPassword)
+	}
+	requireError(t, change("NewValidPass1!", "OtherValidPass1!"), authkit.ErrAccountLocked)
+	_, err = auth.ValidateJWT(ctx, resp.AccessToken)
+	requireError(t, err, authkit.ErrAccountLocked)
+}
+
+// An installation login returns the session it opened, as stored: the same row
+// SessionService reads back, and ValidateInstallationJWT finds it from the token.
+func TestInstallationLoginReturnsTheStoredSession(t *testing.T) {
+	ctx := context.Background()
+	_, _, k, userID := readinessFixture(t, authkit.SessionRequired, nil, nil)
+	for name, login := range map[string]func() (*model.InstallationLoginResponse, error){
+		"login": func() (*model.InstallationLoginResponse, error) {
+			return k.InstallationAuthService().LoginWithInstallation(ctx, model.InstallationLoginRequest{
+				LoginRequest: model.LoginRequest{Email: "admin@ready.test", Password: "ValidPass1!", TenantID: "ready.test"},
+				Installation: model.InstallationBinding{InstallationID: "laptop-1"},
+			})
+		},
+		"login by email": func() (*model.InstallationLoginResponse, error) {
+			return k.InstallationAuthService().LoginByEmailWithInstallation(ctx, model.InstallationLoginByEmailRequest{
+				LoginByEmailRequest: model.LoginByEmailRequest{Email: "admin@ready.test", Password: "ValidPass1!"},
+				Installation:        model.InstallationBinding{InstallationID: "laptop-2"},
+			})
+		},
+	} {
+		resp, err := login()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		stored, err := k.SessionService().Get(ctx, userID, resp.Session.ID)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		got, want := resp.Session, stored
+		if got.InstallationID != want.InstallationID || got.SignInMethod != want.SignInMethod ||
+			got.TokenVersion != want.TokenVersion || !got.CreatedAt.Equal(want.CreatedAt) ||
+			!got.ExpiresAt.Equal(want.ExpiresAt) || !got.AbsoluteExpiresAt.Equal(want.AbsoluteExpiresAt) {
+			t.Errorf("%s: returned session %+v, stored %+v", name, got, want)
+		}
+		claims, err := k.InstallationAuthService().ValidateInstallationJWT(ctx, resp.AccessToken)
+		if err != nil {
+			t.Fatalf("%s: validate: %v", name, err)
+		}
+		if claims.Session == nil || claims.Session.ID != stored.ID || !claims.Session.LastUsedAt.Equal(stored.LastUsedAt) {
+			t.Errorf("%s: validated session %+v, stored %+v", name, claims.Session, stored)
+		}
+		if err := k.SessionService().Revoke(ctx, userID, stored.ID); err != nil {
+			t.Fatal(err)
+		}
+		_, err = k.InstallationAuthService().ValidateInstallationJWT(ctx, resp.AccessToken)
+		requireError(t, err, authkit.ErrSessionRevoked)
+	}
+}

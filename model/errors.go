@@ -117,8 +117,9 @@ var (
 
 	// ErrLastRoleHolder is returned by MembershipService.RemoveGuarded /
 	// UpdateRolesGuarded when the requested change would leave the tenant with no
-	// active member holding the required role (e.g. removing or demoting a
-	// workspace's last Admin). The mutation is refused and rolled back — nothing is
+	// active member holding the required role whose account is enabled (e.g.
+	// removing or demoting a workspace's last Admin, or its last Admin who is not
+	// disabled). The mutation is refused and rolled back — nothing is
 	// changed — so callers should surface it as a 409 Conflict. The guard is enforced
 	// atomically and serialized per tenant, so concurrent removals cannot race the
 	// tenant below one active holder of the role. requireRole is opaque: authkit does
