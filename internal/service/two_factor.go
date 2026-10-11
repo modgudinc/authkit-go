@@ -497,10 +497,21 @@ func (s *TwoFactorService) ConfirmTOTP(ctx context.Context, userID, code string)
 // Verify checks a code from the user's authenticator app, or one of their recovery
 // codes (which it spends), for a signed-in person: before turning two-factor off or
 // another sensitive change. A wrong code counts toward the account's failed-login
-// lockout. Returns ErrInvalidSecondFactor for a wrong or reused code, and
-// ErrNotFound when the user has two-factor off.
+// lockout, and a locked or disabled account is refused before any code is checked,
+// so the lockout stops guessing here as it does at sign-in. Returns
+// ErrInvalidSecondFactor for a wrong or reused code, ErrAccountLocked or
+// ErrAccountDisabled, and ErrNotFound for an unknown user or one with two-factor off.
 func (s *TwoFactorService) Verify(ctx context.Context, userID, code string) error {
 	if err := s.configured(userID); err != nil {
+		return err
+	}
+	// Read from the PRIMARY: a lock from wrong codes must stop the next one.
+	user, err := s.auth.repo.GetByIDFromPrimary(ctx, userID)
+	if err != nil {
+		return sanitizeError(ctx, s.logger, "load user", err)
+	}
+	if err := accountGate(user); err != nil {
+		s.logger.Warn(ctx, "Second factor check refused: account not active", "user_id", userID, "error", err.Error())
 		return err
 	}
 	enabled, err := s.store.TwoFactorEnabled(ctx, userID)

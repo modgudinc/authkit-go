@@ -416,7 +416,8 @@ func (s *AuthService) finishLoginByEmail(ctx context.Context, user *model.User, 
 // selectWorkspace loads the identity's memberships and picks the workspace a login
 // mints its first access token for: tenantID when given (it must be an active
 // membership, else ErrNoActiveMembership), otherwise the only active membership, if
-// there is exactly one. selected is nil when the caller must choose.
+// there is exactly one. selected is nil when the caller must choose. selected is
+// always read from the primary.
 func (s *AuthService) selectWorkspace(ctx context.Context, userID, tenantID string) ([]*model.Membership, *model.Membership, error) {
 	memberships, err := s.repo.ListMembershipsByUser(ctx, userID)
 	if err != nil {
@@ -441,10 +442,21 @@ func (s *AuthService) selectWorkspace(ctx context.Context, userID, tenantID stri
 			active = append(active, m)
 		}
 	}
-	if len(active) == 1 {
-		return memberships, active[0], nil
+	if len(active) != 1 {
+		return memberships, nil, nil
 	}
-	return memberships, nil, nil
+	// The list came from the replica. Reload the one it picked from the PRIMARY before
+	// minting: a lagging copy carries an old membership token_version (the token would
+	// fail ValidateJWT at once) or still shows a membership just revoked or suspended,
+	// and then there is nothing to select.
+	selected, err := s.activeMembership(ctx, userID, active[0].TenantID)
+	if errors.Is(err, model.ErrNoActiveMembership) {
+		return memberships, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return memberships, selected, nil
 }
 
 // MintWorkspaceToken mints a fresh workspace-scoped access token for an existing
@@ -657,8 +669,13 @@ func (s *AuthService) validateJWT(ctx context.Context, token string) (*model.JWT
 	// --- Identity checks ---
 	user, err := s.repo.GetByIDFromPrimary(ctx, claims.UserID)
 	if err != nil {
-		s.logger.Warn(ctx, "User not found for JWT", "user_id", claims.UserID, "error", err.Error())
-		return nil, nil, fmt.Errorf("user not found: %w", model.ErrInvalidToken)
+		if errors.Is(err, model.ErrNotFound) {
+			s.logger.Warn(ctx, "User not found for JWT", "user_id", claims.UserID)
+			return nil, nil, fmt.Errorf("user not found: %w", model.ErrInvalidToken)
+		}
+		// A storage failure is not a bad token: callers must answer it as a 500, not
+		// sign the person out.
+		return nil, nil, sanitizeError(ctx, s.logger, "load user", err)
 	}
 	if !user.IsEnabled {
 		s.logger.Warn(ctx, "Account disabled", "user_id", claims.UserID)
