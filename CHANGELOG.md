@@ -150,6 +150,18 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   key's algorithm; a token without a `kid` is accepted only as HS256, and only while
   `AccessSecret` is set. An HS256 token that carries a `kid` is now refused. authkit
   has never put a `kid` on its HS256 tokens, so tokens it issued are unaffected.
+- A refresh for a disabled or locked account, without an installation session, rotated
+  the token, then deleted every refresh token the user had, bound sessions' included.
+  The failed-login lockout revokes nothing, so anyone who knew an email could lock the
+  account with wrong passwords, and the next refresh from any of the person's devices
+  signed them out everywhere; a stolen token replayed later read as unknown rather than
+  as reuse. The rotation now refuses such an account before consuming anything and
+  deletes nothing, so a lock pauses the account's refresh tokens, as it already did
+  for bound sessions. A consumed token is still reuse. `UserService.Disable` and
+  `Lock` still revoke the tokens. The error, from `RefreshToken` and
+  `ValidateRefreshToken` alike, still matches `ErrInvalidRefreshToken` and now also
+  `ErrAccountDisabled` or `ErrAccountLocked`
+  ([docs/refresh-tokens.md](docs/refresh-tokens.md#disabled-and-locked-accounts)).
 
 ### Changed
 

@@ -169,6 +169,12 @@ Branch on the exported sentinels with `errors.Is(err, authkit.Err…)` — never
 | `ErrInvalidInput`, `ErrValueTooLong`, `ErrPasswordTooWeak` | 400 |
 | `ErrSecretEncryptionKeyMissing`, `ErrOTPSecretMissing`, `ErrInternal`, anything else | 500 |
 
+A refresh for a disabled or locked account, without an installation session, returns an
+error that matches both `ErrInvalidRefreshToken` and `ErrAccountDisabled` or
+`ErrAccountLocked`. Check the
+account sentinels first to answer 403, so the client keeps its refresh token through a
+lock ([docs/refresh-tokens.md](refresh-tokens.md#disabled-and-locked-accounts)).
+
 `ErrSecretEncryptionKeyMissing`/`ErrOTPSecretMissing` are construction-time
 misconfigurations (a required secret wasn't provided), so they're operator errors → 500.
 See the README "Error Handling" section for the canonical sentinel list and an example

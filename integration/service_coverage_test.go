@@ -422,10 +422,10 @@ func TestUserServiceSecurityMutations(t *testing.T) {
 
 // TestRefreshTokenPairGatesAndErrors covers RefreshTokenPair beyond the happy path
 // and the already-tested reuse/theft branch: the routine invalid-token error path,
-// and the post-rotation account-not-active security gate for both a disabled and a
-// locked account. That gate is reached only when a refresh token is still valid but
-// the account was cut off after issuance; it revokes the user's whole refresh-token
-// family (including the replacement minted during this rotation).
+// and the account-not-active security gate for both a disabled and a locked account.
+// That gate is reached only when a refresh token is still valid but the account was
+// cut off after issuance; it refuses before the token is consumed and leaves the
+// user's refresh tokens as they were.
 func TestRefreshTokenPairGatesAndErrors(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -481,7 +481,7 @@ func TestRefreshTokenPairGatesAndErrors(t *testing.T) {
 	// 2. Account-not-active gate: DISABLED.
 	// Mint a valid refresh token, then disable at the repo layer (which, unlike
 	// UserService.Disable, does NOT revoke tokens), so the token survives to reach the
-	// post-rotation gate inside RefreshTokenPair.
+	// account gate inside the rotation.
 	pair, err := tokens.GenerateTokenPair(ctx, user, membership, &model.SessionInfo{IPAddress: "127.0.0.1"})
 	if err != nil {
 		t.Fatalf("generate token pair: %v", err)
@@ -489,16 +489,20 @@ func TestRefreshTokenPairGatesAndErrors(t *testing.T) {
 	if err := repo.Disable(ctx, userID); err != nil {
 		t.Fatalf("disable user: %v", err)
 	}
-	if _, err := tokens.RefreshTokenPair(ctx, pair.RefreshToken, tenantID, nil); !errors.Is(err, model.ErrInvalidRefreshToken) {
-		t.Fatalf("refresh on disabled account: expected ErrInvalidRefreshToken, got %v", err)
+	before, err := repo.GetByUserID(ctx, userID)
+	if err != nil {
+		t.Fatalf("list refresh tokens before disabled-account refresh: %v", err)
 	}
-	// The gate revokes the whole family: the consumed token AND its just-minted replacement.
+	if _, err := tokens.RefreshTokenPair(ctx, pair.RefreshToken, tenantID, nil); !errors.Is(err, model.ErrInvalidRefreshToken) || !errors.Is(err, model.ErrAccountDisabled) {
+		t.Fatalf("refresh on disabled account: expected ErrInvalidRefreshToken and ErrAccountDisabled, got %v", err)
+	}
+	// The gate refuses before consuming anything, and deletes nothing.
 	active, err := repo.GetByUserID(ctx, userID)
 	if err != nil {
 		t.Fatalf("list refresh tokens after disabled-account refresh: %v", err)
 	}
-	if len(active) != 0 {
-		t.Fatalf("expected refresh family revoked after disabled-account refresh, got %d active", len(active))
+	if len(active) != len(before) {
+		t.Fatalf("expected the refresh tokens untouched after disabled-account refresh, got %d active, want %d", len(active), len(before))
 	}
 
 	// 3. Account-not-active gate: LOCKED.
@@ -518,14 +522,18 @@ func TestRefreshTokenPairGatesAndErrors(t *testing.T) {
 	if err := repo.Lock(ctx, userID, &until); err != nil {
 		t.Fatalf("lock user: %v", err)
 	}
-	if _, err := tokens.RefreshTokenPair(ctx, pair2.RefreshToken, tenantID, nil); !errors.Is(err, model.ErrInvalidRefreshToken) {
-		t.Fatalf("refresh on locked account: expected ErrInvalidRefreshToken, got %v", err)
+	before, err = repo.GetByUserID(ctx, userID)
+	if err != nil {
+		t.Fatalf("list refresh tokens before locked-account refresh: %v", err)
+	}
+	if _, err := tokens.RefreshTokenPair(ctx, pair2.RefreshToken, tenantID, nil); !errors.Is(err, model.ErrInvalidRefreshToken) || !errors.Is(err, model.ErrAccountLocked) {
+		t.Fatalf("refresh on locked account: expected ErrInvalidRefreshToken and ErrAccountLocked, got %v", err)
 	}
 	active, err = repo.GetByUserID(ctx, userID)
 	if err != nil {
 		t.Fatalf("list refresh tokens after locked-account refresh: %v", err)
 	}
-	if len(active) != 0 {
-		t.Fatalf("expected refresh family revoked after locked-account refresh, got %d active", len(active))
+	if len(active) != len(before) {
+		t.Fatalf("expected the refresh tokens untouched after locked-account refresh, got %d active, want %d", len(active), len(before))
 	}
 }

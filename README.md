@@ -507,7 +507,7 @@ if err != nil {
 
 **Token Rotation Flow:**
 1. Client sends current refresh token
-2. Server atomically consumes the current refresh token
+2. Server atomically consumes the current refresh token (a disabled or locked account is refused first and nothing is consumed, so a lock pauses its sessions rather than ending them)
 3. New refresh token is stored in the same transaction
 4. New access token (JWT) is generated
 5. If the old refresh token is missing, expired, or already consumed, rotation fails; a consumed token is treated as theft unless `JWTConfig.RefreshGracePeriod` lets the client retry ([docs/refresh-tokens.md](docs/refresh-tokens.md))

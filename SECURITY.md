@@ -148,7 +148,9 @@ are out of scope for the library itself and must be provided by the caller:
 
 - **Rate limiting (login, token refresh, OTP generation).** The only *built-in*
   online-guessing defense is `AuthService.Login`'s per-account failed-login lockout
-  (`MaxFailedLoginAttempts`, then a timed lock); it bounds guessing against a *single*
+  (`MaxFailedLoginAttempts`, then a timed lock that pauses the account's refresh tokens
+  rather than revoking them, so someone who trips it on purpose cannot sign the person
+  out of their devices); it bounds guessing against a *single*
   account but does NOT stop password spraying (a few guesses each across many accounts)
   or distributed guessing. Wrong two-factor codes and wrong old passwords in
   `ChangePassword` count toward the same lockout, and a right password does not reset it

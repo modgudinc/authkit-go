@@ -113,6 +113,11 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, req CreateRefreshTo
 // RotateRefreshToken - Atomically consumes one refresh token and stores a new one.
 // It returns the user, the new token's id, and whether the rotation was a retry
 // within req.GracePeriod (see CreateRefreshTokenRequest.GracePeriod).
+//
+// A disabled or locked account is refused with model.ErrAccountDisabled or
+// model.ErrAccountLocked before anything is consumed, so its tokens are left as they
+// were: a lock pauses them rather than ending them. A token already consumed is
+// still reuse whatever the account's state.
 // ============================================================================
 func (r *Repository) RotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest) (*model.User, string, bool, error) {
 	return r.rotateRefreshToken(ctx, oldTokenHash, req, false)
@@ -227,6 +232,22 @@ func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string
 		return nil, "", false, fmt.Errorf("refresh token expired: %w", model.ErrInvalidRefreshToken)
 	}
 
+	// A disabled or locked account is refused before anything is consumed, so the
+	// deferred rollback leaves its tokens as they were. Consuming the token and then
+	// revoking the account's tokens to make up for it would sign a user out of every
+	// device whenever one of them refreshed during a lockout that anyone can trigger
+	// with wrong passwords, and would drop the rows that reuse detection reads.
+	user, err := scanUser(tx.QueryRowContext(ctx, r.q(`SELECT `+userColumns+` FROM {{schema}}.users WHERE id = $1`), userID))
+	if err != nil {
+		return nil, "", false, fmt.Errorf("failed to get user for refresh token: %w", err)
+	}
+	if !user.IsEnabled {
+		return nil, "", false, fmt.Errorf("refresh token's account is disabled: %w", model.ErrAccountDisabled)
+	}
+	if !sessionAccountActive(user) {
+		return nil, "", false, fmt.Errorf("refresh token's account is locked: %w", model.ErrAccountLocked)
+	}
+
 	if retryOf == "" {
 		// Consume (soft-revoke) the presented token. It is retained, not deleted, so a
 		// later replay is detectable until the row is cleaned up after expiry.
@@ -235,11 +256,6 @@ func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string
 		}
 	} else if err := r.revokeReplacement(ctx, tx, retryOf, now); err != nil {
 		return nil, "", false, err
-	}
-
-	user, err := scanUser(tx.QueryRowContext(ctx, r.q(`SELECT `+userColumns+` FROM {{schema}}.users WHERE id = $1`), userID))
-	if err != nil {
-		return nil, "", false, fmt.Errorf("failed to get user for refresh token: %w", err)
 	}
 
 	gen, err := uuid.NewV7()
