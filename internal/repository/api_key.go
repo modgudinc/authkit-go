@@ -55,7 +55,7 @@ func (r *Repository) CreateAPIKey(ctx context.Context, req InsertAPIKeyParams) e
 	`
 
 	now := time.Now()
-	_, err := r.rw.ExecContext(ctx, r.q(query),
+	_, err := r.writer(ctx).ExecContext(ctx, r.q(query),
 		req.KeyID,
 		req.KeyHash,
 		req.TenantID,
@@ -94,7 +94,7 @@ func (r *Repository) GetAPIKey(ctx context.Context, keyID, tenantID string) (*mo
 	var apiKey model.APIKey
 	var lastUsedAt, expiresAt *time.Time
 
-	err := r.ro.QueryRowContext(ctx, r.q(query), keyID, tenantID).Scan(
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), keyID, tenantID).Scan(
 		&apiKey.KeyID,
 		&apiKey.TenantID,
 		&apiKey.Name,
@@ -125,7 +125,7 @@ func (r *Repository) GetAPIKey(ctx context.Context, keyID, tenantID string) (*mo
 //
 // Reads from the PRIMARY (rw), not a read replica: this is the credential
 // validation path run immediately after a key is created, where replica lag
-// could spuriously reject a freshly minted key. Do not switch to r.ro without
+// could spuriously reject a freshly minted key. Do not switch to r.reader without
 // accepting that auth-failure risk.
 // ============================================================================
 func (r *Repository) GetAPIKeyByHash(ctx context.Context, keyHash string) (*model.APIKey, error) {
@@ -139,7 +139,7 @@ func (r *Repository) GetAPIKeyByHash(ctx context.Context, keyHash string) (*mode
 	var apiKey model.APIKey
 	var lastUsedAt, expiresAt *time.Time
 
-	err := r.rw.QueryRowContext(ctx, r.q(query), keyHash, time.Now()).Scan(
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(query), keyHash, time.Now()).Scan(
 		&apiKey.KeyID,
 		&apiKey.KeyHash,
 		&apiKey.TenantID,
@@ -190,9 +190,9 @@ func (r *Repository) ListAPIKeys(ctx context.Context, tenantID string, includeEx
 	var err error
 
 	if includeExpired {
-		rows, err = r.ro.QueryContext(ctx, r.q(query), tenantID)
+		rows, err = r.reader(ctx).QueryContext(ctx, r.q(query), tenantID)
 	} else {
-		rows, err = r.ro.QueryContext(ctx, r.q(query), tenantID, time.Now())
+		rows, err = r.reader(ctx).QueryContext(ctx, r.q(query), tenantID, time.Now())
 	}
 
 	if err != nil {
@@ -247,7 +247,7 @@ func (r *Repository) UpdateAPIKeyLastUsed(ctx context.Context, keyID, tenantID s
 		  AND tenant_id = $3
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), keyID, tenantID)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now(), keyID, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to update api key last used: %w", err)
 	}
@@ -267,7 +267,7 @@ func (r *Repository) DeleteAPIKey(ctx context.Context, keyID, tenantID string) e
 		  AND tenant_id = $2
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), keyID, tenantID)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), keyID, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to delete api key: %w", err)
 	}
@@ -287,7 +287,7 @@ func (r *Repository) CountAPIKeysByTenant(ctx context.Context, tenantID string) 
 	`
 
 	var count int
-	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID, time.Now()).Scan(&count)
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), tenantID, time.Now()).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count api keys: %w", err)
 	}
@@ -307,7 +307,7 @@ func (r *Repository) DeleteExpiredAPIKeys(ctx context.Context) (int64, error) {
 		  AND expires_at <= $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now())
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete expired api keys: %w", err)
 	}

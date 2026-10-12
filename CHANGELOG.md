@@ -101,6 +101,13 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   connects as those roles can use installation sessions. It does nothing without the
   roles. An integration test now checks every table against both roles after every
   migration.
+- `authkit.WithTx` and `AuthKit.InTx` run authkit's calls in the caller's
+  transaction, so what they change commits or rolls back with the caller's own writes,
+  such as an outbox row recording the change. Where authkit would begin a transaction
+  of its own it sets a savepoint instead, and reads go to the transaction too. Signing
+  in and checking credentials ignore it and commit on their own, so failed attempts,
+  lockouts and revoked token families stay recorded. Guide:
+  [docs/transactions.md](docs/transactions.md).
 
 ### Security
 

@@ -36,7 +36,7 @@ const foreignKeyViolation = "23503"
 // The per-membership token_version invalidates only this workspace's access tokens
 // (role change / revoke), independently of the identity-level users.token_version.
 
-// execer is the write surface shared by the rw *sql.DB handle and a *sql.Tx, so the
+// execer is the write surface shared by the rw *sql.DB handle and a transaction, so the
 // membership upsert can run standalone (AddMembership) or inside a larger
 // transaction (AcceptInvitation reuses it after resolving/creating the user).
 type execer interface {
@@ -106,7 +106,7 @@ func (r *Repository) upsertMembership(ctx context.Context, ex execer, userID, te
 // raw FK-violation string.
 // ============================================================================
 func (r *Repository) AddMembership(ctx context.Context, req model.AddMembershipRequest) error {
-	if err := r.upsertMembership(ctx, r.rw, req.UserID, req.TenantID, req.Roles); err != nil {
+	if err := r.upsertMembership(ctx, r.writer(ctx), req.UserID, req.TenantID, req.Roles); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
 			return fmt.Errorf("user or tenant not found: %w", model.ErrNotFound)
@@ -133,7 +133,7 @@ func (r *Repository) RemoveMembership(ctx context.Context, userID, tenantID stri
 		    token_version = token_version + CASE WHEN status = 'active' THEN 1 ELSE 0 END
 		WHERE user_id = $1 AND tenant_id = $2
 	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), userID, tenantID)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), userID, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to remove membership: %w", err)
 	}
@@ -165,7 +165,7 @@ func (r *Repository) UpdateMembershipRoles(ctx context.Context, userID, tenantID
 		    token_version = token_version + 1
 		WHERE user_id = $1 AND tenant_id = $2
 	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), userID, tenantID, string(rolesJSON))
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), userID, tenantID, string(rolesJSON))
 	if err != nil {
 		return fmt.Errorf("failed to update membership roles: %w", err)
 	}
@@ -186,7 +186,7 @@ func (r *Repository) UpdateMembershipRoles(ctx context.Context, userID, tenantID
 // empty requireRole disables the guard (behaves like RemoveMembership).
 // ============================================================================
 func (r *Repository) RemoveMembershipGuarded(ctx context.Context, userID, tenantID, requireRole string) error {
-	return r.withGuardedTx(ctx, tenantID, requireRole, func(tx *sql.Tx) error {
+	return r.withGuardedTx(ctx, tenantID, requireRole, func(tx dbtx) error {
 		query := `
 			UPDATE {{schema}}.memberships
 			SET status = 'suspended',
@@ -221,7 +221,7 @@ func (r *Repository) UpdateMembershipRolesGuarded(ctx context.Context, userID, t
 	if err != nil {
 		return fmt.Errorf("failed to marshal roles: %w", err)
 	}
-	return r.withGuardedTx(ctx, tenantID, requireRole, func(tx *sql.Tx) error {
+	return r.withGuardedTx(ctx, tenantID, requireRole, func(tx dbtx) error {
 		query := `
 			UPDATE {{schema}}.memberships
 			SET roles = $3::jsonb,
@@ -244,8 +244,8 @@ func (r *Repository) UpdateMembershipRolesGuarded(ctx context.Context, userID, t
 // lock, the last active holder of the role can never be removed or demoted out from
 // under a concurrent check. An empty requireRole skips the invariant (no guard). A
 // mutate error (e.g. model.ErrNotFound) is returned as-is and rolls the tx back.
-func (r *Repository) withGuardedTx(ctx context.Context, tenantID, requireRole string, mutate func(tx *sql.Tx) error) error {
-	tx, err := r.rw.BeginTx(ctx, nil)
+func (r *Repository) withGuardedTx(ctx context.Context, tenantID, requireRole string, mutate func(tx dbtx) error) error {
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin guarded membership tx: %w", err)
 	}
@@ -334,7 +334,7 @@ func (r *Repository) getMembership(ctx context.Context, db rowQuerier, userID, t
 // replica (ro) — use GetMembershipFromPrimary for the JWT-validation gate.
 // ============================================================================
 func (r *Repository) GetMembership(ctx context.Context, userID, tenantID string) (*model.Membership, error) {
-	return r.getMembership(ctx, r.ro, userID, tenantID)
+	return r.getMembership(ctx, r.reader(ctx), userID, tenantID)
 }
 
 // ============================================================================
@@ -348,7 +348,7 @@ func (r *Repository) GetMembership(ctx context.Context, userID, tenantID string)
 // identity-level checks.
 // ============================================================================
 func (r *Repository) GetMembershipFromPrimary(ctx context.Context, userID, tenantID string) (*model.Membership, error) {
-	return r.getMembership(ctx, r.rw, userID, tenantID)
+	return r.getMembership(ctx, r.writer(ctx), userID, tenantID)
 }
 
 // ============================================================================
@@ -362,7 +362,7 @@ func (r *Repository) ListMembershipsByUser(ctx context.Context, userID string) (
 		WHERE user_id = $1
 		ORDER BY created_at DESC`
 
-	rows, err := r.ro.QueryContext(ctx, r.q(query), userID)
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query), userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list memberships by user: %w", err)
 	}
@@ -395,7 +395,7 @@ func (r *Repository) ListMembershipsByTenant(ctx context.Context, tenantID strin
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC`
 
-	rows, err := r.ro.QueryContext(ctx, r.q(query), tenantID)
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query), tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list memberships by tenant: %w", err)
 	}
@@ -426,7 +426,7 @@ func (r *Repository) CountMembershipsByTenant(ctx context.Context, tenantID stri
 	query := `SELECT COUNT(*) FROM {{schema}}.memberships WHERE tenant_id = $1`
 
 	var count int
-	if err := r.ro.QueryRowContext(ctx, r.q(query), tenantID).Scan(&count); err != nil {
+	if err := r.reader(ctx).QueryRowContext(ctx, r.q(query), tenantID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("failed to count memberships: %w", err)
 	}
 	return count, nil

@@ -225,6 +225,7 @@ func (s *PasskeyService) Register(ctx context.Context, req model.RegisterPasskey
 // sign-in. Returns ErrNotFound when the user has no such passkey, for example
 // because it was removed during the ceremony.
 func (s *PasskeyService) RecordUse(ctx context.Context, req model.PasskeyUseRequest) error {
+	ctx = signingIn(ctx)
 	rpID, err := passkeyKey(req.UserID, req.RPID)
 	if err != nil {
 		return err

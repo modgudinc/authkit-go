@@ -246,6 +246,7 @@ func (s *AuthService) sessionOpened(ctx context.Context, user *model.User) {
 // who has it on gets a *model.SecondFactorRequiredError (ErrSecondFactorRequired)
 // after the password; TwoFactorService.CompleteSecondFactor finishes the login.
 func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error) {
+	ctx = signingIn(ctx)
 	resp, _, err := s.login(ctx, req, nil)
 	return resp, err
 }
@@ -329,6 +330,7 @@ func (s *AuthService) finishLogin(ctx context.Context, user *model.User, tenantI
 // A storage failure is an error wrapping model.ErrInternal, as for Login. A user with
 // two-factor on gets ErrSecondFactorRequired after the password, as for Login.
 func (s *AuthService) LoginByEmail(ctx context.Context, req model.LoginByEmailRequest) (*model.LoginResponse, error) {
+	ctx = signingIn(ctx)
 	resp, _, err := s.loginByEmail(ctx, req, nil)
 	return resp, err
 }
@@ -466,6 +468,7 @@ func (s *AuthService) selectWorkspace(ctx context.Context, userID, tenantID stri
 // membership in tenantID, and an invalid-refresh-token error when the session is bad
 // or the account is inactive.
 func (s *AuthService) MintWorkspaceToken(ctx context.Context, refreshToken, tenantID string) (*model.WorkspaceTokenResponse, error) {
+	ctx = signingIn(ctx)
 	// Validate the identity session (this also gates disabled/locked accounts).
 	user, err := s.tokenService.ValidateRefreshToken(ctx, refreshToken)
 	if err != nil {
@@ -592,6 +595,7 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
 // should throttle it. Returns model.ErrNoActiveMembership when the identity no longer
 // has an active membership in req.TenantID.
 func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest) (*model.RefreshResponse, error) {
+	ctx = signingIn(ctx)
 	s.logger.Debug(ctx, "Refreshing tokens", "tenant_id", req.TenantID)
 
 	// Keyed by client IP when available, else by the token itself (a truncated
@@ -653,6 +657,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, req model.RefreshRequest
 //  3. Load the active membership for the token's tenant; reject when it is
 //     missing/suspended or its token_version no longer matches (ErrTokenRevoked).
 func (s *AuthService) ValidateJWT(ctx context.Context, token string) (*model.JWTClaims, error) {
+	ctx = signingIn(ctx)
 	claims, _, err := s.validateJWT(ctx, token)
 	return claims, err
 }
@@ -744,6 +749,7 @@ func (s *AuthService) validateJWT(ctx context.Context, token string) (*model.JWT
 //     every workspace's access tokens).
 //  6. Revoke all refresh tokens (logout everywhere), then reset the failed count.
 func (s *AuthService) ChangePassword(ctx context.Context, req model.ChangePasswordRequest) error {
+	ctx = signingIn(ctx)
 	s.logger.Info(ctx, "Changing password", "user_id", req.UserID)
 
 	user, err := s.repo.GetByIDFromPrimary(ctx, req.UserID)

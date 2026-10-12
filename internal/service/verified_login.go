@@ -53,6 +53,7 @@ func normalizeName(name string) (string, error) {
 // ErrSessionDisabled. It does not consult Config.RateLimiter: throttle the
 // application's own verification step instead.
 func (s *AuthService) OpenSession(ctx context.Context, req model.OpenSessionRequest) (*model.OpenSessionResponse, error) {
+	ctx = signingIn(ctx)
 	method, err := normalizeName(req.SignInMethod)
 	if err != nil {
 		return nil, err

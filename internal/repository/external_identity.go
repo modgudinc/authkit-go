@@ -116,7 +116,7 @@ func (r *Repository) ResolveExternalIdentity(ctx context.Context, p ResolveExter
 }
 
 func (r *Repository) resolveExternalIdentityOnce(ctx context.Context, p ResolveExternalIdentityParams) (*ResolveExternalIdentityResult, error) {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +200,7 @@ func (r *Repository) resolveExternalIdentityOnce(ctx context.Context, p ResolveE
 // insertPasswordlessUser creates a user with no password (an empty password_hash)
 // and a verified email inside tx, and returns the stored row. Only call it for an
 // address a provider verified.
-func (r *Repository) insertPasswordlessUser(ctx context.Context, tx *sql.Tx, email, displayName string, now time.Time) (*model.User, error) {
+func (r *Repository) insertPasswordlessUser(ctx context.Context, tx dbtx, email, displayName string, now time.Time) (*model.User, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("could not generate an id for user: %w", err)
@@ -216,7 +216,7 @@ func (r *Repository) insertPasswordlessUser(ctx context.Context, tx *sql.Tx, ema
 	return scanUser(tx.QueryRowContext(ctx, r.q("SELECT "+userColumns+" FROM {{schema}}.users WHERE id=$1"), id.String()))
 }
 
-func (r *Repository) insertExternalIdentity(ctx context.Context, tx *sql.Tx, e *model.ExternalIdentity) error {
+func (r *Repository) insertExternalIdentity(ctx context.Context, tx dbtx, e *model.ExternalIdentity) error {
 	_, err := tx.ExecContext(ctx, r.q(`
 		INSERT INTO {{schema}}.external_identities
 		(provider, subject, user_id, email, email_verified, created_at, last_sign_in_at)
@@ -239,7 +239,7 @@ func (r *Repository) LinkExternalIdentity(ctx context.Context, userID, provider,
 }
 
 func (r *Repository) linkExternalIdentityOnce(ctx context.Context, userID, provider, subject, email string, emailVerified bool) (*model.ExternalIdentity, error) {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +287,7 @@ func (r *Repository) linkExternalIdentityOnce(ctx context.Context, userID, provi
 // UnlinkExternalIdentity removes one of userID's links. A link that does not exist,
 // or belongs to another user, is model.ErrNotFound.
 func (r *Repository) UnlinkExternalIdentity(ctx context.Context, userID, provider, subject string) error {
-	result, err := r.rw.ExecContext(ctx, r.q(
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(
 		"DELETE FROM {{schema}}.external_identities WHERE user_id=$1 AND provider=$2 AND subject=$3"),
 		userID, provider, subject)
 	if err != nil {
@@ -298,7 +298,7 @@ func (r *Repository) UnlinkExternalIdentity(ctx context.Context, userID, provide
 
 // GetExternalIdentity returns the link for (provider, subject) from the replica.
 func (r *Repository) GetExternalIdentity(ctx context.Context, provider, subject string) (*model.ExternalIdentity, error) {
-	e, err := scanExternalIdentity(r.ro.QueryRowContext(ctx, r.q("SELECT "+externalIdentityColumns+
+	e, err := scanExternalIdentity(r.reader(ctx).QueryRowContext(ctx, r.q("SELECT "+externalIdentityColumns+
 		" FROM {{schema}}.external_identities WHERE provider=$1 AND subject=$2"), provider, subject))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("external identity not found: %w", model.ErrNotFound)
@@ -309,7 +309,7 @@ func (r *Repository) GetExternalIdentity(ctx context.Context, provider, subject 
 // ListExternalIdentities returns userID's links from the replica, by provider and
 // then link time.
 func (r *Repository) ListExternalIdentities(ctx context.Context, userID string) ([]*model.ExternalIdentity, error) {
-	rows, err := r.ro.QueryContext(ctx, r.q("SELECT "+externalIdentityColumns+
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q("SELECT "+externalIdentityColumns+
 		" FROM {{schema}}.external_identities WHERE user_id=$1 ORDER BY provider, created_at, subject"), userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list external identities: %w", err)

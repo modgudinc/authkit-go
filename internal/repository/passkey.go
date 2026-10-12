@@ -73,7 +73,7 @@ func (r *Repository) PasskeyUserHandle(ctx context.Context, rpID, userID string)
 	if _, err := rand.Read(fresh); err != nil {
 		return nil, fmt.Errorf("could not generate a passkey user handle: %w", err)
 	}
-	if _, err := r.rw.ExecContext(ctx, r.q(`
+	if _, err := r.writer(ctx).ExecContext(ctx, r.q(`
 		INSERT INTO {{schema}}.passkey_users (rp_id, user_id, user_handle) VALUES ($1, $2, $3)
 		ON CONFLICT (rp_id, user_id) DO NOTHING`), rpID, userID, fresh); err != nil {
 		if isForeignKeyViolation(err) {
@@ -87,7 +87,7 @@ func (r *Repository) PasskeyUserHandle(ctx context.Context, rpID, userID string)
 
 func (r *Repository) passkeyUserHandle(ctx context.Context, rpID, userID string) ([]byte, error) {
 	var handle []byte
-	err := r.rw.QueryRowContext(ctx, r.q(
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(
 		"SELECT user_handle FROM {{schema}}.passkey_users WHERE rp_id=$1 AND user_id=$2"), rpID, userID).Scan(&handle)
 	return handle, err
 }
@@ -96,7 +96,7 @@ func (r *Repository) passkeyUserHandle(ctx context.Context, rpID, userID string)
 // model.ErrNotFound.
 func (r *Repository) PasskeyUserIDByHandle(ctx context.Context, rpID string, handle []byte) (string, error) {
 	var userID string
-	err := r.rw.QueryRowContext(ctx, r.q(
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(
 		"SELECT user_id FROM {{schema}}.passkey_users WHERE rp_id=$1 AND user_handle=$2"), rpID, handle).Scan(&userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("no user for this passkey user handle: %w", model.ErrNotFound)
@@ -107,15 +107,15 @@ func (r *Repository) PasskeyUserIDByHandle(ctx context.Context, rpID string, han
 // ListPasskeysFromPrimary returns userID's passkeys at rpID from the primary, oldest
 // first, for a WebAuthn ceremony.
 func (r *Repository) ListPasskeysFromPrimary(ctx context.Context, rpID, userID string) ([]*model.Passkey, error) {
-	return r.listPasskeys(ctx, r.rw, rpID, userID)
+	return r.listPasskeys(ctx, r.writer(ctx), rpID, userID)
 }
 
 // ListPasskeys returns userID's passkeys at rpID from the replica, oldest first.
 func (r *Repository) ListPasskeys(ctx context.Context, rpID, userID string) ([]*model.Passkey, error) {
-	return r.listPasskeys(ctx, r.ro, rpID, userID)
+	return r.listPasskeys(ctx, r.reader(ctx), rpID, userID)
 }
 
-func (r *Repository) listPasskeys(ctx context.Context, db *sql.DB, rpID, userID string) ([]*model.Passkey, error) {
+func (r *Repository) listPasskeys(ctx context.Context, db dbtx, rpID, userID string) ([]*model.Passkey, error) {
 	rows, err := db.QueryContext(ctx, r.q("SELECT "+passkeyColumns+
 		" FROM {{schema}}.passkeys WHERE rp_id=$1 AND user_id=$2 ORDER BY created_at, credential_id"), rpID, userID)
 	if err != nil {
@@ -149,7 +149,7 @@ func (r *Repository) InsertPasskey(ctx context.Context, p *model.Passkey) error 
 	if err != nil {
 		return fmt.Errorf("failed to encode passkey transports: %w", err)
 	}
-	err = r.rw.QueryRowContext(ctx, r.q(`
+	err = r.writer(ctx).QueryRowContext(ctx, r.q(`
 		INSERT INTO {{schema}}.passkeys (
 			rp_id, credential_id, user_id, name, public_key, sign_count, transports, user_verified,
 			backup_eligible, backup_state, aaguid, attestation_type, attestation_format,
@@ -187,7 +187,7 @@ func nonNilBytes(b []byte) []byte {
 // and the write hold the row's lock, so two sign-ins cannot both pass with one count.
 // It returns model.ErrNotFound when userID has no such passkey.
 func (r *Repository) RecordPasskeyUse(ctx context.Context, req model.PasskeyUseRequest) error {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -220,7 +220,7 @@ func (r *Repository) RecordPasskeyUse(ctx context.Context, req model.PasskeyUseR
 // RenamePasskey sets the label of one of userID's passkeys; a passkey that does not
 // exist, or belongs to another user, is model.ErrNotFound.
 func (r *Repository) RenamePasskey(ctx context.Context, rpID, userID string, credentialID []byte, name string) error {
-	result, err := r.rw.ExecContext(ctx, r.q(
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(
 		"UPDATE {{schema}}.passkeys SET name=$4 WHERE rp_id=$1 AND credential_id=$2 AND user_id=$3"),
 		rpID, credentialID, userID, name)
 	if err != nil {
@@ -233,7 +233,7 @@ func (r *Repository) RenamePasskey(ctx context.Context, rpID, userID string, cre
 // belongs to another user, is model.ErrNotFound. The user's handle stays, so a
 // passkey registered later carries the same one.
 func (r *Repository) DeletePasskey(ctx context.Context, rpID, userID string, credentialID []byte) error {
-	result, err := r.rw.ExecContext(ctx, r.q(
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(
 		"DELETE FROM {{schema}}.passkeys WHERE rp_id=$1 AND credential_id=$2 AND user_id=$3"),
 		rpID, credentialID, userID)
 	if err != nil {

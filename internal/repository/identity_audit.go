@@ -54,7 +54,7 @@ type userStatusSnapshot struct {
 
 // readUserStatusForUpdate locks the user row and returns its current status
 // snapshot, or model.ErrNotFound if no matching id row exists.
-func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx *sql.Tx, userID string) (userStatusSnapshot, error) {
+func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx dbtx, userID string) (userStatusSnapshot, error) {
 	var s userStatusSnapshot
 	const query = `
 		SELECT is_enabled, is_locked, locked_until, failed_login_count, last_failed_login, disabled_at
@@ -75,7 +75,7 @@ func (r *Repository) readUserStatusForUpdate(ctx context.Context, tx *sql.Tx, us
 // is_locked transition between old and current, attributing it to actor. actor is
 // the operation's provenance (admin for explicit admin mutations, system for the
 // automatic failed-login lockout), not something inferred from the row state.
-func (r *Repository) recordStatusChange(ctx context.Context, tx *sql.Tx, userID string, old, current userStatusSnapshot, actor statusChangeActor) error {
+func (r *Repository) recordStatusChange(ctx context.Context, tx dbtx, userID string, old, current userStatusSnapshot, actor statusChangeActor) error {
 	if old.IsEnabled != current.IsEnabled {
 		statusType := "disable"
 		if current.IsEnabled {
@@ -107,7 +107,7 @@ func (r *Repository) recordStatusChange(ctx context.Context, tx *sql.Tx, userID 
 	return nil
 }
 
-func (r *Repository) insertUserStatusChange(ctx context.Context, tx *sql.Tx, userID string, statusType, changedByType string, metadata map[string]any) error {
+func (r *Repository) insertUserStatusChange(ctx context.Context, tx dbtx, userID string, statusType, changedByType string, metadata map[string]any) error {
 	gen, err := uuid.NewV7()
 	if err != nil {
 		return fmt.Errorf("could not generate id for status change: %w", err)
@@ -136,7 +136,7 @@ func (r *Repository) ListUserStatusChanges(ctx context.Context, userID string) (
 		WHERE sc.user_id = $1
 		ORDER BY sc.changed_at DESC
 	`
-	rows, err := r.ro.QueryContext(ctx, r.q(query), userID)
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query), userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list user status changes: %w", err)
 	}
@@ -178,7 +178,7 @@ func (r *Repository) ListUserStatusChanges(ctx context.Context, userID string) (
 // and grows for the life of the deployment, so callers should run this periodically
 // (like the other CleanupExpired jobs) per their retention policy.
 func (r *Repository) CleanupStatusChanges(ctx context.Context, cutoff time.Time) (int64, error) {
-	result, err := r.rw.ExecContext(ctx, r.q(`DELETE FROM {{schema}}.user_status_changes WHERE changed_at < $1`), cutoff)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(`DELETE FROM {{schema}}.user_status_changes WHERE changed_at < $1`), cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete old status changes: %w", err)
 	}
@@ -194,8 +194,8 @@ func (r *Repository) CleanupStatusChanges(ctx context.Context, cutoff time.Time)
 // apply (which performs the UPDATE and returns the resulting snapshot), records any
 // transition attributed to actor, and commits. Explicit admin mutations pass
 // actorAdmin; AutoUnlock passes actorSystem.
-func (r *Repository) withUserStatusAudit(ctx context.Context, userID string, actor statusChangeActor, apply func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error)) error {
-	tx, err := r.rw.BeginTx(ctx, nil)
+func (r *Repository) withUserStatusAudit(ctx context.Context, userID string, actor statusChangeActor, apply func(ctx context.Context, tx dbtx, old userStatusSnapshot) (userStatusSnapshot, error)) error {
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin user status update: %w", err)
 	}

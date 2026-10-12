@@ -90,6 +90,7 @@ func (s *OTPService) hashOTP(code string) string {
 //   - Expiration timestamp
 //   - Error if rate limit violated or database error
 func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest) (*model.GenerateResponse, error) {
+	ctx = signingIn(ctx)
 	purpose, expirationDuration := req.Purpose, req.ExpirationDuration
 	email := normalizeEmail(req.Email)
 
@@ -229,6 +230,7 @@ func (s *OTPService) Generate(ctx context.Context, req model.OTPGenerateRequest)
 //   - nil if OTP is valid (and deletes it)
 //   - error if OTP is invalid, expired, not found, or locked out after too many attempts
 func (s *OTPService) Validate(ctx context.Context, req model.OTPValidateRequest) error {
+	ctx = signingIn(ctx)
 	code, purpose := req.Code, req.Purpose
 	email := normalizeEmail(req.Email)
 

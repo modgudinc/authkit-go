@@ -71,7 +71,7 @@ func (r *Repository) CreateInvitation(ctx context.Context, params InsertInvitati
 		return fmt.Errorf("failed to marshal roles: %w", err)
 	}
 
-	_, err = r.rw.ExecContext(ctx, r.q(query),
+	_, err = r.writer(ctx).ExecContext(ctx, r.q(query),
 		params.Code,
 		params.TenantID,
 		params.CreatedBy,
@@ -106,13 +106,13 @@ func (r *Repository) CreateInvitation(ctx context.Context, params InsertInvitati
 // GetInvitation - Retrieves an invitation by code
 // ============================================================================
 func (r *Repository) GetInvitation(ctx context.Context, code string) (*model.Invitation, error) {
-	return r.getInvitation(ctx, r.ro, code)
+	return r.getInvitation(ctx, r.reader(ctx), code)
 }
 
 // GetInvitationFromPrimary reads an invitation from the primary, for the read that
 // follows a write: a replica may not have the row yet.
 func (r *Repository) GetInvitationFromPrimary(ctx context.Context, code string) (*model.Invitation, error) {
-	return r.getInvitation(ctx, r.rw, code)
+	return r.getInvitation(ctx, r.writer(ctx), code)
 }
 
 func (r *Repository) getInvitation(ctx context.Context, q rowQuerier, code string) (*model.Invitation, error) {
@@ -181,7 +181,7 @@ func (r *Repository) IncrementUseCount(ctx context.Context, code string) error {
 		  AND current_uses < max_uses  -- Ensure we don't exceed max uses
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), code)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), code)
 	if err != nil {
 		return fmt.Errorf("failed to increment invitation use count: %w", err)
 	}
@@ -212,7 +212,7 @@ func (r *Repository) IncrementUseCount(ctx context.Context, code string) error {
 // a new identity; for a reused identity they are ignored.
 // ============================================================================
 func (r *Repository) AcceptInvitation(ctx context.Context, code, email, displayName, passwordHash string) (userID string, created bool, err error) {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to begin invitation acceptance: %w", err)
 	}
@@ -339,7 +339,7 @@ func (r *Repository) InvalidateInvitation(ctx context.Context, code string) erro
 		WHERE code = $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), code)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), code)
 	if err != nil {
 		return fmt.Errorf("failed to invalidate invitation: %w", err)
 	}
@@ -360,7 +360,7 @@ func (r *Repository) ListInvitations(ctx context.Context, tenantID string) ([]*m
 		ORDER BY created_at DESC
 	`
 
-	rows, err := r.ro.QueryContext(ctx, r.q(query), tenantID)
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query), tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list invitations: %w", err)
 	}
@@ -417,7 +417,7 @@ func (r *Repository) ListActiveInvitations(ctx context.Context, tenantID string)
 		ORDER BY created_at DESC
 	`
 
-	rows, err := r.ro.QueryContext(ctx, r.q(query), tenantID)
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query), tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list active invitations: %w", err)
 	}
@@ -466,7 +466,7 @@ func (r *Repository) ListActiveInvitations(ctx context.Context, tenantID string)
 func (r *Repository) DeleteInvitation(ctx context.Context, code string) error {
 	query := `DELETE FROM {{schema}}.invitations WHERE code = $1`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), code)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), code)
 	if err != nil {
 		return fmt.Errorf("failed to delete invitation: %w", err)
 	}
@@ -482,7 +482,7 @@ func (r *Repository) DeleteInvitation(ctx context.Context, code string) error {
 func (r *Repository) CleanupExpiredInvitations(ctx context.Context) (int64, error) {
 	query := `DELETE FROM {{schema}}.invitations WHERE expires_at < NOW()`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query))
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query))
 	if err != nil {
 		return 0, fmt.Errorf("failed to cleanup expired invitations: %w", err)
 	}
@@ -512,7 +512,7 @@ func (r *Repository) HasPending(ctx context.Context, email, tenantID string) (bo
 	`
 
 	var exists bool
-	err := r.ro.QueryRowContext(ctx, r.q(query), email, tenantID).Scan(&exists)
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), email, tenantID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("failed to check for pending invitation: %w", err)
 	}

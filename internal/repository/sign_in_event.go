@@ -23,7 +23,7 @@ func (r *Repository) InsertSignInEvent(ctx context.Context, e *model.SignInEvent
 			tenant_id, session_id, installation_id, ip_address, user_agent, device_name
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
-	if _, err := r.rw.ExecContext(ctx, r.q(insert),
+	if _, err := r.writer(ctx).ExecContext(ctx, r.q(insert),
 		e.ID, e.UserID, e.OccurredAt, e.Method, e.Succeeded, e.FailureReason, e.Namespace,
 		e.TenantID, e.SessionID, e.InstallationID,
 		nullIfEmpty(e.IPAddress), nullIfEmpty(e.UserAgent), nullIfEmpty(e.DeviceName),
@@ -43,7 +43,7 @@ func (r *Repository) ListSignInEvents(ctx context.Context, userID string, limit,
 		WHERE user_id = $1
 		ORDER BY occurred_at DESC, id DESC
 		LIMIT $2 OFFSET $3`
-	rows, err := r.ro.QueryContext(ctx, r.q(query), userID, limit, offset)
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query), userID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sign-in history: %w", err)
 	}
@@ -71,7 +71,7 @@ func (r *Repository) ListSignInEvents(ctx context.Context, userID string, limit,
 // CleanupSignInEvents deletes sign-in history recorded before cutoff and returns
 // the number of rows removed.
 func (r *Repository) CleanupSignInEvents(ctx context.Context, cutoff time.Time) (int64, error) {
-	result, err := r.rw.ExecContext(ctx, r.q(`DELETE FROM {{schema}}.sign_in_events WHERE occurred_at < $1`), cutoff)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(`DELETE FROM {{schema}}.sign_in_events WHERE occurred_at < $1`), cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete old sign-in history: %w", err)
 	}

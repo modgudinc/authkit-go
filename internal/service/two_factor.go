@@ -464,6 +464,7 @@ func (s *TwoFactorService) EnrollTOTP(ctx context.Context, userID string) (*mode
 // Returns ErrInvalidSecondFactor for a wrong code, ErrNotFound when no enrollment
 // is waiting, and ErrTwoFactorAlreadyEnabled when it is already on.
 func (s *TwoFactorService) ConfirmTOTP(ctx context.Context, userID, code string) ([]string, error) {
+	ctx = signingIn(ctx)
 	if err := s.configured(userID); err != nil {
 		return nil, err
 	}
@@ -502,6 +503,7 @@ func (s *TwoFactorService) ConfirmTOTP(ctx context.Context, userID, code string)
 // ErrInvalidSecondFactor for a wrong or reused code, ErrAccountLocked or
 // ErrAccountDisabled, and ErrNotFound for an unknown user or one with two-factor off.
 func (s *TwoFactorService) Verify(ctx context.Context, userID, code string) error {
+	ctx = signingIn(ctx)
 	if err := s.configured(userID); err != nil {
 		return err
 	}
@@ -580,6 +582,7 @@ func (s *TwoFactorService) Status(ctx context.Context, userID string) (*model.Tw
 // stays usable until it expires. An unknown, expired or finished challenge returns
 // ErrInvalidCredentials: sign in again.
 func (s *TwoFactorService) CompleteSecondFactor(ctx context.Context, req model.CompleteSecondFactorRequest) (*model.InstallationLoginResponse, error) {
+	ctx = signingIn(ctx)
 	if s.keys == nil {
 		return nil, model.ErrTwoFactorNotConfigured
 	}

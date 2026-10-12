@@ -134,6 +134,7 @@ func (s *APIKeyService) Create(ctx context.Context, req model.CreateAPIKeyReques
 // that is malformed, unknown or expired, or an error wrapping model.ErrInternal when
 // the lookup itself fails.
 func (s *APIKeyService) Validate(ctx context.Context, apiKey string) (*model.APIKeyContext, error) {
+	ctx = signingIn(ctx)
 	// Validate key format. The specific reason is logged, not returned, so the
 	// caller only sees a generic invalid-key error.
 	if err := s.validateKeyFormat(apiKey); err != nil {

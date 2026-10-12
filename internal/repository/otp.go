@@ -94,7 +94,7 @@ func (r *Repository) UpsertVerificationCode(ctx context.Context, req CreateVerif
 
 	now := time.Now()
 	cutoff := now.Add(-rateLimit) // existing code must be at least this old to be replaced
-	result, err := r.rw.ExecContext(ctx, r.q(query),
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query),
 		req.Email,
 		req.CodeHash,
 		req.Purpose,
@@ -136,7 +136,7 @@ func (r *Repository) GetVerificationCode(ctx context.Context, email, purpose str
 	`
 
 	var vc VerificationCode
-	err := r.rw.QueryRowContext(ctx, r.q(query), email, purpose).Scan(
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(query), email, purpose).Scan(
 		&vc.Email,
 		&vc.Purpose,
 		&vc.Attempts,
@@ -177,7 +177,7 @@ func (r *Repository) GetVerificationCode(ctx context.Context, email, purpose str
 // hash-to-hash. maxAttempts <= 0 disables lockout (attempts are not enforced).
 // ============================================================================
 func (r *Repository) ConsumeVerificationCode(ctx context.Context, email, codeHash, purpose string, maxAttempts int) (OTPConsumeResult, error) {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return OTPConsumeInvalid, fmt.Errorf("failed to begin verification code consumption: %w", err)
 	}
@@ -292,7 +292,7 @@ func (r *Repository) DeleteVerificationCode(ctx context.Context, email, purpose 
 		  AND purpose = $2
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), email, purpose)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), email, purpose)
 	if err != nil {
 		return fmt.Errorf("failed to delete verification code: %w", err)
 	}
@@ -311,7 +311,7 @@ func (r *Repository) DeleteExpiredVerificationCodes(ctx context.Context) (int64,
 		WHERE expires_at <= $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now())
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete expired verification codes: %w", err)
 	}
