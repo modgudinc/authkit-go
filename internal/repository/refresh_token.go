@@ -90,7 +90,7 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, req CreateRefreshTo
 	`
 
 	now := time.Now()
-	_, err = r.rw.ExecContext(ctx, r.q(query),
+	_, err = r.writer(ctx).ExecContext(ctx, r.q(query),
 		tokenID,
 		req.UserID,
 		req.TokenHash,
@@ -130,7 +130,7 @@ func (r *Repository) RotateRefreshTokenWithUserLock(ctx context.Context, oldToke
 }
 
 func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string, req CreateRefreshTokenRequest, lockUser bool) (*model.User, string, bool, error) {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return nil, "", false, fmt.Errorf("failed to begin refresh token rotation: %w", err)
 	}
@@ -303,7 +303,7 @@ func (r *Repository) rotateRefreshToken(ctx context.Context, oldTokenHash string
 // replaced it has never been used or revoked. It returns that replacement's id with
 // its row locked; the caller's transaction already holds the consumed token's lock.
 // With no grace period it reads nothing, so it needs no migration 000006.
-func (r *Repository) unusedReplacement(ctx context.Context, tx *sql.Tx, tokenHash string, consumedAt, now time.Time, grace time.Duration) (string, bool, error) {
+func (r *Repository) unusedReplacement(ctx context.Context, tx dbtx, tokenHash string, consumedAt, now time.Time, grace time.Duration) (string, bool, error) {
 	if grace <= 0 || now.Sub(consumedAt) >= grace {
 		return "", false, nil
 	}
@@ -330,7 +330,7 @@ func (r *Repository) unusedReplacement(ctx context.Context, tx *sql.Tx, tokenHas
 
 // revokeReplacement revokes the unused replacement that a grace-period retry
 // supersedes. Its replaced_by stays NULL, so presenting it later is reuse.
-func (r *Repository) revokeReplacement(ctx context.Context, tx *sql.Tx, tokenID string, now time.Time) error {
+func (r *Repository) revokeReplacement(ctx context.Context, tx dbtx, tokenID string, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, r.q(`UPDATE {{schema}}.refresh_tokens SET revoked_at = $1 WHERE id = $2`), now, tokenID); err != nil {
 		return fmt.Errorf("failed to revoke unused refresh token replacement: %w", err)
 	}
@@ -340,7 +340,7 @@ func (r *Repository) revokeReplacement(ctx context.Context, tx *sql.Tx, tokenID 
 // recordReplacement records which token replaced a consumed one, so a retry within
 // the grace period can find it. Without a grace period it writes nothing, so it
 // needs no migration 000006.
-func (r *Repository) recordReplacement(ctx context.Context, tx *sql.Tx, tokenHash, replacementID string, grace time.Duration) error {
+func (r *Repository) recordReplacement(ctx context.Context, tx dbtx, tokenHash, replacementID string, grace time.Duration) error {
 	if grace <= 0 {
 		return nil
 	}
@@ -357,7 +357,7 @@ func (r *Repository) recordReplacement(ctx context.Context, tx *sql.Tx, tokenHas
 // Reads from the PRIMARY (rw), not a read replica: this is the credential
 // validation path run immediately after a token is issued/rotated, where
 // replica lag could spuriously reject a freshly minted token. Do not switch to
-// r.ro without accepting that auth-failure risk.
+// r.reader without accepting that auth-failure risk.
 // ============================================================================
 func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*RefreshToken, error) {
 	query := `
@@ -373,7 +373,7 @@ func (r *Repository) GetByTokenHash(ctx context.Context, tokenHash string) (*Ref
 	var ipAddress, userAgent, deviceName *string
 	var lastUsedAt *time.Time
 
-	err := r.rw.QueryRowContext(ctx, r.q(query), tokenHash).Scan(
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(query), tokenHash).Scan(
 		&token.ID,
 		&token.UserID,
 		&token.TokenHash,
@@ -434,10 +434,10 @@ func (r *Repository) GetRefreshTokenUserByHash(ctx context.Context, tokenHash st
 			FROM {{schema}}.refresh_tokens t
 			LEFT JOIN {{schema}}.refresh_tokens n ON n.id = t.replaced_by
 			WHERE t.token_hash = $1`
-		err = r.rw.QueryRowContext(ctx, r.q(query), tokenHash).Scan(&userID, &revokedAt, &unusedReplacement)
+		err = r.writer(ctx).QueryRowContext(ctx, r.q(query), tokenHash).Scan(&userID, &revokedAt, &unusedReplacement)
 	} else {
 		query := `SELECT user_id, revoked_at FROM {{schema}}.refresh_tokens WHERE token_hash = $1`
-		err = r.rw.QueryRowContext(ctx, r.q(query), tokenHash).Scan(&userID, &revokedAt)
+		err = r.writer(ctx).QueryRowContext(ctx, r.q(query), tokenHash).Scan(&userID, &revokedAt)
 	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -469,7 +469,7 @@ func (r *Repository) GetByUserID(ctx context.Context, userID string) ([]*Refresh
 		ORDER BY created_at DESC
 	`
 
-	rows, err := r.ro.QueryContext(ctx, r.q(query), userID)
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query), userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get refresh tokens by user ID: %w", err)
 	}
@@ -525,7 +525,7 @@ func (r *Repository) UpdateLastUsed(ctx context.Context, tokenID string) error {
 		WHERE id = $2
 	`
 
-	_, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), tokenID)
+	_, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now(), tokenID)
 	if err != nil {
 		return fmt.Errorf("failed to update last used timestamp: %w", err)
 	}
@@ -543,7 +543,7 @@ func (r *Repository) DeleteByTokenHash(ctx context.Context, tokenHash string) er
 		WHERE token_hash = $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), tokenHash)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), tokenHash)
 	if err != nil {
 		return fmt.Errorf("failed to delete refresh token: %w", err)
 	}
@@ -570,7 +570,7 @@ func (r *Repository) RevokeByTokenHash(ctx context.Context, tokenHash string) er
 		  AND revoked_at IS NULL
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), tokenHash)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now(), tokenHash)
 	if err != nil {
 		return fmt.Errorf("failed to revoke refresh token: %w", err)
 	}
@@ -591,7 +591,7 @@ func (r *Repository) DeleteByUserID(ctx context.Context, userID string) error {
 		WHERE user_id = $1
 	`
 
-	_, err := r.rw.ExecContext(ctx, r.q(query), userID)
+	_, err := r.writer(ctx).ExecContext(ctx, r.q(query), userID)
 	if err != nil {
 		return fmt.Errorf("failed to delete refresh tokens for user: %w", err)
 	}
@@ -610,7 +610,7 @@ func (r *Repository) DeleteExpired(ctx context.Context) (int64, error) {
 		WHERE expires_at < $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now())
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete expired refresh tokens: %w", err)
 	}

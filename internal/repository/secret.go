@@ -49,7 +49,7 @@ func (r *Repository) SaveSecret(
 	var lastVerifiedAt sql.NullTime
 	var maskedKey sql.NullString // masked_key is a nullable column (match ListSecrets)
 
-	err := r.rw.QueryRowContext(ctx, r.q(query), tenantID, key, encryptedValue, maskedValue, createdBy).Scan(
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(query), tenantID, key, encryptedValue, maskedValue, createdBy).Scan(
 		&secret.TenantID,
 		&secret.Key,
 		&maskedKey,
@@ -84,7 +84,7 @@ func (r *Repository) ListSecrets(ctx context.Context, tenantID string) ([]*model
 		ORDER BY provider ASC
 	`
 
-	rows, err := r.ro.QueryContext(ctx, r.q(query), tenantID)
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query), tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list secrets: %w", err)
 	}
@@ -141,7 +141,7 @@ func (r *Repository) GetEncryptedSecret(ctx context.Context, tenantID, key strin
 	`
 
 	var encryptedValue string
-	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID, key).Scan(&encryptedValue)
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), tenantID, key).Scan(&encryptedValue)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", fmt.Errorf("secret not found: %w", model.ErrNotFound)
@@ -162,7 +162,7 @@ func (r *Repository) DeleteSecret(ctx context.Context, tenantID, key string) err
 		WHERE tenant_id = $1 AND provider = $2
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, key)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), tenantID, key)
 	if err != nil {
 		return fmt.Errorf("failed to delete secret: %w", err)
 	}
@@ -181,7 +181,7 @@ func (r *Repository) CountSecretsByTenant(ctx context.Context, tenantID string) 
 	`
 
 	var count int
-	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID).Scan(&count)
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count secrets: %w", err)
 	}
@@ -201,7 +201,7 @@ func (r *Repository) UpdateSecretVerified(ctx context.Context, tenantID, key str
 		WHERE tenant_id = $1 AND provider = $2
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, key)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), tenantID, key)
 	if err != nil {
 		return fmt.Errorf("failed to update secret verified: %w", err)
 	}

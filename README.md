@@ -24,6 +24,7 @@ A Go library for identity and authentication management built on a **decoupled-i
 - **Flexible Logging & Metrics**: Dependency-injected, context-aware `Logger` and an optional `Metrics` counter sink
 - **Health Checks**: `AuthKit.Ping` and fail-fast `Config.VerifyConnectivity`
 - **Read-Write Separation**: Optimized database connection management
+- **Your Own Transactions**: `AuthKit.InTx` and `WithTx` run authkit's writes in your transaction, so they commit with your own, such as an outbox row
 
 ## Installation
 
@@ -43,6 +44,7 @@ go get github.com/modgudinc/authkit-go
 - [Sign-in history](docs/sign-in-history.md)
 - [Passkeys (WebAuthn credentials)](docs/passkeys.md)
 - [Two-factor sign-in (authenticator apps and recovery codes)](docs/two-factor.md)
+- [Running authkit in your own transaction (outboxes)](docs/transactions.md)
 
 ## Quick Start
 

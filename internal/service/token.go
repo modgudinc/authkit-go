@@ -60,7 +60,7 @@ func runBoundedLastUsedUpdate(parent context.Context, log logger.Logger, what st
 		return
 	}
 
-	bgCtx := context.WithoutCancel(parent)
+	bgCtx := repository.Detach(context.WithoutCancel(parent))
 	go func() {
 		defer func() { <-lastUsedUpdateSlots }()
 		defer func() {
@@ -174,6 +174,7 @@ func (s *TokenService) GenerateTokenPair(
 	membership *model.Membership,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
+	ctx = signingIn(ctx)
 	if err := s.checkInstallation(nil); err != nil {
 		return nil, err
 	}
@@ -214,6 +215,7 @@ func (s *TokenService) GenerateTokenPair(
 // this is the cheap call used to issue or switch the active workspace from an
 // existing session.
 func (s *TokenService) MintAccessToken(ctx context.Context, user *model.User, membership *model.Membership) (string, int64, error) {
+	ctx = signingIn(ctx)
 	if err := s.checkInstallation(nil); err != nil {
 		return "", 0, err
 	}
@@ -231,6 +233,7 @@ func (s *TokenService) MintAccessToken(ctx context.Context, user *model.User, me
 // user-scoped, not tied to any tenant — workspace access tokens are minted from it
 // per membership.
 func (s *TokenService) CreateIdentitySession(ctx context.Context, userID string, sessionInfo *model.SessionInfo) (string, error) {
+	ctx = signingIn(ctx)
 	if err := s.checkInstallation(nil); err != nil {
 		return "", err
 	}
@@ -309,6 +312,7 @@ func sessionPointers(sessionInfo *model.SessionInfo) (ipAddress, userAgent, devi
 //	    return fmt.Errorf("invalid refresh token: %w", err)
 //	}
 func (s *TokenService) ValidateRefreshToken(ctx context.Context, tokenString string) (*model.User, error) {
+	ctx = signingIn(ctx)
 	session, err := s.sessionForRefresh(ctx, tokenString)
 	if err != nil {
 		return nil, err
@@ -402,6 +406,7 @@ func (s *TokenService) RefreshTokenPair(
 	tenantID string,
 	sessionInfo *model.SessionInfo,
 ) (*model.TokenPairResponse, error) {
+	ctx = signingIn(ctx)
 	bound, err := s.boundRefresh(refreshToken)
 	if err != nil {
 		return nil, err

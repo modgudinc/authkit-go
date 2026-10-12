@@ -71,7 +71,7 @@ func (r *Repository) Create(ctx context.Context, user model.CreateUserRequest) (
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`
 
-	_, err = r.rw.ExecContext(ctx, r.q(query),
+	_, err = r.writer(ctx).ExecContext(ctx, r.q(query),
 		userID,
 		user.Email,
 		user.PasswordHash,
@@ -115,7 +115,7 @@ func (r *Repository) VerifyPassword(ctx context.Context, userID string) (string,
 	`
 
 	var hashedPassword string
-	err := r.rw.QueryRowContext(ctx, r.q(query), userID).Scan(&hashedPassword)
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(query), userID).Scan(&hashedPassword)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", fmt.Errorf("user not found: %w", model.ErrNotFound)
@@ -127,7 +127,8 @@ func (r *Repository) VerifyPassword(ctx context.Context, userID string) (string,
 }
 
 // rowQuerier is the single-row read surface shared by the rw (primary) and ro
-// (replica) *sql.DB handles, so a query helper can run against either one.
+// (replica) *sql.DB handles and a transaction, so a query helper can run against any
+// of them.
 type rowQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
@@ -203,7 +204,7 @@ func (r *Repository) getByID(ctx context.Context, db rowQuerier, userID string) 
 // GetByIDFromPrimary for security gates that must observe the latest writes.
 // ============================================================================
 func (r *Repository) GetByID(ctx context.Context, userID string) (*model.User, error) {
-	return r.getByID(ctx, r.ro, userID)
+	return r.getByID(ctx, r.reader(ctx), userID)
 }
 
 // ============================================================================
@@ -218,7 +219,7 @@ func (r *Repository) GetByID(ctx context.Context, userID string) (*model.User, e
 // GetByTokenHash and GetAPIKeyByHash.
 // ============================================================================
 func (r *Repository) GetByIDFromPrimary(ctx context.Context, userID string) (*model.User, error) {
-	return r.getByID(ctx, r.rw, userID)
+	return r.getByID(ctx, r.writer(ctx), userID)
 }
 
 // ============================================================================
@@ -245,7 +246,7 @@ func (r *Repository) getByEmail(ctx context.Context, db rowQuerier, email string
 // login security gate.
 // ============================================================================
 func (r *Repository) GetByEmail(ctx context.Context, email string) (*model.User, error) {
-	return r.getByEmail(ctx, r.ro, email)
+	return r.getByEmail(ctx, r.reader(ctx), email)
 }
 
 // ============================================================================
@@ -259,7 +260,7 @@ func (r *Repository) GetByEmail(ctx context.Context, email string) (*model.User,
 // needed hardening.
 // ============================================================================
 func (r *Repository) GetByEmailFromPrimary(ctx context.Context, email string) (*model.User, error) {
-	return r.getByEmail(ctx, r.rw, email)
+	return r.getByEmail(ctx, r.writer(ctx), email)
 }
 
 // ============================================================================
@@ -275,7 +276,7 @@ func (r *Repository) Exists(ctx context.Context, email string) (bool, error) {
 	`
 
 	var exists bool
-	err := r.ro.QueryRowContext(ctx, r.q(query), email).Scan(&exists)
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), email).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("failed to check if user exists: %w", err)
 	}
@@ -294,7 +295,7 @@ func (r *Repository) List(ctx context.Context, limit, offset int) ([]*model.User
 		ORDER BY created_at DESC, id DESC
 		LIMIT $1 OFFSET $2`
 
-	rows, err := r.ro.QueryContext(ctx, r.q(query), limit, offset)
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query), limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list users: %w", err)
 	}
@@ -333,7 +334,7 @@ func (r *Repository) IncrementFailedLoginCount(ctx context.Context, userID strin
 		WHERE id = $2
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to increment failed login count: %w", err)
 	}
@@ -352,7 +353,7 @@ func (r *Repository) IncrementFailedLoginCount(ctx context.Context, userID strin
 // clears an existing lock.
 // ============================================================================
 func (r *Repository) RegisterFailedLogin(ctx context.Context, userID string, maxAttempts int, lockDuration time.Duration) (int, bool, error) {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("failed to begin failed-login registration: %w", err)
 	}
@@ -431,7 +432,7 @@ func (r *Repository) UpdateLastLogin(ctx context.Context, userID string) error {
 		WHERE id = $2
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to update last login: %w", err)
 	}
@@ -452,7 +453,7 @@ func (r *Repository) ExistsActive(ctx context.Context, email string) (bool, erro
 	`
 
 	var exists bool
-	err := r.ro.QueryRowContext(ctx, r.q(query), email).Scan(&exists)
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), email).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("failed to check if active user exists: %w", err)
 	}
@@ -468,7 +469,7 @@ func (r *Repository) GetDisplayName(ctx context.Context, userID string) (string,
 	query := `SELECT display_name FROM {{schema}}.users WHERE id = $1`
 
 	var displayName string
-	err := r.ro.QueryRowContext(ctx, r.q(query), userID).Scan(&displayName)
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), userID).Scan(&displayName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", fmt.Errorf("user not found: %w", model.ErrNotFound)
@@ -491,7 +492,7 @@ func (r *Repository) GetActiveUserIDByEmail(ctx context.Context, email string) (
 	`
 
 	var userID string
-	err := r.ro.QueryRowContext(ctx, r.q(query), email).Scan(&userID)
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), email).Scan(&userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", fmt.Errorf("active user not found for email: %w", model.ErrNotFound)
@@ -517,7 +518,7 @@ func (r *Repository) Update(ctx context.Context, userID string, req model.Update
 		    updated_at = $2
 		WHERE id = $3
 	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), req.DisplayName, time.Now(), userID)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), req.DisplayName, time.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to update user: %w", err)
 	}
@@ -539,7 +540,7 @@ func (r *Repository) SetPasswordAndBumpTokenVersion(ctx context.Context, userID,
 		SET password_hash = $1, token_version = token_version + 1, updated_at = $2
 		WHERE id = $3
 	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), hashedPassword, time.Now(), userID)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), hashedPassword, time.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to set password and bump token version: %w", err)
 	}
@@ -556,7 +557,7 @@ func (r *Repository) MarkEmailVerified(ctx context.Context, userID string) error
 		SET email_verified_at = COALESCE(email_verified_at, $1), updated_at = $1
 		WHERE id = $2
 	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to mark email verified: %w", err)
 	}
@@ -567,7 +568,7 @@ func (r *Repository) MarkEmailVerified(ctx context.Context, userID string) error
 // Delete - Soft deletes a user (sets is_enabled=false).
 // ============================================================================
 func (r *Repository) Delete(ctx context.Context, userID string) error {
-	return r.withUserStatusAudit(ctx, userID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+	return r.withUserStatusAudit(ctx, userID, actorAdmin, func(ctx context.Context, tx dbtx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		now := time.Now()
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users SET is_enabled = false, disabled_at = $1, updated_at = $1 WHERE id = $2
@@ -585,7 +586,7 @@ func (r *Repository) Delete(ctx context.Context, userID string) error {
 // Enable - Enables a disabled user account.
 // ============================================================================
 func (r *Repository) Enable(ctx context.Context, userID string) error {
-	return r.withUserStatusAudit(ctx, userID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+	return r.withUserStatusAudit(ctx, userID, actorAdmin, func(ctx context.Context, tx dbtx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users SET is_enabled = true, disabled_at = NULL, updated_at = $1 WHERE id = $2
 		`), time.Now(), userID); err != nil {
@@ -603,7 +604,7 @@ func (r *Repository) Enable(ctx context.Context, userID string) error {
 // identity's access tokens (every workspace).
 // ============================================================================
 func (r *Repository) Disable(ctx context.Context, userID string) error {
-	return r.withUserStatusAudit(ctx, userID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+	return r.withUserStatusAudit(ctx, userID, actorAdmin, func(ctx context.Context, tx dbtx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		now := time.Now()
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users
@@ -623,7 +624,7 @@ func (r *Repository) Disable(ctx context.Context, userID string) error {
 // Lock - Locks a user account with an optional auto-unlock time.
 // ============================================================================
 func (r *Repository) Lock(ctx context.Context, userID string, lockedUntil *time.Time) error {
-	return r.withUserStatusAudit(ctx, userID, actorAdmin, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+	return r.withUserStatusAudit(ctx, userID, actorAdmin, func(ctx context.Context, tx dbtx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users SET is_locked = true, locked_until = $1, updated_at = $2 WHERE id = $3
 		`), lockedUntil, time.Now(), userID); err != nil {
@@ -652,7 +653,7 @@ func (r *Repository) AutoUnlock(ctx context.Context, userID string) error {
 }
 
 func (r *Repository) unlock(ctx context.Context, userID string, actor statusChangeActor) error {
-	return r.withUserStatusAudit(ctx, userID, actor, func(ctx context.Context, tx *sql.Tx, old userStatusSnapshot) (userStatusSnapshot, error) {
+	return r.withUserStatusAudit(ctx, userID, actor, func(ctx context.Context, tx dbtx, old userStatusSnapshot) (userStatusSnapshot, error) {
 		if _, err := tx.ExecContext(ctx, r.q(`
 			UPDATE {{schema}}.users SET is_locked = false, locked_until = NULL, failed_login_count = 0, updated_at = $1 WHERE id = $2
 		`), time.Now(), userID); err != nil {
@@ -676,7 +677,7 @@ func (r *Repository) IncrementTokenVersion(ctx context.Context, userID string) e
 		SET token_version = token_version + 1, updated_at = $1
 		WHERE id = $2
 	`
-	result, err := r.rw.ExecContext(ctx, r.q(query), time.Now(), userID)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), time.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to increment token version: %w", err)
 	}

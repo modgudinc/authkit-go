@@ -39,7 +39,7 @@ type SecondFactorChallenge struct {
 // model.ErrNotFound.
 func (r *Repository) GetTOTPFactor(ctx context.Context, userID string) (*TOTPFactor, error) {
 	var f TOTPFactor
-	err := r.rw.QueryRowContext(ctx, r.q(`
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(`
 		SELECT user_id, secret_ciphertext, confirmed_at, last_used_step, created_at
 		FROM {{schema}}.totp_factors WHERE user_id=$1`), userID).
 		Scan(&f.UserID, &f.SecretCiphertext, &f.ConfirmedAt, &f.LastUsedStep, &f.CreatedAt)
@@ -53,7 +53,7 @@ func (r *Repository) GetTOTPFactor(ctx context.Context, userID string) (*TOTPFac
 // factor, which makes their password logins need a second factor.
 func (r *Repository) TwoFactorEnabled(ctx context.Context, userID string) (bool, error) {
 	var enabled bool
-	err := r.rw.QueryRowContext(ctx, r.q(`
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(`
 		SELECT EXISTS(SELECT 1 FROM {{schema}}.totp_factors WHERE user_id=$1 AND confirmed_at IS NOT NULL)`),
 		userID).Scan(&enabled)
 	return enabled, err
@@ -63,7 +63,7 @@ func (r *Repository) TwoFactorEnabled(ctx context.Context, userID string) (bool,
 // unconfirmed one. It returns model.ErrTwoFactorAlreadyEnabled when the user has a
 // confirmed factor, and model.ErrNotFound for an unknown user.
 func (r *Repository) SavePendingTOTP(ctx context.Context, userID, secretCiphertext string) error {
-	result, err := r.rw.ExecContext(ctx, r.q(`
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(`
 		INSERT INTO {{schema}}.totp_factors AS f (user_id, secret_ciphertext) VALUES ($1, $2)
 		ON CONFLICT (user_id) DO UPDATE
 		SET secret_ciphertext = EXCLUDED.secret_ciphertext, last_used_step = 0, created_at = NOW()
@@ -83,7 +83,7 @@ func (r *Repository) SavePendingTOTP(ctx context.Context, userID, secretCipherte
 // model.ErrNotFound when there is no pending factor with that secret (a new
 // enrollment replaced it), or step was not after the last one used.
 func (r *Repository) ConfirmTOTP(ctx context.Context, userID, secretCiphertext string, step int64, codeHashes []string) error {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -104,7 +104,7 @@ func (r *Repository) ConfirmTOTP(ctx context.Context, userID, secretCiphertext s
 	return tx.Commit()
 }
 
-func (r *Repository) replaceRecoveryCodes(ctx context.Context, tx *sql.Tx, userID string, codeHashes []string) error {
+func (r *Repository) replaceRecoveryCodes(ctx context.Context, tx dbtx, userID string, codeHashes []string) error {
 	if _, err := tx.ExecContext(ctx, r.q("DELETE FROM {{schema}}.recovery_codes WHERE user_id=$1"), userID); err != nil {
 		return err
 	}
@@ -120,7 +120,7 @@ func (r *Repository) replaceRecoveryCodes(ctx context.Context, tx *sql.Tx, userI
 // ReplaceRecoveryCodes replaces userID's recovery codes with codeHashes. It returns
 // model.ErrNotFound when the user has no confirmed factor.
 func (r *Repository) ReplaceRecoveryCodes(ctx context.Context, userID string, codeHashes []string) error {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -144,7 +144,7 @@ func (r *Repository) ReplaceRecoveryCodes(ctx context.Context, userID string, co
 // factor. It returns false, changing nothing, when the step is not after the last
 // one used (a replayed or older code) or the factor is not on.
 func (r *Repository) UseTOTPStep(ctx context.Context, userID string, step int64) (bool, error) {
-	result, err := r.rw.ExecContext(ctx, r.q(`
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(`
 		UPDATE {{schema}}.totp_factors SET last_used_step = $2
 		WHERE user_id = $1 AND confirmed_at IS NOT NULL AND last_used_step < $2`), userID, step)
 	if err != nil {
@@ -157,7 +157,7 @@ func (r *Repository) UseTOTPStep(ctx context.Context, userID string, step int64)
 // UseRecoveryCode spends one of userID's unused recovery codes. It returns false
 // when no unused code has the hash.
 func (r *Repository) UseRecoveryCode(ctx context.Context, userID, codeHash string) (bool, error) {
-	result, err := r.rw.ExecContext(ctx, r.q(`
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(`
 		UPDATE {{schema}}.recovery_codes SET used_at = NOW()
 		WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL`), userID, codeHash)
 	if err != nil {
@@ -170,7 +170,7 @@ func (r *Repository) UseRecoveryCode(ctx context.Context, userID, codeHash strin
 // DeleteTwoFactor removes userID's factor, recovery codes and waiting logins. It
 // returns model.ErrNotFound when the user has no factor, confirmed or not.
 func (r *Repository) DeleteTwoFactor(ctx context.Context, userID string) error {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -193,7 +193,7 @@ func (r *Repository) DeleteTwoFactor(ctx context.Context, userID string) error {
 // TwoFactorStatus returns userID's two-factor state from the replica.
 func (r *Repository) TwoFactorStatus(ctx context.Context, userID string) (*model.TwoFactorStatus, error) {
 	var status model.TwoFactorStatus
-	err := r.ro.QueryRowContext(ctx, r.q(`
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(`
 		SELECT
 			(SELECT confirmed_at FROM {{schema}}.totp_factors WHERE user_id=$1),
 			(SELECT count(*) FROM {{schema}}.recovery_codes WHERE user_id=$1 AND used_at IS NULL)`),
@@ -208,11 +208,11 @@ func (r *Repository) TwoFactorStatus(ctx context.Context, userID string) (*model
 // InsertSecondFactorChallenge stores a password login waiting for its second
 // factor, keyed by the hash of its challenge, and drops the user's expired ones.
 func (r *Repository) InsertSecondFactorChallenge(ctx context.Context, tokenHash, userID string, login []byte, expiresAt time.Time) error {
-	if _, err := r.rw.ExecContext(ctx, r.q(
+	if _, err := r.writer(ctx).ExecContext(ctx, r.q(
 		"DELETE FROM {{schema}}.second_factor_challenges WHERE user_id=$1 AND expires_at < NOW()"), userID); err != nil {
 		return err
 	}
-	_, err := r.rw.ExecContext(ctx, r.q(`
+	_, err := r.writer(ctx).ExecContext(ctx, r.q(`
 		INSERT INTO {{schema}}.second_factor_challenges (token_hash, user_id, login, expires_at)
 		VALUES ($1, $2, $3::jsonb, $4)`), tokenHash, userID, string(login), expiresAt)
 	return err
@@ -222,7 +222,7 @@ func (r *Repository) InsertSecondFactorChallenge(ctx context.Context, tokenHash,
 // the primary, expired or not, or model.ErrNotFound.
 func (r *Repository) GetSecondFactorChallenge(ctx context.Context, tokenHash string) (*SecondFactorChallenge, error) {
 	var c SecondFactorChallenge
-	err := r.rw.QueryRowContext(ctx, r.q(`
+	err := r.writer(ctx).QueryRowContext(ctx, r.q(`
 		SELECT user_id, login, expires_at FROM {{schema}}.second_factor_challenges WHERE token_hash=$1`), tokenHash).
 		Scan(&c.UserID, &c.Login, &c.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -234,7 +234,7 @@ func (r *Repository) GetSecondFactorChallenge(ctx context.Context, tokenHash str
 // DeleteSecondFactorChallenge removes a waiting login and reports whether this call
 // removed it, so only one caller can finish it.
 func (r *Repository) DeleteSecondFactorChallenge(ctx context.Context, tokenHash string) (bool, error) {
-	result, err := r.rw.ExecContext(ctx, r.q(
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(
 		"DELETE FROM {{schema}}.second_factor_challenges WHERE token_hash=$1"), tokenHash)
 	if err != nil {
 		return false, err
@@ -246,7 +246,7 @@ func (r *Repository) DeleteSecondFactorChallenge(ctx context.Context, tokenHash 
 // CleanupSecondFactorChallenges deletes waiting logins that expired before now and
 // returns how many.
 func (r *Repository) CleanupSecondFactorChallenges(ctx context.Context, now time.Time) (int64, error) {
-	result, err := r.rw.ExecContext(ctx, r.q(
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(
 		"DELETE FROM {{schema}}.second_factor_challenges WHERE expires_at < $1"), now)
 	if err != nil {
 		return 0, err

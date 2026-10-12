@@ -32,7 +32,7 @@ func scanSession(row sessionScanner) (*model.Session, error) {
 }
 
 func (r *Repository) GetSession(ctx context.Context, namespace, userID, sessionID string) (*model.Session, error) {
-	return scanSession(r.rw.QueryRowContext(ctx, r.q("SELECT "+sessionColumns+
+	return scanSession(r.writer(ctx).QueryRowContext(ctx, r.q("SELECT "+sessionColumns+
 		" FROM {{schema}}.sessions WHERE namespace=$1 AND user_id=$2 AND id=$3"),
 		namespace, userID, sessionID))
 }
@@ -42,7 +42,7 @@ func (r *Repository) GetSession(ctx context.Context, namespace, userID, sessionI
 // active-session token reuse. A missing session must never downgrade to legacy.
 func (r *Repository) SessionForRefresh(ctx context.Context, namespace, hash string) (*model.Session, error) {
 	var userID, familyID string
-	err := r.rw.QueryRowContext(ctx, r.q("SELECT user_id, family_id FROM {{schema}}.refresh_tokens WHERE token_hash=$1"), hash).Scan(&userID, &familyID)
+	err := r.writer(ctx).QueryRowContext(ctx, r.q("SELECT user_id, family_id FROM {{schema}}.refresh_tokens WHERE token_hash=$1"), hash).Scan(&userID, &familyID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, model.ErrInvalidRefreshToken
 	}
@@ -57,7 +57,7 @@ func (r *Repository) SessionForRefresh(ctx context.Context, namespace, hash stri
 }
 
 func (r *Repository) ListSessions(ctx context.Context, namespace, userID string, limit, offset int) ([]model.Session, error) {
-	rows, err := r.rw.QueryContext(ctx, r.q("SELECT "+sessionColumns+
+	rows, err := r.writer(ctx).QueryContext(ctx, r.q("SELECT "+sessionColumns+
 		" FROM {{schema}}.sessions WHERE namespace=$1 AND user_id=$2 ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4"),
 		namespace, userID, limit, offset)
 	if err != nil {
@@ -77,7 +77,7 @@ func (r *Repository) ListSessions(ctx context.Context, namespace, userID string,
 
 // All bound-session mutations lock user -> session -> refresh rows. Identity
 // status changes already lock the user first; this avoids inversions with them.
-func (r *Repository) lockSessionUser(ctx context.Context, tx *sql.Tx, userID string) (*model.User, error) {
+func (r *Repository) lockSessionUser(ctx context.Context, tx dbtx, userID string) (*model.User, error) {
 	u, err := scanUser(tx.QueryRowContext(ctx, r.q("SELECT "+userColumns+" FROM {{schema}}.users WHERE id=$1 FOR UPDATE"), userID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("user not found: %w", model.ErrNotFound)
@@ -98,7 +98,7 @@ func sessionActive(s *model.Session, u *model.User, now time.Time) bool {
 // expectedUser is the snapshot the caller authenticated or verified: if the account
 // was disabled, locked or had its credentials changed since, nothing is written.
 func (r *Repository) CreateBoundSession(ctx context.Context, expectedUser *model.User, s *model.Session, token CreateRefreshTokenRequest) error {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func (r *Repository) CreateBoundSession(ctx context.Context, expectedUser *model
 	return tx.Commit()
 }
 
-func (r *Repository) insertSessionRefresh(ctx context.Context, tx *sql.Tx, s *model.Session, req CreateRefreshTokenRequest) (string, error) {
+func (r *Repository) insertSessionRefresh(ctx context.Context, tx dbtx, s *model.Session, req CreateRefreshTokenRequest) (string, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return "", err
@@ -141,7 +141,7 @@ func (r *Repository) insertSessionRefresh(ctx context.Context, tx *sql.Tx, s *mo
 // transaction as rotation. It returns the authoritative snapshots for minting, and
 // whether the rotation was a retry within req.GracePeriod.
 func (r *Repository) RotateBoundRefresh(ctx context.Context, namespace, oldHash, tenantID string, req CreateRefreshTokenRequest) (*model.User, *model.Membership, *model.Session, bool, error) {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return nil, nil, nil, false, err
 	}
@@ -246,7 +246,7 @@ func (r *Repository) RotateBoundRefresh(ctx context.Context, namespace, oldHash,
 	return u, m, s, retryOf != "", nil
 }
 
-func (r *Repository) revokeSessionTx(ctx context.Context, tx *sql.Tx, sessionID, reason string) error {
+func (r *Repository) revokeSessionTx(ctx context.Context, tx dbtx, sessionID, reason string) error {
 	now := time.Now()
 	if _, err := tx.ExecContext(ctx, r.q("UPDATE {{schema}}.sessions SET revoked_at=$1,revocation_reason=$2 WHERE id=$3 AND revoked_at IS NULL"), now, reason, sessionID); err != nil {
 		return err
@@ -258,7 +258,7 @@ func (r *Repository) revokeSessionTx(ctx context.Context, tx *sql.Tx, sessionID,
 // RevokeSessions scopes every lookup by application and owner. sessionID selects
 // one session; installationID selects all logins for that installation.
 func (r *Repository) RevokeSessions(ctx context.Context, namespace, userID, sessionID, installationID, reason string) error {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -298,7 +298,7 @@ func (r *Repository) RevokeSessions(ctx context.Context, namespace, userID, sess
 }
 
 func (r *Repository) CleanupSessions(ctx context.Context, namespace string) (int64, error) {
-	result, err := r.rw.ExecContext(ctx, r.q("DELETE FROM {{schema}}.sessions WHERE namespace=$1 AND expires_at <= $2"), namespace, time.Now())
+	result, err := r.writer(ctx).ExecContext(ctx, r.q("DELETE FROM {{schema}}.sessions WHERE namespace=$1 AND expires_at <= $2"), namespace, time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("cleanup sessions: %w", err)
 	}
@@ -308,7 +308,7 @@ func (r *Repository) CleanupSessions(ctx context.Context, namespace string) (int
 // RevokeUserSessionsAndTokens backs explicit identity-wide credential actions
 // when session support is enabled. All namespaces are affected deliberately.
 func (r *Repository) RevokeUserSessionsAndTokens(ctx context.Context, userID string) error {
-	tx, err := r.rw.BeginTx(ctx, nil)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return err
 	}

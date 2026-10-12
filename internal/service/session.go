@@ -329,6 +329,7 @@ func (s *TokenService) refreshBoundPair(ctx context.Context, token, tenantID str
 
 // LoginWithInstallation authenticates with caller-verified enrollment.
 func (s *AuthService) LoginWithInstallation(ctx context.Context, req model.InstallationLoginRequest) (*model.InstallationLoginResponse, error) {
+	ctx = signingIn(ctx)
 	resp, session, err := s.login(ctx, req.LoginRequest, &req.Installation)
 	if err != nil {
 		return nil, err
@@ -337,6 +338,7 @@ func (s *AuthService) LoginWithInstallation(ctx context.Context, req model.Insta
 }
 
 func (s *AuthService) LoginByEmailWithInstallation(ctx context.Context, req model.InstallationLoginByEmailRequest) (*model.InstallationLoginResponse, error) {
+	ctx = signingIn(ctx)
 	resp, session, err := s.loginByEmail(ctx, req.LoginByEmailRequest, &req.Installation)
 	if err != nil {
 		return nil, err
@@ -345,6 +347,7 @@ func (s *AuthService) LoginByEmailWithInstallation(ctx context.Context, req mode
 }
 
 func (s *AuthService) ValidateInstallationJWT(ctx context.Context, token string) (*model.InstallationClaims, error) {
+	ctx = signingIn(ctx)
 	// validateJWT has already checked the token's session; it returns it rather
 	// than this reading it again.
 	claims, session, err := s.validateJWT(ctx, token)

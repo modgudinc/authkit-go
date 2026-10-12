@@ -40,7 +40,7 @@ func (r *Repository) CreateTenant(ctx context.Context, req model.CreateTenantReq
 		VALUES ($1, $2, $3, NOW(), NOW())
 	`
 
-	_, err := r.rw.ExecContext(ctx, r.q(query),
+	_, err := r.writer(ctx).ExecContext(ctx, r.q(query),
 		req.TenantID,
 		req.Name,
 		req.AllowedDomains,
@@ -62,13 +62,13 @@ func (r *Repository) CreateTenant(ctx context.Context, req model.CreateTenantReq
 // GetTenant - Retrieves a tenant by tenant_id (custom identifier)
 // ============================================================================
 func (r *Repository) GetTenant(ctx context.Context, tenantID string) (*model.Tenant, error) {
-	return r.getTenant(ctx, r.ro, tenantID)
+	return r.getTenant(ctx, r.reader(ctx), tenantID)
 }
 
 // GetTenantFromPrimary reads a tenant from the primary, for the read that follows
 // a write: a replica may not have the row yet.
 func (r *Repository) GetTenantFromPrimary(ctx context.Context, tenantID string) (*model.Tenant, error) {
-	return r.getTenant(ctx, r.rw, tenantID)
+	return r.getTenant(ctx, r.writer(ctx), tenantID)
 }
 
 func (r *Repository) getTenant(ctx context.Context, q rowQuerier, tenantID string) (*model.Tenant, error) {
@@ -123,7 +123,7 @@ func (r *Repository) GetTenantByDomain(ctx context.Context, domain string) (*mod
 	var tenant model.Tenant
 	var domainsJSON, settingsJSON []byte
 
-	err := r.ro.QueryRowContext(ctx, r.q(query), domain).Scan(
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), domain).Scan(
 		&tenant.TenantID,
 		&tenant.Name,
 		&domainsJSON,
@@ -155,7 +155,7 @@ func (r *Repository) TenantExists(ctx context.Context, tenantID string) (bool, e
 	query := `SELECT EXISTS(SELECT 1 FROM {{schema}}.tenants WHERE tenant_id = $1)`
 
 	var exists bool
-	err := r.ro.QueryRowContext(ctx, r.q(query), tenantID).Scan(&exists)
+	err := r.reader(ctx).QueryRowContext(ctx, r.q(query), tenantID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("failed to check tenant existence: %w", err)
 	}
@@ -175,7 +175,7 @@ func (r *Repository) ListAllTenants(ctx context.Context) ([]*model.Tenant, error
 		ORDER BY created_at DESC
 	`
 
-	rows, err := r.ro.QueryContext(ctx, r.q(query))
+	rows, err := r.reader(ctx).QueryContext(ctx, r.q(query))
 	if err != nil {
 		return nil, fmt.Errorf("failed to list all tenants: %w", err)
 	}
@@ -236,7 +236,7 @@ func (r *Repository) AddAllowedDomain(ctx context.Context, tenantID, domain stri
 		WHERE tenant_id = $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, domain)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), tenantID, domain)
 	if err != nil {
 		return fmt.Errorf("failed to add allowed domain: %w", err)
 	}
@@ -255,7 +255,7 @@ func (r *Repository) UpdateName(ctx context.Context, tenantID, name string) erro
 		WHERE tenant_id = $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, name)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), tenantID, name)
 	if err != nil {
 		return fmt.Errorf("failed to update tenant name: %w", err)
 	}
@@ -274,7 +274,7 @@ func (r *Repository) SetAllowedDomains(ctx context.Context, tenantID string, dom
 		WHERE tenant_id = $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, domains)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), tenantID, domains)
 	if err != nil {
 		return fmt.Errorf("failed to update allowed domains: %w", err)
 	}
@@ -294,7 +294,7 @@ func (r *Repository) UpdateSettings(ctx context.Context, tenantID, settingsJSON 
 		WHERE tenant_id = $1
 	`
 
-	result, err := r.rw.ExecContext(ctx, r.q(query), tenantID, settingsJSON)
+	result, err := r.writer(ctx).ExecContext(ctx, r.q(query), tenantID, settingsJSON)
 	if err != nil {
 		return fmt.Errorf("failed to update tenant settings: %w", err)
 	}
