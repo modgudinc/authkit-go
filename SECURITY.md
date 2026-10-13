@@ -12,12 +12,9 @@ breaking changes when required to fix a security issue.
 
 ## Reporting
 
-Report security issues **privately** through one of these channels — please do
-not open a public issue for a vulnerability:
-
-- **GitHub Private Vulnerability Reporting** (preferred): on this repository, go
-  to the **Security** tab and click **"Report a vulnerability"**.
-- **Email**: security@modgudinc.com.
+Report security issues **privately** through GitHub Private Vulnerability
+Reporting — please do not open a public issue for a vulnerability: on this
+repository, go to the **Security** tab and click **"Report a vulnerability"**.
 
 You will get an acknowledgement, and we will coordinate a fix and disclosure
 timeline with you.
