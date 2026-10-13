@@ -2,6 +2,9 @@
 
 A Go library for identity and authentication management built on a **decoupled-identity** model: a user is a single **global identity**, and access to a tenant (workspace) is a separate **membership** row. It supports API key authentication, invitation-based onboarding, and OTP verification.
 
+[![CI](https://github.com/modgudinc/authkit-go/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/modgudinc/authkit-go/actions/workflows/build.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/modgudinc/authkit-go.svg)](https://pkg.go.dev/github.com/modgudinc/authkit-go)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/modgudinc/authkit-go/badge)](https://scorecard.dev/viewer/?uri=github.com/modgudinc/authkit-go)
 [![Go Version](https://img.shields.io/badge/go-1.26-blue.svg)](https://golang.org/dl/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 

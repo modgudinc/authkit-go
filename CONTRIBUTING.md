@@ -28,8 +28,9 @@ Use `make postgres-down` when you are done, or `make postgres-reset` if you need
 ## Pull Requests
 
 `main` is protected: **all** changes (including releases) land via a pull request —
-direct pushes are rejected — and the **`gosec`** status check must pass before a PR can
-merge.
+direct pushes are rejected — and every CI check must pass on a branch that is up to
+date with `main` before a PR can merge: `Unit Tests`, `Integration Tests`, `Go Checks`,
+`govulncheck`, `gosec` and `check-branch-name`. PRs are squash-merged.
 
 - **Branch naming is CI-enforced** ([`.github/workflows/branch-naming.yml`](.github/workflows/branch-naming.yml)).
   Branches must match `(feature|fix|bugfix|hotfix|docs|chore|refactor)/<lowercase-with-dashes>`
@@ -47,8 +48,12 @@ merge.
 
 ## Releasing
 
-Maintainers: see [docs/RELEASING.md](docs/RELEASING.md) for the signed-release
-process (SSH tag signing, the per-release checklist, and SemVer guidance).
+Maintainers: see [docs/RELEASING.md](docs/RELEASING.md) for the release process
+(the per-release checklist, how tags are created and protected, and SemVer guidance).
+
+## Conduct
+
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Security
 

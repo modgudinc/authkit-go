@@ -1,0 +1,39 @@
+name: Bug report
+description: Something in authkit-go behaves differently from its documentation.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this could be a security issue, stop here and report it privately instead:
+        https://github.com/modgudinc/authkit-go/security/advisories/new
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: A minimal program or test, with the config it uses. Leave out real secrets.
+      render: go
+  - type: input
+    id: authkit-version
+    attributes:
+      label: authkit-go version
+      placeholder: v0.21.0, or a commit
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      placeholder: go1.26.0
+  - type: input
+    id: postgres-version
+    attributes:
+      label: PostgreSQL version
+      placeholder: "16"
