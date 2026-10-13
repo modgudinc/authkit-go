@@ -1,58 +1,29 @@
 # Releasing
 
-This project publishes **signed, immutable** release tags. A tag's signature is
-part of the tag object, so it must be created signed the first time — and because
-tags are immutable, **a published tag cannot be changed or deleted**. If a tag
-goes out wrong, you cannot fix it; you must supersede it with a new version.
+This project publishes **immutable** releases. Publishing a GitHub Release creates
+its `vX.Y.Z` tag on `main`, and from then on neither the release nor its tag can be
+changed or deleted. The Go module proxy caches a version the first time anyone asks
+for it, so a published version is permanent there too. If a release goes out wrong,
+you cannot fix it; you must supersede it with a new version.
 
 Versions follow [Semantic Versioning](https://semver.org/). While the library is
 pre-1.0 (`0.x`): a **breaking** change is a **minor** bump (`0.x.0`), a
 backward-compatible change is a **patch** (`0.x.y`).
 
-## One-time setup (per maintainer machine)
-
-Signing uses **SSH** (gpg is intentionally not required).
-
-1. Use git ≥ 2.34: `git --version`.
-2. Configure SSH signing:
-   ```bash
-   git config --global gpg.format ssh
-   git config --global user.signingkey ~/.ssh/<your-signing-key>.pub
-   git config --global commit.gpgsign true   # sign commits
-   git config --global tag.gpgsign true       # auto-sign tags (so you can't forget)
-   ```
-3. **Register that public key on GitHub as a _Signing Key_** (Settings → SSH and
-   GPG keys → New SSH key → Key type: **Signing Key**). This is separate from an
-   auth key — without it GitHub marks the signature "Unverified" and the
-   require-signed-tags ruleset rejects the push.
-4. Ensure the key is loaded in the agent (`ssh-add -l`) so signing is non-interactive.
-5. *(Optional, for local `git tag -v`)* configure an allowed-signers file:
-   ```bash
-   mkdir -p ~/.config/git
-   echo "<your-email> $(cat ~/.ssh/<your-signing-key>.pub)" >> ~/.config/git/allowed_signers
-   git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
-   ```
-
-Quick readiness check:
-
-```bash
-git config --get gpg.format        # -> ssh
-git config --get user.signingkey   # -> path to your .pub
-ssh-add -l                         # signing key present
-```
-
 ## Repository protections
 
-Two independent rulesets shape the flow below:
+Three settings shape the flow below:
 
-- **`main` is protected:** all changes land via a **pull request** (direct
-  `git push origin main` is rejected), and the **`gosec` status check must pass**
-  before merge. So releases are cut from `main` *after* a release PR merges — there
-  are no long-lived `release/*` branches (and `release/*` is not even an allowed
-  branch name; see [CONTRIBUTING.md](../CONTRIBUTING.md)).
-- **Tags must be signed** (require-signed-tags ruleset). Tag refs are **not**
-  branch-rule-gated, so a signed tag is pushed directly once `main` has the release
-  commit.
+- **`main` is protected** (`merge-to-main` ruleset): all changes land via a
+  **pull request** (direct `git push origin main` is rejected), PRs are squash-merged,
+  and every CI check must pass on a branch that is up to date with `main`. So
+  releases are cut from `main` *after* a release PR merges; there are no long-lived
+  `release/*` branches (and `release/*` is not even an allowed branch name; see
+  [CONTRIBUTING.md](../CONTRIBUTING.md)).
+- **Release tags are protected** (`release-tags` ruleset on `refs/tags/v*`): only
+  repository admins can create, move or delete a `v*` tag.
+- **Releases are immutable** (repository setting): once a release is published, its
+  tag and assets are locked.
 
 ## Per-release checklist
 
@@ -62,18 +33,18 @@ Two independent rulesets shape the flow below:
    make test
    make postgres-up && make test-integration && make postgres-down
    ```
-   (`gosec` and `govulncheck` also run in CI via `.github/workflows/security.yml`;
-   `gosec` is a required merge gate.)
+   (`gosec` and `govulncheck` also run in CI via `.github/workflows/security.yml`.)
 
 2. **Update `CHANGELOG.md`.** Move the `[Unreleased]` items into a new
-   `## [X.Y.Z] - YYYY-MM-DD` section (the date is the day the tag is cut), flag any
-   breaking change, and update any compare/tag links. Choose `X.Y.Z` per SemVer (see above).
+   `## [X.Y.Z] - YYYY-MM-DD` section (the date is the day the release is published),
+   flag any breaking change, and update any compare/tag links. Choose `X.Y.Z` per
+   SemVer (see above).
 
 3. **Write release notes:** `docs/releases/RELEASE_NOTES_vX.Y.Z.md` (follow the
    existing files — highlights, breaking changes, security, upgrade notes).
 
 4. **Open a release PR** from a conventionally-named branch (a `release/*` branch is
-   NOT allowed — use a `chore/` branch; the commit is signed via the one-time setup):
+   NOT allowed — use a `chore/` branch):
    ```bash
    git switch -c chore/release-X-Y-Z          # dashes, not dots (branch-naming rule)
    git add CHANGELOG.md docs/releases/RELEASE_NOTES_vX.Y.Z.md
@@ -82,47 +53,27 @@ Two independent rulesets shape the flow below:
    gh pr create --base main --title "Release vX.Y.Z" --body-file docs/releases/RELEASE_NOTES_vX.Y.Z.md
    ```
 
-5. **Merge the PR** once CI is green (the required `gosec` check must pass). Use a
-   merge or squash merge per repo preference; the result is the release commit on `main`.
+5. **Squash-merge the PR** once CI is green. The squash commit is the release commit
+   on `main`, signed by GitHub.
 
-6. **Sync `main`, then create the signed tag on the merged release commit and verify
-   BEFORE pushing** (the push is irreversible — the tag is immutable):
-   ```bash
-   git switch main && git pull --ff-only
-   git tag -s vX.Y.Z -m "authkit-go vX.Y.Z"
-   git cat-file -p vX.Y.Z | grep -q "BEGIN SSH SIGNATURE" && echo "signed ✓"
-   ```
-   Do NOT create/push the tag before the PR merges — a tag pushed early points at a
-   commit that isn't on `main` and would have to be deleted and recreated.
-
-7. **Push the tag** (tag refs are not branch-rule-gated):
-   ```bash
-   git push origin vX.Y.Z
-   ```
-
-8. **Publish the GitHub Release** from the existing tag:
+6. **Publish the GitHub Release**, which creates the tag on the release commit. Check
+   that `main`'s head is the release commit first, then:
    ```bash
    gh release create vX.Y.Z \
+     --target main \
      --title "authkit-go vX.Y.Z" \
-     --notes-file docs/releases/RELEASE_NOTES_vX.Y.Z.md \
-     --verify-tag
-     # add --prerelease while in 0.x, if desired
+     --notes-file docs/releases/RELEASE_NOTES_vX.Y.Z.md
    ```
-   `--verify-tag` makes `gh` use your signed tag instead of creating a new one.
+   (or "Draft a new release" in the web UI, with a new `vX.Y.Z` tag on `main`). Do
+   NOT publish before the PR merges: the tag would point at a commit that isn't the
+   release commit, and it cannot be moved afterwards.
 
-9. **Verify:** the tag shows **Verified** on GitHub, and
+7. **Verify:** the release shows as immutable on GitHub, and
    `go get github.com/modgudinc/authkit-go@vX.Y.Z` resolves.
 
-## Alternative: let GitHub create the tag
+## If a release goes out wrong
 
-A tag created through the GitHub web UI ("Draft a new release") — or by
-`gh release create vX.Y.Z` when the tag does not yet exist — is created
-server-side and signed by GitHub's web-flow key, which also satisfies the
-require-signed-tags ruleset. Use this if you prefer not to sign locally; the
-trade-off is that GitHub (not you) is the recorded signer. Pick one convention
-and stick to it.
-
-## If a tag goes out wrong
-
-Tags are immutable: you cannot move, re-sign, or delete `vX.Y.Z` once pushed.
-Ship the fix as the next version (e.g. a `vX.Y.(Z+1)` patch) created correctly.
+Releases and their tags are immutable: you cannot move or delete `vX.Y.Z` once it
+is published. Ship the fix as the next version (e.g. a `vX.Y.(Z+1)` patch), and if
+the bad version must not be used, add a `retract` directive for it to `go.mod` in that
+release.
