@@ -3,7 +3,7 @@ name: authkit-go
 services:
   postgres:
     # postgres:16-alpine, resolved 2026-06-10
-    image: postgres@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    image: postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     container_name: authkit-go-postgres
     environment:
       POSTGRES_DB: authkit_test
