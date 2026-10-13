@@ -2,8 +2,8 @@ name: authkit-go
 
 services:
   postgres:
-    # postgres:16-alpine, resolved 2026-06-10
-    image: postgres@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    # postgres:16-alpine, digest resolved 2026-10-13. The tag lets Dependabot stay on 16-alpine.
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     container_name: authkit-go-postgres
     environment:
       POSTGRES_DB: authkit_test
