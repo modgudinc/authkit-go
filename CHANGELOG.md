@@ -8,6 +8,8 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-10-18
+
 ### Added
 
 - `SecretConfig.TenantKey` gives each tenant's secrets a 32-byte key of their own, in
@@ -16,6 +18,23 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
   every `Save` and `Get`, and returns its error wrapped. The stored format is
   unchanged, so returning the old key for existing tenants keeps their secrets
   readable. `New` refuses both keys at once. Guide: [docs/secrets.md](docs/secrets.md).
+
+### Changed
+
+- Update `golang.org/x/crypto` to v0.58.0, with indirect updates to
+  `golang.org/x/sync` v0.24.0 and `golang.org/x/text` v0.43.0.
+- Security reports go only through GitHub Private Vulnerability Reporting; the
+  security email address is gone from SECURITY.md.
+- Update pinned CI actions: upload-artifact v7.0.2 and CodeQL SARIF upload v4.38.3.
+  The test PostgreSQL is pinned to `postgres:16-alpine` by tag and digest, in CI and
+  in `docker-compose.yml`, and govulncheck scans with the latest Go release.
+- The repository has issue and pull request templates, Dependabot updates, an
+  OpenSSF Scorecard workflow and a code of conduct.
+
+### Compatibility (source-breaking for positional struct literals)
+
+- Existing configurations are unchanged: `EncryptionKey` works as before. `SecretConfig`
+  gains a field, so a positional `SecretConfig` literal needs keyed fields.
 
 ## [0.21.0] - 2026-10-13
 
@@ -401,7 +420,8 @@ schema was edited in place — there is **no data migration**.
 - `ErrNoActiveMembership` is an authorization outcome and never revokes the identity
   session (the user keeps access to their other workspaces).
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/modgudinc/authkit-go/releases/tag/v0.21.1
 [0.21.0]: https://github.com/modgudinc/authkit-go/releases/tag/v0.21.0
 [0.20.2]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.2
 [0.20.1]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.1
