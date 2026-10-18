@@ -42,7 +42,9 @@ secrets:
 - `OTPConfig.HMACSecret`: hashes OTP codes before storage (required when OTPService
   is used). OTP codes are persisted only as this keyed HMAC, never in plaintext, so
   a read-only database/backup/replica disclosure does not yield usable codes.
-- `SecretConfig.EncryptionKey`: encrypts provider secrets with AES-256-GCM
+- `SecretConfig.EncryptionKey`: encrypts provider secrets with AES-256-GCM, or
+  `SecretConfig.TenantKey`, which gives each tenant a key of its own; keep those
+  wrapped by a key in a KMS ([docs/secrets.md](docs/secrets.md))
 
 Best practices:
 
@@ -123,7 +125,8 @@ Rotation impact:
   users must request a new code. OTPs are short-lived, so this clears on its own
   within the code TTL.
 - Rotating `SecretConfig.EncryptionKey` requires decrypting stored secrets with
-  the old key and re-encrypting them with the new key.
+  the old key and re-encrypting them with the new key. A tenant's key from
+  `SecretConfig.TenantKey` rotates the same way, one tenant at a time.
 
 Suggested emergency rotation steps:
 

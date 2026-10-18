@@ -4,14 +4,17 @@
 package authkit
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modgudinc/authkit-go/internal/repository"
 	"github.com/modgudinc/authkit-go/internal/service"
+	"github.com/modgudinc/authkit-go/model"
 )
 
 func validTestConfig() Config {
@@ -143,6 +146,16 @@ func TestNewValidatesRequiredConfig(t *testing.T) {
 			wantErr: "two-factor issuer must be",
 		},
 		{
+			name: "a secret key for every tenant and one per tenant",
+			mutate: func(config *Config) {
+				config.SecretConfig = SecretConfig{
+					EncryptionKey: testTwoFactorKey,
+					TenantKey:     func(context.Context, string) ([]byte, error) { return nil, nil },
+				}
+			},
+			wantErr: "SecretConfig.EncryptionKey or SecretConfig.TenantKey, not both",
+		},
+		{
 			name: "two-factor issuer without a key",
 			mutate: func(config *Config) {
 				config.TwoFactorConfig = TwoFactorConfig{Issuer: "Acme"}
@@ -186,6 +199,25 @@ func TestNewConfiguresTwoFactor(t *testing.T) {
 	}
 	if kit.twoFactorKeys == nil || kit.TwoFactorService() == nil {
 		t.Fatal("two-factor is off with TwoFactorConfig")
+	}
+}
+
+// With SecretConfig.TenantKey, SecretService asks it for the key of the tenant
+// whose secret it encrypts.
+func TestNewConfiguresTenantSecretKeys(t *testing.T) {
+	var asked []string
+	config := validTestConfig()
+	config.SecretConfig.TenantKey = func(_ context.Context, tenantID string) ([]byte, error) {
+		asked = append(asked, tenantID)
+		return nil, ErrNotFound
+	}
+	kit, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = kit.SecretService().Save(context.Background(), model.SaveSecretRequest{TenantID: "acme.com", Key: "openai", PlainValue: "sk-test"})
+	if !errors.Is(err, ErrNotFound) || len(asked) != 1 || asked[0] != "acme.com" {
+		t.Fatalf("Save asked %v and returned %v", asked, err)
 	}
 }
 

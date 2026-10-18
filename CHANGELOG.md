@@ -8,6 +8,15 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
+### Added
+
+- `SecretConfig.TenantKey` gives each tenant's secrets a 32-byte key of their own, in
+  place of `SecretConfig.EncryptionKey`, so a leaked key exposes one tenant and
+  destroying a tenant's key leaves its secrets unreadable. `SecretService` asks it on
+  every `Save` and `Get`, and returns its error wrapped. The stored format is
+  unchanged, so returning the old key for existing tenants keeps their secrets
+  readable. `New` refuses both keys at once. Guide: [docs/secrets.md](docs/secrets.md).
+
 ## [0.21.0] - 2026-10-13
 
 ### Added

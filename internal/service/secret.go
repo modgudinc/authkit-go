@@ -35,11 +35,12 @@ func secretAAD(tenantID, key string) []byte {
 // SecretService handles encrypted secret management including
 // creation, retrieval, and deletion of tenant-scoped secrets.
 //
-// Secrets are encrypted using AES-256-GCM before storage.
-// The encryption key must be 32 bytes (256 bits).
+// Secrets are encrypted using AES-256-GCM before storage, under one key every
+// tenant shares or under each tenant's own. A key must be 32 bytes (256 bits).
 type SecretService struct {
 	repo          *repository.Repository
-	encryptionKey []byte // 32-byte AES-256 key
+	encryptionKey []byte                                                     // 32-byte AES-256 key every tenant shares
+	tenantKey     func(ctx context.Context, tenantID string) ([]byte, error) // each tenant's own key, in place of encryptionKey
 	logger        logger.Logger
 }
 
@@ -57,10 +58,37 @@ func NewSecretService(repo *repository.Repository, encryptionKey []byte, logger 
 	}
 }
 
+// NewTenantSecretService creates a SecretService that encrypts each tenant's
+// secrets under its own 32-byte AES-256 key, which tenantKey gives
+// (SecretConfig.TenantKey).
+func NewTenantSecretService(repo *repository.Repository, tenantKey func(ctx context.Context, tenantID string) ([]byte, error), logger logger.Logger) *SecretService {
+	return &SecretService{
+		repo:      repo,
+		tenantKey: tenantKey,
+		logger:    ensureLogger(logger),
+	}
+}
+
+// key is the key tenantID's secrets are encrypted under: its own, when each tenant
+// has one, or the one every tenant shares.
+func (s *SecretService) key(ctx context.Context, tenantID string) ([]byte, error) {
+	key := s.encryptionKey
+	if s.tenantKey != nil {
+		var err error
+		if key, err = s.tenantKey(ctx, tenantID); err != nil {
+			return nil, fmt.Errorf("tenant key: %w", err)
+		}
+	}
+	if len(key) != 32 {
+		return nil, model.ErrSecretEncryptionKeyMissing
+	}
+	return key, nil
+}
+
 // Save encrypts and stores a secret
 //
 // Flow:
-// 1. Validate encryption key is configured (32 bytes)
+// 1. Find the tenant's encryption key (32 bytes)
 // 2. Encrypt plaintext value using AES-256-GCM
 // 3. Generate masked value for display
 // 4. Upsert to database (INSERT ... ON CONFLICT ... DO UPDATE)
@@ -73,13 +101,13 @@ func (s *SecretService) Save(ctx context.Context, req model.SaveSecretRequest) (
 		"key", req.Key,
 	)
 
-	// Validate encryption key
-	if len(s.encryptionKey) != 32 {
-		return nil, fmt.Errorf("save secret: %w", model.ErrSecretEncryptionKeyMissing)
+	aesKey, err := s.key(ctx, req.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("save secret: %w", err)
 	}
 
 	// Encrypt the plaintext value, binding it to its (tenant, key) context.
-	encryptedValue, err := s.encrypt(req.PlainValue, req.TenantID, req.Key)
+	encryptedValue, err := s.encrypt(aesKey, req.PlainValue, req.TenantID, req.Key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt secret: %w", err)
 	}
@@ -112,15 +140,16 @@ func (s *SecretService) Save(ctx context.Context, req model.SaveSecretRequest) (
 // Get decrypts and returns a secret's plain value
 //
 // Flow:
-// 1. Retrieve encrypted value from database
-// 2. Decrypt using AES-256-GCM
-// 3. Return plaintext value
+// 1. Find the tenant's encryption key
+// 2. Retrieve encrypted value from database
+// 3. Decrypt using AES-256-GCM
+// 4. Return plaintext value
 //
 // Returns error if secret not found or decryption fails
 func (s *SecretService) Get(ctx context.Context, tenantID, key string) (string, error) {
-	// Validate encryption key
-	if len(s.encryptionKey) != 32 {
-		return "", fmt.Errorf("get secret: %w", model.ErrSecretEncryptionKeyMissing)
+	aesKey, err := s.key(ctx, tenantID)
+	if err != nil {
+		return "", fmt.Errorf("get secret: %w", err)
 	}
 
 	// Get encrypted value from repository
@@ -130,7 +159,7 @@ func (s *SecretService) Get(ctx context.Context, tenantID, key string) (string, 
 	}
 
 	// Decrypt the value, authenticating it against its (tenant, key) context.
-	plainValue, err := s.decrypt(encryptedValue, tenantID, key)
+	plainValue, err := s.decrypt(aesKey, encryptedValue, tenantID, key)
 	if err != nil {
 		s.logger.Error(ctx, "Failed to decrypt secret",
 			"tenant_id", tenantID,
@@ -195,20 +224,21 @@ func (s *SecretService) Count(ctx context.Context, tenantID string) (int, error)
 // Helper Functions
 // ============================================================================
 
-// encrypt encrypts plaintext using AES-256-GCM, binding the ciphertext to its
-// (tenantID, key) context via the GCM additional authenticated data.
+// encrypt encrypts plaintext under aesKey using AES-256-GCM, binding the
+// ciphertext to its (tenantID, key) context via the GCM additional authenticated
+// data.
 //
 // Output is "v1:" + base64(nonce (12 bytes) + encrypted data + auth tag (16 bytes)).
 //
-// The 96-bit nonce is random per call under a single, long-lived key. Random GCM
-// nonces stay collision-safe well past any realistic tenant-secret write volume
-// (the birthday bound is on the order of 2^32 encryptions per key), so this is safe
-// at expected scale. Note there is no built-in key-rotation / re-encryption helper
-// and no per-tenant key derivation: rotating SecretConfig.EncryptionKey requires
-// decrypting with the old key and re-encrypting with the new one at the application
-// layer (see SECURITY.md, "Rotation Expectations").
-func (s *SecretService) encrypt(plaintext, tenantID, key string) (string, error) {
-	block, err := aes.NewCipher(s.encryptionKey)
+// The 96-bit nonce is random per call under a long-lived key. Random GCM nonces
+// stay collision-safe well past any realistic tenant-secret write volume (the
+// birthday bound is on the order of 2^32 encryptions per key), so this is safe at
+// expected scale. Note there is no built-in key-rotation / re-encryption helper:
+// rotating SecretConfig.EncryptionKey, or a tenant's key, requires decrypting with
+// the old key and re-encrypting with the new one at the application layer (see
+// SECURITY.md, "Rotation Expectations").
+func (s *SecretService) encrypt(aesKey []byte, plaintext, tenantID, key string) (string, error) {
+	block, err := aes.NewCipher(aesKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to create cipher: %w", err)
 	}
@@ -229,13 +259,13 @@ func (s *SecretService) encrypt(plaintext, tenantID, key string) (string, error)
 	return secretCipherV1Prefix + base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// decrypt decrypts ciphertext using AES-256-GCM, authenticating it against its
-// (tenantID, key) context via the GCM additional authenticated data. The
+// decrypt decrypts ciphertext under aesKey using AES-256-GCM, authenticating it
+// against its (tenantID, key) context via the GCM additional authenticated data. The
 // ciphertext must carry the secretCipherV1Prefix marker; anything else is
 // rejected as malformed. There is deliberately no unauthenticated fallback: an
 // attacker who can write the column must not be able to strip the marker to
 // bypass the context binding.
-func (s *SecretService) decrypt(ciphertext, tenantID, key string) (string, error) {
+func (s *SecretService) decrypt(aesKey []byte, ciphertext, tenantID, key string) (string, error) {
 	rest, ok := strings.CutPrefix(ciphertext, secretCipherV1Prefix)
 	if !ok {
 		return "", fmt.Errorf("unrecognized secret ciphertext format")
@@ -247,7 +277,7 @@ func (s *SecretService) decrypt(ciphertext, tenantID, key string) (string, error
 		return "", fmt.Errorf("failed to decode base64: %w", err)
 	}
 
-	block, err := aes.NewCipher(s.encryptionKey)
+	block, err := aes.NewCipher(aesKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to create cipher: %w", err)
 	}

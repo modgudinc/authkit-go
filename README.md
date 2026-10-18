@@ -48,6 +48,7 @@ go get github.com/modgudinc/authkit-go
 - [Passkeys (WebAuthn credentials)](docs/passkeys.md)
 - [Two-factor sign-in (authenticator apps and recovery codes)](docs/two-factor.md)
 - [Running authkit in your own transaction (outboxes)](docs/transactions.md)
+- [Tenant secrets and their keys, one per tenant if you like](docs/secrets.md)
 
 ## Quick Start
 
@@ -1603,7 +1604,8 @@ if err != nil {
 }
 ```
 
-`SecretConfig.EncryptionKey` must be a base64-encoded 32-byte AES-256 key when `SecretService` is used.
+`SecretConfig.EncryptionKey` must be a base64-encoded 32-byte AES-256 key when `SecretService` is used,
+unless `SecretConfig.TenantKey` gives each tenant a key of its own (see [docs/secrets.md](docs/secrets.md)).
 
 #### Generating secrets
 
@@ -1675,6 +1677,7 @@ code rather than via environment.
 - **`OTPConfig.RateLimitDuration`**: Minimum time between OTP generation attempts (default: 1 minute)
 - **`DatabaseConnection.IdentitySchema`**: PostgreSQL schema name (default: `authkit`)
 - **`SecretConfig.EncryptionKey`**: Base64-encoded 32-byte AES-256 key for `SecretService`
+- **`SecretConfig.TenantKey`**: In place of `EncryptionKey`, a function giving each tenant's own 32-byte key, so one tenant's key exposes only its secrets and destroying it erases them (see [docs/secrets.md](docs/secrets.md))
 - **`TwoFactorConfig`**: `EncryptionKey` (base64 of 32 random bytes, its own key) and `Issuer` (the name in people's authenticator apps) turn on two-factor sign-in (default: off; needs migration `000009`; see [docs/two-factor.md](docs/two-factor.md))
 - **`Logger`**: Logger implementation (default: nil, no logging). Some security signals (OTP lockout, refresh-token reuse, sub-threshold failed logins) are logger-only — inject one in production.
 - **`Metrics`**: Counter sink (default: nil, no metrics); survives independently of log level, so it's the recommended basis for alerting. The library emits the `metrics.Counter*` constants — `authkit_login_success_total`, `authkit_login_failure_total`, `authkit_account_lockout_total`, `authkit_otp_failure_total`, `authkit_otp_lockout_total`, `authkit_refresh_token_reuse_total`, `authkit_refresh_token_retry_total`, `authkit_rate_limited_total`, `authkit_rate_limiter_error_total`, `authkit_best_effort_write_failure_total` — see the `metrics` package for the authoritative list.

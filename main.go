@@ -91,9 +91,10 @@ type AuthKit struct {
 	apiKeyHMACSecret     string
 	passwordBcryptCost   int
 	otpRateLimitDuration time.Duration
-	otpHMACSecret        string                 // HMAC-SHA256 secret for hashing OTP codes in storage
-	secretEncryptionKey  []byte                 // 32-byte AES-256 key for encrypting secrets
-	twoFactorKeys        *service.TwoFactorKeys // Config.TwoFactorConfig; nil when two-factor is off
+	otpHMACSecret        string                                                     // HMAC-SHA256 secret for hashing OTP codes in storage
+	secretEncryptionKey  []byte                                                     // 32-byte AES-256 key for encrypting secrets
+	secretTenantKey      func(ctx context.Context, tenantID string) ([]byte, error) // SecretConfig.TenantKey
+	twoFactorKeys        *service.TwoFactorKeys                                     // Config.TwoFactorConfig; nil when two-factor is off
 	identitySchema       string
 	logger               logger.Logger
 	metrics              metrics.Metrics
@@ -219,6 +220,9 @@ func New(config Config) (*AuthKit, error) {
 
 	// Validate and decode secret encryption key (optional - only required if using SecretService)
 	var secretEncryptionKey []byte
+	if config.SecretConfig.EncryptionKey != "" && config.SecretConfig.TenantKey != nil {
+		return nil, errors.New("set SecretConfig.EncryptionKey or SecretConfig.TenantKey, not both")
+	}
 	if config.SecretConfig.EncryptionKey != "" {
 		keyBytes, err := base64.StdEncoding.DecodeString(config.SecretConfig.EncryptionKey)
 		if err != nil {
@@ -281,6 +285,7 @@ func New(config Config) (*AuthKit, error) {
 		otpRateLimitDuration: otpRateLimitDuration,
 		otpHMACSecret:        config.OTPConfig.HMACSecret,
 		secretEncryptionKey:  secretEncryptionKey,
+		secretTenantKey:      config.SecretConfig.TenantKey,
 		twoFactorKeys:        twoFactorKeys,
 		identitySchema:       identitySchema,
 		logger:               libLogger,
@@ -504,11 +509,15 @@ func (k *AuthKit) InvitationService() InvitationService {
 // SecretService returns the secret service
 // for managing encrypted secrets (provider API keys, etc.).
 //
-// IMPORTANT: SecretConfig.EncryptionKey must be configured for this service to work.
-// The encryption key must be a base64-encoded 32-byte (256-bit) key. Operations
-// return ErrSecretEncryptionKeyMissing if it is absent or the wrong length.
+// IMPORTANT: SecretConfig.EncryptionKey or SecretConfig.TenantKey must be configured
+// for this service to work. The encryption key must be a base64-encoded 32-byte
+// (256-bit) key, and a tenant's key 32 bytes. Operations return
+// ErrSecretEncryptionKeyMissing if it is absent or the wrong length.
 func (k *AuthKit) SecretService() SecretService {
 	repo := k.repository()
+	if k.secretTenantKey != nil {
+		return service.NewTenantSecretService(&repo, k.secretTenantKey, k.logger)
+	}
 	return service.NewSecretService(&repo, k.secretEncryptionKey, k.logger)
 }
 

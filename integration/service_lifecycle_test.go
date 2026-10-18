@@ -110,6 +110,73 @@ func TestSecretServiceRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSecretServiceTenantKeys covers secrets kept under each tenant's own key: each
+// tenant reads its own back, a secret copied to another tenant's row decrypts under
+// neither, and once a tenant's key is destroyed its secrets are unreadable while the
+// other tenant's are not.
+func TestSecretServiceTenantKeys(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() {
+		applyMigration(t, db, "000001_identity_schema.down.sql")
+		_ = db.Close()
+	}()
+
+	applyMigration(t, db, "000001_identity_schema.down.sql")
+	applyIdentitySchema(t, db)
+
+	repo := repository.New(db, db)
+	admins := map[string]string{
+		"acme.test":   createTenantAndUser(t, ctx, &repo, "acme.test"),
+		"globex.test": createTenantAndUser(t, ctx, &repo, "globex.test"),
+	}
+	keys := map[string][]byte{
+		"acme.test":   []byte("0123456789abcdef0123456789abcdef"),
+		"globex.test": []byte("fedcba9876543210fedcba9876543210"),
+	}
+	destroyed := errors.New("the tenant's key was destroyed")
+	secrets := service.NewTenantSecretService(&repo, func(_ context.Context, tenantID string) ([]byte, error) {
+		if key, ok := keys[tenantID]; ok {
+			return key, nil
+		}
+		return nil, destroyed
+	}, nil)
+
+	for tenantID, adminID := range admins {
+		if _, err := secrets.Save(ctx, model.SaveSecretRequest{
+			TenantID: tenantID, Key: "openai", PlainValue: "sk-" + tenantID + "-abcdef1234567890", CreatedBy: adminID,
+		}); err != nil {
+			t.Fatalf("save %s's secret: %v", tenantID, err)
+		}
+	}
+	for tenantID := range admins {
+		if got, err := secrets.Get(ctx, tenantID, "openai"); err != nil || got != "sk-"+tenantID+"-abcdef1234567890" {
+			t.Fatalf("%s's secret = %q, %v", tenantID, got, err)
+		}
+	}
+
+	// Acme's ciphertext in Globex's row is bound to Acme's row and encrypted under
+	// Acme's key, so it decrypts as neither.
+	if _, err := db.ExecContext(ctx, `
+		UPDATE authkit.provider_keys SET encrypted_key = (
+			SELECT encrypted_key FROM authkit.provider_keys WHERE tenant_id = 'acme.test' AND provider = 'openai'
+		) WHERE tenant_id = 'globex.test' AND provider = 'openai'
+	`); err != nil {
+		t.Fatalf("copy acme.test's ciphertext: %v", err)
+	}
+	if _, err := secrets.Get(ctx, "globex.test", "openai"); !errors.Is(err, model.ErrInternal) {
+		t.Fatalf("expected acme.test's ciphertext not to decrypt as globex.test's, got %v", err)
+	}
+
+	delete(keys, "globex.test")
+	if _, err := secrets.Get(ctx, "globex.test", "openai"); !errors.Is(err, destroyed) {
+		t.Fatalf("expected globex.test's secret to be unreadable without its key, got %v", err)
+	}
+	if got, err := secrets.Get(ctx, "acme.test", "openai"); err != nil || got != "sk-acme.test-abcdef1234567890" {
+		t.Fatalf("acme.test's secret after globex.test's key went = %q, %v", got, err)
+	}
+}
+
 // TestTenantServiceDomainManagement covers tenant CRUD + the allowed-domains gate
 // that governs which emails may be invited/onboarded (ValidateDomainAccess), plus
 // domain-format validation and normalization.

@@ -4,6 +4,7 @@
 package authkit
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -168,10 +169,19 @@ type OTPConfig struct {
 	HMACSecret        string        // Required for OTPService: HMAC-SHA256 hashing of OTP codes in storage
 }
 
-// SecretConfig configures the optional SecretService. EncryptionKey is only
-// required if SecretService is used.
+// SecretConfig configures the optional SecretService, which needs EncryptionKey
+// or TenantKey, not both.
 type SecretConfig struct {
-	EncryptionKey string // Base64-encoded 32-byte AES-256 key for encrypting secrets
+	EncryptionKey string // Base64-encoded 32-byte AES-256 key for encrypting every tenant's secrets
+	// TenantKey, in place of EncryptionKey, gives each tenant a 32-byte AES-256 key of
+	// its own, so a key that leaks exposes only its tenant's secrets, and a tenant's
+	// secrets are unreadable once its key is destroyed. SecretService calls it for every
+	// Save and Get, so keep keys in memory (unwrapping them from a KMS only now and
+	// then). Its error comes back from Save and Get, wrapped; a key that is not 32 bytes
+	// is ErrSecretEncryptionKeyMissing. Secrets are stored as with EncryptionKey, so
+	// returning the old EncryptionKey for each existing tenant keeps what it stored
+	// readable. See docs/secrets.md.
+	TenantKey func(ctx context.Context, tenantID string) ([]byte, error)
 }
 
 // TwoFactorConfig turns on two-factor sign-in with an authenticator app (TOTP)
