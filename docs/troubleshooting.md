@@ -143,7 +143,9 @@ database is unreachable, or the schema is missing); the server log names the cau
 
 ## Secret Encryption Fails
 
-`SecretConfig.EncryptionKey` must be a base64-encoded 32-byte value.
+`SecretConfig.EncryptionKey` must be a base64-encoded 32-byte value. With
+`SecretConfig.TenantKey`, each key it returns must be 32 bytes, and an error it
+returns comes back from `Save` and `Get` wrapped (see [secrets.md](secrets.md)).
 
 One way to generate a key:
 

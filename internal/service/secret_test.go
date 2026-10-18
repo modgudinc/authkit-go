@@ -26,7 +26,7 @@ const (
 func TestSecretServiceEncryptDecryptRoundTrip(t *testing.T) {
 	svc := NewSecretService(nil, []byte(testSecretKey), nil)
 
-	encrypted, err := svc.encrypt("sk-test-secret", testTenant, testKeyName)
+	encrypted, err := svc.encrypt([]byte(testSecretKey), "sk-test-secret", testTenant, testKeyName)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestSecretServiceEncryptDecryptRoundTrip(t *testing.T) {
 		t.Fatalf("encrypted value missing v1 prefix: %q", encrypted)
 	}
 
-	plain, err := svc.decrypt(encrypted, testTenant, testKeyName)
+	plain, err := svc.decrypt([]byte(testSecretKey), encrypted, testTenant, testKeyName)
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
@@ -51,14 +51,14 @@ func TestSecretServiceEncryptDecryptRoundTrip(t *testing.T) {
 func TestSecretServiceDecryptRejectsWrongContext(t *testing.T) {
 	svc := NewSecretService(nil, []byte(testSecretKey), nil)
 
-	encrypted, err := svc.encrypt("sk-test-secret", testTenant, testKeyName)
+	encrypted, err := svc.encrypt([]byte(testSecretKey), "sk-test-secret", testTenant, testKeyName)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	if _, err := svc.decrypt(encrypted, "other.com", testKeyName); err == nil {
+	if _, err := svc.decrypt([]byte(testSecretKey), encrypted, "other.com", testKeyName); err == nil {
 		t.Fatal("expected decrypt under a different tenant to fail")
 	}
-	if _, err := svc.decrypt(encrypted, testTenant, "anthropic"); err == nil {
+	if _, err := svc.decrypt([]byte(testSecretKey), encrypted, testTenant, "anthropic"); err == nil {
 		t.Fatal("expected decrypt under a different key to fail")
 	}
 }
@@ -86,7 +86,7 @@ func TestSecretServiceRejectsPrefixlessCiphertext(t *testing.T) {
 	}
 	prefixless := base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte("legacy-secret"), nil))
 
-	if _, err := svc.decrypt(prefixless, testTenant, testKeyName); err == nil {
+	if _, err := svc.decrypt([]byte(testSecretKey), prefixless, testTenant, testKeyName); err == nil {
 		t.Fatal("expected prefix-less ciphertext to be rejected")
 	}
 }
@@ -95,12 +95,12 @@ func TestSecretServiceDecryptRejectsInvalidCiphertext(t *testing.T) {
 	svc := NewSecretService(nil, []byte(testSecretKey), nil)
 
 	for _, input := range []string{"not-base64", "c2hvcnQ=", "v1:not-base64"} {
-		if _, err := svc.decrypt(input, testTenant, testKeyName); err == nil {
+		if _, err := svc.decrypt([]byte(testSecretKey), input, testTenant, testKeyName); err == nil {
 			t.Fatalf("expected %q to fail decrypt", input)
 		}
 	}
 
-	encrypted, err := svc.encrypt("sk-test-secret", testTenant, testKeyName)
+	encrypted, err := svc.encrypt([]byte(testSecretKey), "sk-test-secret", testTenant, testKeyName)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestSecretServiceDecryptRejectsInvalidCiphertext(t *testing.T) {
 	}
 	raw[len(raw)-1] ^= 0xFF
 	tampered := secretCipherV1Prefix + base64.StdEncoding.EncodeToString(raw)
-	if _, err := svc.decrypt(tampered, testTenant, testKeyName); err == nil {
+	if _, err := svc.decrypt([]byte(testSecretKey), tampered, testTenant, testKeyName); err == nil {
 		t.Fatal("expected tampered ciphertext to fail decrypt")
 	}
 }
@@ -120,10 +120,10 @@ func TestSecretServiceDecryptRejectsInvalidCiphertext(t *testing.T) {
 func TestSecretServiceRejectsInvalidKeyLength(t *testing.T) {
 	svc := NewSecretService(nil, []byte("too-short"), nil)
 
-	if _, err := svc.encrypt("secret", testTenant, testKeyName); err == nil {
+	if _, err := svc.encrypt([]byte("too-short"), "secret", testTenant, testKeyName); err == nil {
 		t.Fatal("expected invalid key length to fail encrypt")
 	}
-	if _, err := svc.decrypt("c2hvcnQ=", testTenant, testKeyName); err == nil {
+	if _, err := svc.decrypt([]byte("too-short"), "v1:c2hvcnQ=", testTenant, testKeyName); err == nil {
 		t.Fatal("expected invalid key length to fail decrypt")
 	}
 }
@@ -142,6 +142,58 @@ func TestSecretServiceMissingKeyReturnsSentinel(t *testing.T) {
 
 	_, getErr := svc.Get(ctx, testTenant, testKeyName)
 	if !errors.Is(getErr, model.ErrSecretEncryptionKeyMissing) {
+		t.Fatalf("Get: expected ErrSecretEncryptionKeyMissing, got %v", getErr)
+	}
+}
+
+// TestSecretServiceTenantKeys verifies that with a key per tenant each tenant's
+// secrets are encrypted under its own key: one encrypted for a tenant does not
+// decrypt under another tenant's key, even with the AAD that tenant's row would
+// give it, and a tenant whose key is gone cannot read or save secrets.
+func TestSecretServiceTenantKeys(t *testing.T) {
+	ctx := context.Background()
+	keys := map[string][]byte{
+		"acme.com":   []byte("0123456789abcdef0123456789abcdef"),
+		"globex.com": []byte("fedcba9876543210fedcba9876543210"),
+	}
+	gone := errors.New("no key for this tenant")
+	svc := NewTenantSecretService(nil, func(_ context.Context, tenantID string) ([]byte, error) {
+		if key, ok := keys[tenantID]; ok {
+			return key, nil
+		}
+		return nil, gone
+	}, nil)
+
+	acme, err := svc.key(ctx, "acme.com")
+	if err != nil || string(acme) != string(keys["acme.com"]) {
+		t.Fatalf("acme.com's key: %q, %v", acme, err)
+	}
+	encrypted, err := svc.encrypt(acme, "sk-test-secret", "acme.com", testKeyName)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	if plain, err := svc.decrypt(acme, encrypted, "acme.com", testKeyName); err != nil || plain != "sk-test-secret" {
+		t.Fatalf("decrypt under acme.com's key: %q, %v", plain, err)
+	}
+	globex, err := svc.key(ctx, "globex.com")
+	if err != nil {
+		t.Fatalf("globex.com's key: %v", err)
+	}
+	if _, err := svc.decrypt(globex, encrypted, "acme.com", testKeyName); err == nil {
+		t.Fatal("expected a secret encrypted under acme.com's key not to decrypt under globex.com's")
+	}
+
+	// A tenant with no key gets the provider's error back from Save and Get, before
+	// the repository is reached, and a key that is not 32 bytes is no key.
+	_, saveErr := svc.Save(ctx, model.SaveSecretRequest{TenantID: "initech.com", Key: testKeyName, PlainValue: "v"})
+	if !errors.Is(saveErr, gone) {
+		t.Fatalf("Save: expected the tenant key's error, got %v", saveErr)
+	}
+	if _, getErr := svc.Get(ctx, "initech.com", testKeyName); !errors.Is(getErr, gone) {
+		t.Fatalf("Get: expected the tenant key's error, got %v", getErr)
+	}
+	keys["initech.com"] = []byte("too-short")
+	if _, getErr := svc.Get(ctx, "initech.com", testKeyName); !errors.Is(getErr, model.ErrSecretEncryptionKeyMissing) {
 		t.Fatalf("Get: expected ErrSecretEncryptionKeyMissing, got %v", getErr)
 	}
 }
