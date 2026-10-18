@@ -1,4 +1,4 @@
-# authkit-go v0.22.0
+# authkit-go v0.21.1
 
 A key of its own for each tenant's secrets. `SecretService` can now encrypt each
 tenant's secrets under that tenant's own key instead of one key for everyone, so a
@@ -7,12 +7,13 @@ unreadable wherever they were copied. The release also carries dependency and CI
 updates.
 
 ```bash
-go get github.com/modgudinc/authkit-go@v0.22.0
+go get github.com/modgudinc/authkit-go@v0.21.1
 ```
 
 Nothing changes until you set the new option: an application that keeps
 `SecretConfig.EncryptionKey` behaves exactly as on v0.21.0, and no migration is
-needed.
+needed. **Source compatibility:** `SecretConfig` gains a field, so a positional
+`SecretConfig` literal needs keyed fields, despite the patch version.
 
 ## Highlights
 
@@ -26,7 +27,7 @@ needed.
   random data key when you add the tenant, store it wrapped by a key-encryption key
   that never leaves a KMS (with the tenant id as additional data), and unwrap it the
   first time it is needed. Guide:
-  [secrets.md](https://github.com/modgudinc/authkit-go/blob/v0.22.0/docs/secrets.md).
+  [secrets.md](https://github.com/modgudinc/authkit-go/blob/v0.21.1/docs/secrets.md).
 - **Same stored format**: values are stored as with `EncryptionKey`, still bound to
   their tenant and key name, so moving to a key per tenant needs no data migration.
 
@@ -42,22 +43,19 @@ or give each tenant a key-encryption key of its own and destroy that.
 
 Security reports now go only through GitHub Private Vulnerability Reporting (the
 **Security** tab, "Report a vulnerability"); the security email address is retired.
-As before, only the latest minor release line receives security fixes, which is now
-0.22.
+As before, only the latest minor release line, 0.21, receives security fixes.
 
 ## Upgrade notes
 
 1. Upgrade the library. Go 1.26 or newer is still required, and there is no new
    migration.
-2. If you build `SecretConfig` with a positional literal, switch it to keyed fields;
-   it gains `TenantKey`.
-3. To move to a key per tenant, set `TenantKey` and drop `EncryptionKey`. Have it
+2. To move to a key per tenant, set `TenantKey` and drop `EncryptionKey`. Have it
    return the old `EncryptionKey` (decoded) for every tenant that already has
    secrets, so they stay readable. To give such a tenant a key of its own, `Get` each
    of its secrets, switch its key, and `Save` them again; the same steps rotate one
    tenant's key.
 
-The [CHANGELOG](https://github.com/modgudinc/authkit-go/blob/v0.22.0/CHANGELOG.md#0220---2026-10-18)
+The [CHANGELOG](https://github.com/modgudinc/authkit-go/blob/v0.21.1/CHANGELOG.md#0211---2026-10-18)
 lists every change.
 
 ## Dependencies and CI
@@ -70,4 +68,4 @@ lists every change.
 - The repository has issue and pull request templates, Dependabot updates, an
   OpenSSF Scorecard workflow and a code of conduct.
 
-[Full changes since v0.21.0](https://github.com/modgudinc/authkit-go/compare/v0.21.0...v0.22.0).
+[Full changes since v0.21.0](https://github.com/modgudinc/authkit-go/compare/v0.21.0...v0.21.1).

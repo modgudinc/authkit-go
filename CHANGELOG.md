@@ -8,7 +8,7 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## [Unreleased]
 
-## [0.22.0] - 2026-10-18
+## [0.21.1] - 2026-10-18
 
 ### Added
 
@@ -31,7 +31,7 @@ While the library is pre-1.0 (`0.x`), minor releases may contain breaking change
 - The repository has issue and pull request templates, Dependabot updates, an
   OpenSSF Scorecard workflow and a code of conduct.
 
-### Compatibility
+### Compatibility (source-breaking for positional struct literals)
 
 - Existing configurations are unchanged: `EncryptionKey` works as before. `SecretConfig`
   gains a field, so a positional `SecretConfig` literal needs keyed fields.
@@ -420,8 +420,8 @@ schema was edited in place — there is **no data migration**.
 - `ErrNoActiveMembership` is an authorization outcome and never revokes the identity
   session (the user keeps access to their other workspaces).
 
-[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.22.0...HEAD
-[0.22.0]: https://github.com/modgudinc/authkit-go/releases/tag/v0.22.0
+[Unreleased]: https://github.com/modgudinc/authkit-go/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/modgudinc/authkit-go/releases/tag/v0.21.1
 [0.21.0]: https://github.com/modgudinc/authkit-go/releases/tag/v0.21.0
 [0.20.2]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.2
 [0.20.1]: https://github.com/modgudinc/authkit-go/releases/tag/v0.20.1
