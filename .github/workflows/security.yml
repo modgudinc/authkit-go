@@ -46,7 +46,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run gosec
-        uses: securego/gosec@deb54465fea23d19a77f037e11e6589021f8501d # v2.29.0
+        uses: securego/gosec@5eb1d104ef85ff2c905c877eb600e8c1dee33a22 # v2.30.0
         with:
           # Explicit thresholds (report everything) so a future change to the action's
           # defaults can't silently relax the gate; emit SARIF for triage. gosec still
@@ -67,7 +67,7 @@ jobs:
         # Advanced Security not enabled) must not red the gosec job. The SARIF is still
         # kept as a build artifact above.
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: gosec-results.sarif
           category: gosec
